@@ -119,7 +119,7 @@ bash scripts/check.sh
 ## 14. Risks and unresolved questions
 
 - D-20: member and workspace ID scheme must match P2-03 seed rows and ledger `requester_member_id`.
-- A cookie with `SameSite` and cross-origin web hosting (D-07) may need `SameSite=None; Secure`. Coordinate with P5-03.
+- Web hosting (ADR-030): the web app is on Vercel and reaches the API through a same-origin `/api` rewrite, so `SameSite=Lax` works. Do not switch to `SameSite=None`. P5-03 verifies the cookie on the deployed URLs.
 - Passcode brute force on a public demo. Document the limitation; consider a small delay.
 
 ## 15. Handoff deliverables for dependent agents

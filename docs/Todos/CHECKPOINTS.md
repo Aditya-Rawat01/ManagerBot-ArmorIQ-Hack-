@@ -54,7 +54,7 @@ passes.
 
 4. **The checkpoint's own list below.** Every listed test file must **exist** (its task
    creates it) and pass. Live items need the real environment: `.env` with real values,
-   the Neon database, the ArmorIQ organization, and the Render deployment.
+   the Neon database, the ArmorIQ organization, and the Render and Vercel deployments.
 5. **Record** on the checkpoint issue:
    - the tested commit SHA;
    - each command and its result line;
@@ -257,6 +257,7 @@ python scripts/run_injection_trials.py --compromised 10 --natural 10      # SC-0
 python scripts/verify_db_grants.py
 python scripts/check_setup.py                                             # against production
 curl -fsS https://<api-host>/health && curl -fsS https://<toolserver-host>/health
+curl -fsS https://<web-host>/api/v1/health                                # through the Vercel rewrite (ADR-030)
 git grep -nE "tamper-proof|zero hallucination|perfect" -- README.md docs/DEMO.md || echo "no forbidden claims"
 ```
 

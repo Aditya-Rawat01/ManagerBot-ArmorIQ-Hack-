@@ -40,17 +40,18 @@ Outcome:
 ## 4. Owner and proposed contributors
 
 - Owner: `parthgoyal26-03-2005`.
-- Contributors: `samarth-chawla` (ArmorIQ registration and policy re-apply), `Aditya-Rawat01` (migrations, seed), `VTCodeCraft` (Slack app).
+- Contributors: `samarth-chawla` (ArmorIQ registration and policy re-apply), `Aditya-Rawat01` (Render and Vercel accounts, migrations, seed), `VTCodeCraft` (Slack app).
 
 ## 5. Prerequisites and dependencies
 
 - Hard: P1-05 (procedure), P5-01 (verified build SHA).
-- Decisions: D-07 (hosting), **D-16** (reset scope) needed to finish, D-06 (credential path from E1), D-27 (Socket Mode placement).
+- Decisions: D-07 (hosting: Render for the API and tool server, ADR-016; Vercel for the web app, ADR-030), **D-16** (reset scope) needed to finish, D-06 (credential path from E1), D-27 (Socket Mode placement).
 - Blocks: P5-04.
 
 ## 6. Exact files/modules this task owns
 
-- `deploy/README.md` (new): Render service settings for the API (`deploy/api/Dockerfile`, from P1-11), the tool server (`deploy/toolserver/Dockerfile`, from P1-05) and the web static site (ADR-016, ADR-029). Changes to those Dockerfiles go through their owners.
+- `deploy/README.md` (new): Render service settings for the API (`deploy/api/Dockerfile`, from P1-11) and the tool server (`deploy/toolserver/Dockerfile`, from P1-05), and the Vercel project settings for the web app (ADR-016, ADR-029, ADR-030). Changes to those Dockerfiles go through their owners.
+- `apps/web/vercel.json` (new): rewrite `/api/:path*` to the Render API host (ADR-030). No secrets.
 - `.env.example` (steward: this owner): comments for the calibrated `MIN_SCORE`, the final credential path, and production toggles (no secrets)
 - `.github/workflows/ci.yml`, `scripts/check.sh` (steward: this owner): only release-required changes (for example excluding `tests/e2e` from default runs if needed)
 - Reset procedure documentation: `deploy/RESET.md` (new) per D-16
@@ -71,12 +72,12 @@ Outcome:
    - enough memory for FastEmbed;
    - `MIN_SCORE` from E17;
    - the credential path from E1.
-2. Deploy the API: all secrets; `TOKEN_VALIDITY_S` / `APPROVAL_TIMEOUT_MS` as verified by E4; `CORS_ALLOWED_ORIGINS` = the web origin; Socket Mode running per D-27; interactive API docs disabled (the scaffold disables them only when `APP_ENV=production`; see §14).
-3. Deploy the web app with `VITE_*` pointing to the API. Cookie settings compatible with the origins (`SameSite`/`Secure`).
+2. Deploy the API: all secrets; `TOKEN_VALIDITY_S` / `APPROVAL_TIMEOUT_MS` as verified by E4; `CORS_ALLOWED_ORIGINS` = the Vercel production origin (plus local development origins); Socket Mode running per D-27; interactive API docs disabled (the scaffold disables them only when `APP_ENV=production`; see §14).
+3. Deploy the web app on Vercel (ADR-030): Root Directory `apps/web`, `VITE_API_BASE_URL=/`, and `apps/web/vercel.json` rewriting `/api/:path*` to the Render API. On the Vercel URL, verify that sign-in sets the session cookie on the Vercel host (`HttpOnly`, `Secure`, `SameSite=Lax`), and that reload persistence and sign-out work in Chrome and in Safari (or another WebKit browser).
 4. Run migrations and the seed with the migration role from an operator machine. Never from the runtime.
 5. In ArmorIQ, ensure the endpoints point to the production URLs and the policy is active (with `samarth-chawla`). Run `scripts/check_setup.py`.
 6. Reset (D-16): document and implement the decided scope. Respect PRD §8.1 (no runtime use of the migration role).
-7. Smoke tests: health on all three; a Slack mention; web sign-in; one team-tier question; audit and ledger correlation.
+7. Smoke tests: health on all three (the web app's `/api/v1/health` through the rewrite); a Slack mention; web sign-in; one team-tier question; audit and ledger correlation.
 8. Record the URLs (no secrets) for P5-04.
 
 ## 10. Acceptance criteria
@@ -94,6 +95,7 @@ Outcome:
 
 ```bash
 curl -fsS https://<api-host>/health && curl -fsS https://<toolserver-host>/health
+curl -fsS https://<web-host>/api/v1/health   # through the Vercel rewrite
 python scripts/check_setup.py
 bash scripts/check.sh
 ```
@@ -104,7 +106,7 @@ bash scripts/check.sh
 
 ## 14. Risks and unresolved questions
 
-- D-07, D-16, D-27. Neon cold starts during the demo (warm up before recording).
+- D-16, D-27. Vercel rewrite behavior (cookie pass-through, proxy timeouts) is verified in step 3, not assumed. Neon cold starts during the demo (warm up before recording).
 - PRD §0.9 rules out a "production deployment", while PRD §2 requires a public demo. The public demo is a synthetic-data demo environment. If `APP_ENV=production` is used, it is only a configuration flag (for example to disable API docs); record this in the deploy README. It is not a production deployment.
 
 ## 15. Handoff deliverables for dependent agents

@@ -69,6 +69,7 @@ All under `apps/web/` (steward: this owner):
 4. `requests.ts`: `submitRequest({message, confirmationToken?, simulateHijackedModel?})` and `getRequestStatus(id)`. **No persona or identity parameter exists in these functions.**
 5. Global `401` handling → back to sign-in.
 6. Keep the existing health indicator.
+7. Same-origin deployment (ADR-030): `VITE_API_BASE_URL=/` must make the client call relative `/api/v1/...` paths. Keep `credentials: "include"` for local development, where the API runs on another port.
 
 ## 10. Acceptance criteria
 
@@ -82,6 +83,7 @@ All under `apps/web/` (steward: this owner):
 - `session.test.ts`: sign-in, `401`, `503`, sign-out.
 - `SignInPage.test.tsx`: form behavior and error display.
 - A payload test that `submitRequest` sends only the allowed fields.
+- A config test that `VITE_API_BASE_URL=/` produces relative `/api/v1/...` request URLs (ADR-030).
 
 ## 12. Commands for verification
 
@@ -96,7 +98,7 @@ grep -RIEo "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" apps/web/dist || ech
 
 ## 14. Risks and unresolved questions
 
-- Cross-origin cookies depend on hosting (D-07) and `SameSite`. Coordinate with P1-03 and P5-03.
+- Hosting (ADR-030): Vercel proxies `/api/*` to the Render API, so the session cookie is first-party. P5-03 verifies sign-in on the deployed URL.
 
 ## 15. Handoff deliverables for dependent agents
 

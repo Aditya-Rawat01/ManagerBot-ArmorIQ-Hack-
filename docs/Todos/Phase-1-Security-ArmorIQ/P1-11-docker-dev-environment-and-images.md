@@ -48,7 +48,7 @@ Docker is **supporting infrastructure**. Neither PRD v2 nor Architecture v2.1 re
 
 - `docker-compose.yml` (new, repository root): services `api`, `toolserver`, `web`, `db`, `migrate`, `dev`
 - `deploy/api/Dockerfile` (new)
-- `deploy/web/Dockerfile` (new; local development only; Render serves the web app as a static site)
+- `deploy/web/Dockerfile` (new; local development only; Vercel builds and hosts the deployed web app, ADR-030)
 - `deploy/dev/Dockerfile` (new; Python 3.12 + Node 22 tools image for `scripts/check.sh`)
 - `.dockerignore` (new, repository root)
 - `docs/DOCKER.md` (new): how to run, environment, security rules, troubleshooting

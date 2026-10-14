@@ -228,9 +228,9 @@ before committing, and the exclusion prevents a repeat.
 
 ---
 
-ADR-015 to ADR-029 record the planning decisions confirmed by the
+ADR-015 to ADR-030 record the planning decisions confirmed by the
 project owner on 14 Oct 2026 ("accept all recommendations"; hosting =
-Render). Each maps to a `D-xx` entry in
+Render, with the web app on Vercel per ADR-030). Each maps to a `D-xx` entry in
 `docs/Todos/context/DECISIONS_AND_OPEN_QUESTIONS.md`.
 
 ## ADR-015 — Parallel work before the build gate (D-19)
@@ -246,6 +246,8 @@ Render). Each maps to a `D-xx` entry in
 ## ADR-016 — Hosting platform: Render (D-07)
 
 **Decision.** Render hosts the tool server (P1-05, P5-03), the API, and the web app.
+
+**Amended by ADR-030:** the web app is hosted on Vercel. Render hosts only the API and the tool server.
 
 **Requirements to verify when provisioning** (record the instance type and limits in `deploy/`):
 - public HTTPS;
@@ -383,7 +385,7 @@ The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
 **Images and services:**
 - `deploy/api/Dockerfile` (P1-11) and `deploy/toolserver/Dockerfile` (P1-05): `python:3.12-slim`, non-root.
   - The API image installs only `.[api]`; the tool-server image installs only `.[toolserver]` (the same split as CI).
-  - Render runs both as Docker web services. The web app stays a Render static site.
+  - Render runs both as Docker web services. The deployed web app is not a Docker image; Vercel builds and hosts it (ADR-030).
 - `docker-compose.yml` (P1-11) runs `api`, `toolserver`, `web` (Vite dev server) and `db`, a local `pgvector/pgvector` Postgres, for development only. Production uses Neon.
 - Profile-gated one-off services:
   - `migrate`: the only container given `DATABASE_URL_MIGRATE` (PRD §8.1);
@@ -397,6 +399,33 @@ The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
 **Why.** One command to run everything, pinned Python and Node versions for every teammate, a free local database for the DB-backed tests, and the same images locally and on Render.
 
 **Not covered.** ArmorIQ still needs the public HTTPS tool server on Render for E1–E5. Real secrets are shared privately. Grant checks must also pass on Neon.
+
+## ADR-030 — Web app hosting: Vercel (amends ADR-016, ADR-029)
+
+**Decision.** Confirmed by the project owner on 14 Oct 2026. The web app (`apps/web`) is deployed on Vercel. Render still hosts the API and the tool server (ADR-016, ADR-029). The database stays on Neon.
+
+**Vercel project** (P5-03 records the settings in `deploy/README.md`):
+- Git integration with this repository; the account is held by the project host (`Aditya-Rawat01`).
+- Root Directory `apps/web`; framework preset Vite; install `npm ci`; build `npm run build`; output `dist`; Node 22 (from `engines` in `apps/web/package.json`).
+
+**Same-origin API through a Vercel rewrite:**
+- `*.vercel.app` and `*.onrender.com` are different sites. A session cookie set by the Render API directly would be a third-party cookie, which Safari blocks by default and other browsers may block or partition.
+- So `apps/web/vercel.json` (P5-03) rewrites `/api/:path*` to `https://<render-api-host>/api/:path*`. The browser talks only to the Vercel origin, the cookie stays first-party, and P1-03's `HttpOnly; Secure; SameSite=Lax` cookie works unchanged. Do not switch to `SameSite=None`.
+- Vercel builds set `VITE_API_BASE_URL=/`, so the client calls relative `/api/v1/...` paths. Local development keeps `http://localhost:8000` with CORS.
+- `CORS_ALLOWED_ORIGINS` on the Render API lists the Vercel production origin plus local development origins; never `*`.
+- Only `/api/*` is proxied. Health checks for the API and the tool server go to their Render hosts directly.
+- If the app gains client-side routes, `vercel.json` adds a fallback to `/index.html` after the `/api` rule.
+
+**Rules:**
+- Vercel holds only `VITE_*` build variables. They are public in the bundle, so no secrets, emails or tokens. Every secret stays in Render's environment.
+- Calls through the rewrite stay short. Requests already return `202` and are polled (D-21); no streaming or websockets through the rewrite.
+- The Render API remains reachable directly and still enforces the session on every protected route.
+
+**Verify in P5-03 (not assumed):** on the Vercel URL, sign-in sets the cookie on the Vercel host, and reload persistence and sign-out work in Chrome and in Safari (or another WebKit browser). `Set-Cookie` and `Cookie` pass through the rewrite unchanged.
+
+**Why.** Owner choice: zero-configuration Vite builds and per-PR preview deployments. The rewrite avoids third-party cookies without buying a custom domain.
+
+**Not chosen.** Calling the Render API cross-site with `SameSite=None; Secure` (breaks sign-in in Safari), or one custom domain shared by both hosts (needs a domain and DNS setup).
 
 ---
 

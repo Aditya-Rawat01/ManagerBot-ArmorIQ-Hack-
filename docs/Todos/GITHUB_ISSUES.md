@@ -2018,7 +2018,7 @@ Outcome:
 
 ### Prerequisites
 - Hard: P1-05 (procedure), P5-01 (verified build SHA).
-- Decisions: D-07 (hosting), **D-16** (reset scope) needed to finish, D-06 (credential path from E1), D-27 (Socket Mode placement).
+- Decisions: D-07 (hosting: Render for the API and tool server, ADR-016; Vercel for the web app, ADR-030), **D-16** (reset scope) needed to finish, D-06 (credential path from E1), D-27 (Socket Mode placement).
 - Blocks: P5-04.
 
 ### Acceptance criteria
@@ -2033,6 +2033,7 @@ Outcome:
 
 ```bash
 curl -fsS https://<api-host>/health && curl -fsS https://<toolserver-host>/health
+curl -fsS https://<web-host>/api/v1/health   # through the Vercel rewrite
 python scripts/check_setup.py
 bash scripts/check.sh
 ```

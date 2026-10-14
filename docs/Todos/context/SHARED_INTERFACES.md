@@ -44,7 +44,7 @@ steward reviews. Generated files are committed in the same PR (ADR-005).
 | Health | **FIXED** | `GET /health`, `GET /api/v1/health` → `HealthResponse` |
 | Base path | **FIXED** | `/api/v1` (`apps/api/routes/router.py`) |
 | Auth on web routes | **PROPOSED** (P1-03) | Signed HTTP-only session cookie (PRD §4.1). Missing or invalid session → `401` with `ErrorResponse` code `unauthenticated`. Manager routes for non-Maya → `403` code `forbidden` |
-| CORS | **FIXED** | Explicit origins only (`CORS_ALLOWED_ORIGINS`); credentials are required for the cookie, so the cookie flow needs `allow_credentials` (P1-03 confirms) |
+| CORS | **FIXED** | Explicit origins only (`CORS_ALLOWED_ORIGINS`); credentials are required for the cookie, so the cookie flow needs `allow_credentials` (P1-03 confirms). The deployed web app is same-origin through the Vercel `/api` rewrite (ADR-030); CORS matters mainly for local development |
 
 ### 1.1 Web endpoints
 

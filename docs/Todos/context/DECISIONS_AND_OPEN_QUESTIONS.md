@@ -286,6 +286,7 @@ begin, cannot be accepted), or `defer` (can be decided later).
 ### D-07 — Hosting platform(s)
 
 **RESOLVED 14 Oct 2026 → ADR-016:** Render (requirements to verify are listed in the ADR).
+**AMENDED 14 Oct 2026 → ADR-030:** the web app is hosted on Vercel and reaches the Render API through a same-origin `/api` rewrite. Render hosts the API and the tool server.
 
 - Requirements from the docs:
   - tool server on public HTTPS with about 1 GB RAM for FastEmbed (PRD §3,
