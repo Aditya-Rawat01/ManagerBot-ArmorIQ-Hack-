@@ -90,6 +90,12 @@ python -m venv .venv
 A deployment installs only what it runs: `pip install ".[api]"` for the API,
 `pip install ".[toolserver]"` for the MCP tool server.
 
+### Run with Docker
+
+Prefer containers over a hand-built toolchain: [`docs/DOCKER.md`](docs/DOCKER.md)
+starts the API, tool server, web dev server, and a local pgvector Postgres
+with `docker compose up --build -d` — no local Python/Node/Postgres required.
+
 ## Run
 
 ```bash

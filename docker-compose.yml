@@ -1,0 +1,166 @@
+# ProxyLead local development environment (P1-11, ADR-029).
+#
+# One-command startup from the repository root:
+#   cp .env.example .env
+#   docker compose up --build -d
+#
+# Services: api (:8000), toolserver (:8100), web (:5173), db (:5432, local
+# pgvector Postgres). `migrate` and `dev` are profile-gated one-shots:
+#   docker compose run --rm migrate   (pending P2-01's scripts/migrate.py)
+#   docker compose run --rm dev bash scripts/check.sh
+#
+# SECURITY — least privilege (PRD §8.1, ARCHITECTURE_RULES.md R-50):
+# every service gets an EXPLICIT environment mapping below. A wholesale
+# `env_file: .env` would inject every variable (including other services'
+# database credentials) into every container, so it is deliberately NOT
+# used here even though the P1-11 task file §9 sketches it — the task's own
+# acceptance criteria (§10: MIGRATE visible only on `migrate`, no DSN
+# cross-over) and §9.6 require these explicit mappings. The deviation is
+# recorded in docs/DOCKER.md.
+#
+#   api        → DATABASE_URL_BACKEND only (never TOOLSERVER / MIGRATE)
+#   toolserver → DATABASE_URL_TOOLSERVER only (never BACKEND / MIGRATE)
+#   migrate    → DATABASE_URL_MIGRATE only (nothing else)
+#   web        → VITE_* only (public bundle values, never secrets)
+#   db / dev   → local-only credentials / APP_ENV=test (mirrors CI)
+#
+# No secret is baked into any image: everything arrives at runtime from the
+# (untracked) root .env. Never commit .env.
+
+name: proxylead
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxylead}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proxylead-local-only}
+      POSTGRES_DB: ${POSTGRES_DB:-proxylead}
+    ports:
+      # Localhost-only: the database is a dev dependency, not a public service.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-proxylead} -d ${POSTGRES_DB:-proxylead}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/api/Dockerfile
+    image: proxylead-api:dev
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: 8000
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      CTX_SECRET: ${CTX_SECRET:-}
+      DEMO_PASSCODE: ${DEMO_PASSCODE:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # The API's own role DSN only. TOOLSERVER / MIGRATE are never mapped here.
+      DATABASE_URL_BACKEND: ${DATABASE_URL_BACKEND:-postgresql://${POSTGRES_USER:-proxylead}:${POSTGRES_PASSWORD:-proxylead-local-only}@db:5432/${POSTGRES_DB:-proxylead}}
+    volumes:
+      # Live source for --reload. .venv / node_modules live outside these
+      # trees, so no anonymous volumes are needed here. Writes are suppressed
+      # by PYTHONDONTWRITEBYTECODE in the image.
+      - ./apps:/app/apps
+      - ./services:/app/services
+    command: uvicorn apps.api.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+
+  toolserver:
+    build:
+      context: .
+      dockerfile: deploy/toolserver/Dockerfile
+    image: proxylead-toolserver:dev
+    ports:
+      - "8100:8100"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: 8100
+      TOOLSERVER_BEARER_MEMORY: ${TOOLSERVER_BEARER_MEMORY:-}
+      TOOLSERVER_BEARER_WORKSPACE: ${TOOLSERVER_BEARER_WORKSPACE:-}
+      # Compose service name first (container-to-container), then host access.
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-toolserver:8100,localhost:8100,127.0.0.1:8100}
+      # true locally only: the scaffold has no product tools yet, so the
+      # ping tools are the only way to exercise the MCP path. Render keeps
+      # this false (deploy/toolserver/README.md).
+      MCP_ENABLE_DIAGNOSTIC_TOOLS: ${MCP_ENABLE_DIAGNOSTIC_TOOLS:-true}
+      CTX_SECRET: ${CTX_SECRET:-}
+      # The tool server's own role DSN only. BACKEND / MIGRATE never mapped.
+      DATABASE_URL_TOOLSERVER: ${DATABASE_URL_TOOLSERVER:-postgresql://${POSTGRES_USER:-proxylead}:${POSTGRES_PASSWORD:-proxylead-local-only}@db:5432/${POSTGRES_DB:-proxylead}}
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web/Dockerfile
+    image: proxylead-web:dev
+    ports:
+      - "5173:5173"
+    environment:
+      # Read by the Vite dev server at startup (not a build ARG): the browser
+      # calls the API directly, so this is the host-visible URL. Public by
+      # design — never a secret (apps/web/.env.example).
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      # File-watching through the bind mount needs polling on Windows Docker
+      # Desktop; harmless elsewhere (see docs/DOCKER.md troubleshooting).
+      CHOKIDAR_USEPOLLING: "1"
+    volumes:
+      - ./apps/web:/app/apps/web
+      # Anonymous volume: keeps the image's clean `npm ci` tree. Without it
+      # the bind mount would shadow node_modules with the host's (absent on
+      # a clean clone) and the dev server would not start.
+      - /app/apps/web/node_modules
+    depends_on:
+      - api
+
+  migrate:
+    # Profile-gated: `up` never starts it. Runs the P2-01 migration script
+    # with the migration DSN — the ONLY service that receives it (PRD §8.1:
+    # the migration role is never available to runtime processes).
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: deploy/toolserver/Dockerfile
+    image: proxylead-toolserver:dev
+    environment:
+      DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:-}
+    command: python scripts/migrate.py
+    depends_on:
+      db:
+        condition: service_healthy
+
+  dev:
+    # Profile-gated checks runner: pinned Python 3.12 + Node 22.
+    #   docker compose run --rm dev bash scripts/check.sh
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: deploy/dev/Dockerfile
+    image: proxylead-dev:dev
+    environment:
+      # Mirrors CI (.github/workflows/ci.yml sets APP_ENV=test).
+      APP_ENV: test
+    volumes:
+      - .:/app
+      # Anonymous volumes: preserve the image's venv + node_modules over the
+      # bind mount, so a clean clone (no host .venv / node_modules) passes.
+      - /app/.venv
+      - /app/apps/web/node_modules
+
+volumes:
+  pgdata:
