@@ -123,6 +123,21 @@ ARMORIQ_DECISION_SOURCES: frozenset[DecisionSource] = frozenset(
 )
 
 
+ARMORIQ_POLICY_SOURCES: frozenset[DecisionSource] = frozenset(
+    {
+        DecisionSource.ARMORIQ_ISSUANCE,
+        DecisionSource.ARMORIQ_POLICY_DECISION,
+        DecisionSource.ARMORIQ_PROXY_DECISION,
+    }
+)
+"""Sources that may back an "ArmorIQ allowed, blocked or held" claim (ADR-026).
+
+Deliberately excludes `ARMORIQ_SDK_PLAN_CHECK` (client-side only),
+`TOOL_SERVER_RULE`, `APPLICATION_RULE`, and `UNKNOWN`: those layers fail closed
+but never prove an ArmorIQ policy decision.
+"""
+
+
 class ApprovalState(StrEnum):
     """HOLD lifecycle state.
 

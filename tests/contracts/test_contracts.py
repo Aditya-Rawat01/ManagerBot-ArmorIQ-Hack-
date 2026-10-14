@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from services.contracts import (
+    ARMORIQ_POLICY_SOURCES,
     TOOL_CATALOG,
     AppRole,
     ApprovalState,
@@ -137,6 +138,20 @@ def test_sdk_plan_check_can_only_block() -> None:
 def test_only_armoriq_can_hold(source: DecisionSource) -> None:
     with pytest.raises(ValidationError, match="only ArmorIQ can place a HOLD"):
         ArmorIQDecision(outcome=DecisionOutcome.HOLD, source=source, decided_at=NOW)
+
+
+def test_armoriq_policy_sources_allowlist() -> None:
+    # ADR-026: only these sources may back an "ArmorIQ allowed, blocked or
+    # held" claim. Added in P1-02; owned by the contract steward.
+    assert {source.value for source in ARMORIQ_POLICY_SOURCES} == {
+        "armoriq_issuance",
+        "armoriq_policy_decision",
+        "armoriq_proxy_decision",
+    }
+    assert DecisionSource.ARMORIQ_SDK_PLAN_CHECK not in ARMORIQ_POLICY_SOURCES
+    assert DecisionSource.TOOL_SERVER_RULE not in ARMORIQ_POLICY_SOURCES
+    assert DecisionSource.APPLICATION_RULE not in ARMORIQ_POLICY_SOURCES
+    assert DecisionSource.UNKNOWN not in ARMORIQ_POLICY_SOURCES
 
 
 def test_approved_hold_requires_delegation_and_resolution_time() -> None:

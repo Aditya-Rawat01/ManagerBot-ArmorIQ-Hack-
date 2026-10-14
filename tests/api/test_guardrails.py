@@ -9,7 +9,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # All Python source of the API and every shared service (apps/web is not Python).
-PYTHON_SOURCE_DIRS = (REPO_ROOT / "apps" / "api", REPO_ROOT / "services")
+# ADR-018: probes and setup scripts must call ArmorIQGateway, never armoriq_sdk,
+# so scripts/ is scanned too.
+PYTHON_SOURCE_DIRS = (
+    REPO_ROOT / "apps" / "api",
+    REPO_ROOT / "services",
+    REPO_ROOT / "scripts",
+)
 ARMORIQ_GATEWAY = REPO_ROOT / "services" / "authorization" / "armoriq_gateway.py"
 
 

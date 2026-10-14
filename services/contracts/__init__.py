@@ -6,6 +6,7 @@ generated JSON Schema (services/contracts/schemas/) as TypeScript types.
 
 from .enums import (
     ARMORIQ_DECISION_SOURCES,
+    ARMORIQ_POLICY_SOURCES,
     ELEVATED_TIERS,
     AppRole,
     ApprovalState,
@@ -45,6 +46,7 @@ CONTRACTS_VERSION = "0.1.0"
 
 __all__ = [
     "ARMORIQ_DECISION_SOURCES",
+    "ARMORIQ_POLICY_SOURCES",
     "CONTRACTS_VERSION",
     "ELEVATED_TIERS",
     "FORBIDDEN_ARGUMENT_KEYS",
