@@ -34,7 +34,7 @@ Rules that hold in every phase (PRD v2 §0, Architecture v2.1 §0):
 
 - [ ] No secrets, tokens, real emails, or `.env` files in the diff.
 - [ ] Shared shape changed? Updated `contracts/`, regenerated JSON Schema and TS types.
-- [ ] No `armoriq_sdk` import outside `backend/app/integrations/armoriq/gateway.py`.
+- [ ] No `armoriq_sdk` import outside `services/authorization/armoriq_gateway.py`.
 - [ ] Protected data is read only through the MCP tool server.
 - [ ] UI shows only persisted, real outcomes; no simulated approval.
 - [ ] Security claim added to docs? It cites a passing test or experiment.
@@ -50,27 +50,24 @@ bash scripts/check.sh            # everything below in one go (Git Bash / macOS 
 Or individually:
 
 ```bash
-# contracts
-backend/.venv/Scripts/python -m proxylead_contracts.schema_export --check   # Windows path
-(cd contracts/python && ../../backend/.venv/Scripts/python -m pytest)
+# Python (repository root, root .venv activated)
+ruff check . && ruff format --check .
+python -m services.contracts.schema_export --check
+python -m pytest                      # tests/contracts, tests/api, tests/toolserver
+python -m pytest tests/api            # one component at a time
 
-# backend
-cd backend && .venv/Scripts/ruff check . && .venv/Scripts/ruff format --check . && .venv/Scripts/python -m pytest
-
-# mcp-server
-cd mcp-server && .venv/Scripts/ruff check . && .venv/Scripts/ruff format --check . && .venv/Scripts/python -m pytest
-
-# frontend
-cd frontend && npm run lint && npm run typecheck && npm test && npm run build
+# web app
+cd apps/web && npm run lint && npm run typecheck && npm test && npm run build
 ```
 
-On macOS/Linux replace `.venv/Scripts/` with `.venv/bin/`.
+Activate the root venv first: `.venv\Scripts\activate` (Windows) or
+`source .venv/bin/activate` (macOS/Linux).
 
 ## Updating contracts
 
-1. Edit `contracts/python/src/proxylead_contracts/`.
-2. `python -m proxylead_contracts.schema_export --write`
-3. `cd frontend && npm run gen:types`
+1. Edit `services/contracts/`.
+2. `python -m services.contracts.schema_export --write`
+3. `cd apps/web && npm run gen:types`
 4. Commit all three together; CI rejects drift.
 
 ## Secrets

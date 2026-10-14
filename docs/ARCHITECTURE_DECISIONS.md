@@ -38,9 +38,9 @@ backend vs tool server.
 are added with the Phase that introduces migrations and retrieval, so the
 foundation and CI stay light (`fastembed` pulls in ONNX Runtime).
 
-## ADR-003 — Repository layout
+## ADR-003 — Repository layout *(superseded by ADR-013 on 2026-10-14)*
 
-**Decision.** Use `backend/`, `frontend/`, `mcp-server/`, `contracts/` instead
+**Decision (historical).** Use `backend/`, `frontend/`, `mcp-server/`, `contracts/` instead
 of the `apps/` + `services/` sketch in PRD v2 §3.1.
 
 **Mapping.**
@@ -71,7 +71,7 @@ ran on 3.13.5; CI is the 3.12 reference.
 
 ## ADR-005 — Contracts: Pydantic → JSON Schema → TypeScript
 
-**Decision.** Pydantic models in `contracts/python` are the only hand-written
+**Decision.** Pydantic models in `services/contracts/` (see ADR-013) are the only hand-written
 definition. A deterministic JSON Schema is committed; the frontend generates
 TypeScript from it with `json-schema-to-typescript`. A Python test and a CI
 step fail on drift.
@@ -103,25 +103,25 @@ format documentation, keeping the same endpoint paths and tool contracts.
 
 | Package | Version | Used by |
 |---|---|---|
-| fastapi | 0.143.0 | backend, mcp-server |
-| uvicorn[standard] | 0.54.0 | backend, mcp-server |
-| pydantic | 2.14.1 | contracts, backend, mcp-server |
-| pydantic-settings | 2.15.0 | backend, mcp-server |
-| anthropic | 1.13.0 | backend (not yet called) |
-| armoriq-sdk | **0.6.10** (required pin) | backend (not yet called) |
-| slack-bolt | 1.30.0 | backend (not yet used) |
-| mcp | 2.3.0 | mcp-server |
+| fastapi | 0.143.0 | apps/api, services/toolserver |
+| uvicorn[standard] | 0.54.0 | apps/api, services/toolserver |
+| pydantic | 2.14.1 | services/contracts, apps/api, services/toolserver |
+| pydantic-settings | 2.15.0 | apps/api, services/toolserver |
+| anthropic | 1.13.0 | apps/api (not yet called) |
+| armoriq-sdk | **0.6.10** (required pin) | apps/api (not yet called) |
+| slack-bolt | 1.30.0 | apps/api (not yet used) |
+| mcp | 2.3.0 | services/toolserver |
 | pytest | 9.1.1 | all Python |
 | httpx | 0.28.1 | tests |
 | ruff | 0.17.0 | all Python |
-| react / react-dom | 19.3.0 | frontend |
-| vite | 8.3.4 | frontend |
-| typescript | 6.0.3 | frontend (see ADR-008) |
-| vitest | 5.0.4 | frontend |
-| eslint | 10.12.0 | frontend |
+| react / react-dom | 19.3.0 | apps/web |
+| vite | 8.3.4 | apps/web |
+| typescript | 6.0.3 | apps/web (see ADR-008) |
+| vitest | 5.0.4 | apps/web |
+| eslint | 10.12.0 | apps/web |
 
-Exact frontend versions live in `frontend/package.json` and
-`frontend/package-lock.json`.
+Exact web-app versions live in `apps/web/package.json` and
+`apps/web/package-lock.json`. Python pins live in the root `pyproject.toml`.
 
 ## ADR-008 — TypeScript 6.0.3, not 7.x
 
@@ -169,6 +169,63 @@ policy (default-block applies).
 verification endpoint; `SLACK_SIGNING_SECRET` stays commented out in
 `.env.example`.
 
+## ADR-013 — Repository layout follows PRD v2 §3.1 / Architecture v2.1 §11
+
+**Decision.** The repository uses exactly the folders both authoritative
+documents specify, at the repository root (their `proxylead/` root lists
+`.env.example` and `README.md` at the same level):
+
+| Documented path | Content today |
+|---|---|
+| `apps/api/` | FastAPI app: `main.py`, `routes/` (plus `core/`, `deps.py`, `schemas/`) |
+| `apps/web/` | React + TypeScript (Vite) web app |
+| `services/authorization/` | Placeholder; `armoriq_gateway.py` will be the only `armoriq_sdk` importer |
+| `services/slack_socket/` | Placeholder (Socket Mode adapter) |
+| `services/toolserver/` | MCP tool server: `main.py`, `security.py`, `ledger.py` (placeholder) plus `config.py`, `servers.py` |
+| `services/knowledge/` | Placeholder (retrieval, callable only by the tool server) |
+| `services/audit/` | Placeholder (request/decision/delivery audit) |
+| `services/contracts/` | Shared contracts (see below) |
+| `tests/` | `tests/api/`, `tests/toolserver/`, `tests/contracts/` |
+| `scripts/`, `docs/` | `scripts/check.sh`; project docs |
+
+Files the documents name but that have no content yet (`identity.py`,
+`orchestrator.py`, `planner.py`, `responder.py`, `mcp_protocol.py`,
+`schemas.py`, `db.py`, tool modules, probe scripts, `migrations/`, `seed/`,
+`policy/`, `docs/ARCHITECTURE.md`, `SECURITY.md`, `SLACK_SETUP.md`, `DEMO.md`)
+are created in the phase that implements them, not as empty stubs.
+
+**Contracts placement.** Neither document places shared contracts.
+`services/contracts/` is used because (a) `services/` is the documented home of
+shared server-side modules, (b) both `apps/api` and `services/toolserver` import
+it from the same root package tree, and (c) the web app consumes only the
+generated JSON Schema (`services/contracts/schemas/`), never Python.
+
+**Python packaging.** One root `pyproject.toml` (project `proxylead`) packages
+`apps*` and `services*`. The two separately deployed services keep isolated
+dependency sets through extras: `.[api]` (anthropic, armoriq-sdk, slack-bolt)
+and `.[toolserver]` (mcp); shared pins are in the base dependencies. CI installs
+each extra on its own to prove the isolation. Tests live under one `tests/`
+tree with a subfolder per component (the documents list example test files
+flat under `tests/`; new cross-cutting tests can go there directly).
+
+**Run commands.** `uvicorn apps.api.main:create_app --factory` and
+`uvicorn services.toolserver.main:create_app --factory`, from the repository root.
+
+**Document conflicts noted, not yet relevant.** The PRD names the tool modules
+`tools_memory.py` / `tools_workspace.py`; the architecture names them
+`tools_access.py` / `tools_work.py` (U-13). The PRD names probes
+`probe_v2_e*.py`; the architecture tree uses `probe_e*.py` but its §12 says to
+rename them to `probe_v2_*` (U-14).
+
+## ADR-014 — Ruff never touches Markdown
+
+**Decision.** `ruff.toml` excludes `*.md`.
+
+**Why.** Ruff 0.17 formats Python code blocks and line endings inside Markdown.
+During the layout change it rewrote the line endings of `ProxyLead_PRD_v2.md`
+(an authoritative, read-only document); the file was restored byte-for-byte
+before committing, and the exclusion prevents a repeat.
+
 ---
 
 ## Unresolved questions (decide before the related phase)
@@ -187,3 +244,5 @@ verification endpoint; `SLACK_SIGNING_SECRET` stays commented out in
 | U-10 | `MIN_SCORE`, score scale, snippet limits | E17 |
 | U-11 | Whether approver identity is observable through the pinned SDK | E4 |
 | U-12 | Official submission deadline hour and format | Hackathon organizers |
+| U-13 | Tool module names: `tools_memory/tools_workspace.py` (PRD) vs `tools_access/tools_work.py` (Architecture) | Before Phase 2 tool work |
+| U-14 | Probe script names: `probe_v2_e*` (PRD, Architecture §12) vs `probe_e*` (Architecture §11 tree) | Before writing probes |

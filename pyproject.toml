@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+# One Python project for the layout in ProxyLead_PRD_v2.md §3.1 and
+# ProxyLead_Architecture_v2.1.md §11: `apps/api` and every `services/*` module
+# are importable packages from the repository root. The API and the MCP tool
+# server are still deployed separately; each installs only its own extra.
+[project]
+name = "proxylead"
+version = "0.1.0"
+description = "ProxyLead: Slack-first AI representative of a manager, authorized per requester via ArmorIQ."
+requires-python = ">=3.12,<3.14"
+# Shared by apps/api, services/toolserver and services/contracts.
+dependencies = [
+  "pydantic==2.14.1",
+  "pydantic-settings==2.15.0",
+  "fastapi==0.143.0",
+  "uvicorn[standard]==0.54.0",
+]
+
+[project.optional-dependencies]
+# apps/api (FastAPI backend):           pip install -e ".[api]"
+api = [
+  "anthropic==1.13.0",    # planner/responder (not called yet)
+  "armoriq-sdk==0.6.10",  # required pin; imported only by services/authorization/armoriq_gateway.py
+  "slack-bolt==1.30.0",   # Socket Mode bot (not wired yet)
+]
+# services/toolserver (MCP tool server): pip install -e ".[toolserver]"
+toolserver = [
+  "mcp==2.3.0",           # official MCP Python SDK (MCPServer, streamable HTTP)
+]
+dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.17.0"]
+
+[tool.setuptools.packages.find]
+include = ["apps", "apps.*", "services", "services.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"

@@ -1,0 +1,983 @@
+{
+  "$defs": {
+    "AppRole": {
+      "description": "Application role label. ArmorIQ policy, not this label, authorizes tools.",
+      "enum": [
+        "manager",
+        "senior",
+        "junior"
+      ],
+      "title": "AppRole",
+      "type": "string"
+    },
+    "ApprovalState": {
+      "description": "HOLD lifecycle state.\n\n`pending`, `approved`, `rejected`, `expired` mirror statuses the pinned SDK\nreports for a delegation. `timeout`, `interrupted`, `unverified` are\napplication states (never treated as approval).",
+      "enum": [
+        "pending",
+        "approved",
+        "rejected",
+        "expired",
+        "timeout",
+        "interrupted",
+        "unverified"
+      ],
+      "title": "ApprovalState",
+      "type": "string"
+    },
+    "ApprovalStatus": {
+      "additionalProperties": false,
+      "description": "State of a real ArmorIQ HOLD for one plan step.\n\n`delegation_id` may be absent briefly: the SDK reports the hold before the\ndelegation request exists. UNRESOLVED: whether approver identity is\nobservable through the pinned SDK.",
+      "properties": {
+        "delegation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delegation Id"
+        },
+        "plan_id": {
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "requested_at": {
+          "format": "date-time",
+          "title": "Requested At",
+          "type": "string"
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolved At"
+        },
+        "state": {
+          "$ref": "#/$defs/ApprovalState"
+        },
+        "step_index": {
+          "minimum": 0,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "required": [
+        "request_id",
+        "plan_id",
+        "step_index",
+        "tool",
+        "state",
+        "delegation_id",
+        "requested_at",
+        "resolved_at"
+      ],
+      "title": "ApprovalStatus",
+      "type": "object"
+    },
+    "ArmorIQDecision": {
+      "additionalProperties": false,
+      "description": "Authorization result for one planned step, labeled by the layer that decided.\n\nMapped from real ArmorIQ SDK responses/exceptions by the backend gateway.\n`enforcement_action` keeps ArmorIQ's raw value (e.g. \"allow_log\") verbatim.",
+      "properties": {
+        "armoriq_plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Armoriq Plan Id"
+        },
+        "decided_at": {
+          "format": "date-time",
+          "title": "Decided At",
+          "type": "string"
+        },
+        "delegation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Delegation Id"
+        },
+        "enforcement_action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Enforcement Action"
+        },
+        "outcome": {
+          "$ref": "#/$defs/DecisionOutcome"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "source": {
+          "$ref": "#/$defs/DecisionSource"
+        }
+      },
+      "required": [
+        "outcome",
+        "source",
+        "reason",
+        "enforcement_action",
+        "armoriq_plan_id",
+        "delegation_id",
+        "decided_at"
+      ],
+      "title": "ArmorIQDecision",
+      "type": "object"
+    },
+    "AuditEvent": {
+      "additionalProperties": false,
+      "description": "Append-only audit event. `payload` must already be redacted (no secrets/tokens).",
+      "properties": {
+        "decision_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_id": {
+          "minLength": 1,
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "$ref": "#/$defs/AuditEventType"
+        },
+        "jti": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Jti"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Payload",
+          "type": "object"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Id"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "step_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step Index"
+        },
+        "trace_id": {
+          "minLength": 1,
+          "title": "Trace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "occurred_at",
+        "event_type",
+        "request_id",
+        "trace_id",
+        "plan_id",
+        "step_index",
+        "jti",
+        "decision_source",
+        "payload"
+      ],
+      "title": "AuditEvent",
+      "type": "object"
+    },
+    "AuditEventType": {
+      "description": "Provisional audit event types (PRD v2 §7 step 14). Extend in Phase 2.",
+      "enum": [
+        "request_received",
+        "plan_proposed",
+        "plan_rejected",
+        "plan_minted",
+        "authorization_decided",
+        "hold_created",
+        "approval_resolved",
+        "tool_executed",
+        "tool_rejected",
+        "answer_generated",
+        "answer_abstained",
+        "delivery_attempted",
+        "delivery_succeeded",
+        "delivery_failed"
+      ],
+      "title": "AuditEventType",
+      "type": "string"
+    },
+    "AuthenticatedUser": {
+      "additionalProperties": false,
+      "description": "A requester resolved by trusted backend code (PRD v2 §4.1).\n\nDeliberately excludes the raw ArmorIQ member email: it stays inside the\nbackend (masked in UI/logs). Identity is never taken from chat text.",
+      "properties": {
+        "app_role": {
+          "$ref": "#/$defs/AppRole"
+        },
+        "display_name": {
+          "minLength": 1,
+          "title": "Display Name",
+          "type": "string"
+        },
+        "masked_email": {
+          "description": "e.g. m***@example.com; never the raw address",
+          "minLength": 1,
+          "title": "Masked Email",
+          "type": "string"
+        },
+        "member_id": {
+          "minLength": 1,
+          "title": "Member Id",
+          "type": "string"
+        },
+        "persona": {
+          "$ref": "#/$defs/PersonaKey"
+        },
+        "slack_user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slack User Id"
+        }
+      },
+      "required": [
+        "member_id",
+        "persona",
+        "display_name",
+        "app_role",
+        "masked_email",
+        "slack_user_id"
+      ],
+      "title": "AuthenticatedUser",
+      "type": "object"
+    },
+    "DataTier": {
+      "description": "Knowledge sensitivity tiers (PRD v2 §5.1). Encoded in tool names, never in arguments.",
+      "enum": [
+        "team",
+        "confidential",
+        "restricted"
+      ],
+      "title": "DataTier",
+      "type": "string"
+    },
+    "DecisionOutcome": {
+      "description": "Authorization outcome for one planned tool call.",
+      "enum": [
+        "allow",
+        "block",
+        "hold",
+        "unverified"
+      ],
+      "title": "DecisionOutcome",
+      "type": "string"
+    },
+    "DecisionSource": {
+      "description": "Which layer produced a decision.\n\nUnion of the labels in PRD v2 §10.1 and Architecture v2.1 §5.3 (see ADR-009).\nNever label an SDK client-side mismatch as a hosted-proxy decision.",
+      "enum": [
+        "armoriq_issuance",
+        "armoriq_policy_decision",
+        "armoriq_sdk_plan_check",
+        "armoriq_proxy_decision",
+        "tool_server_rule",
+        "application_rule",
+        "unknown"
+      ],
+      "title": "DecisionSource",
+      "type": "string"
+    },
+    "EntryPoint": {
+      "description": "Where a request entered ProxyLead.",
+      "enum": [
+        "slack_mention",
+        "slack_dm",
+        "web"
+      ],
+      "title": "EntryPoint",
+      "type": "string"
+    },
+    "ErrorBody": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "details": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "request_id",
+        "details"
+      ],
+      "title": "ErrorBody",
+      "type": "object"
+    },
+    "ErrorResponse": {
+      "additionalProperties": false,
+      "description": "Every non-2xx JSON response from ProxyLead services uses this envelope.",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorBody"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "ErrorResponse",
+      "type": "object"
+    },
+    "HealthResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "status": {
+          "const": "ok",
+          "default": "ok",
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "service",
+        "version",
+        "environment"
+      ],
+      "title": "HealthResponse",
+      "type": "object"
+    },
+    "JsonValue": {},
+    "KnowledgeSearchHit": {
+      "additionalProperties": false,
+      "description": "UNRESOLVED: snippet length limit and score scale (depends on E17 / RRF design).",
+      "properties": {
+        "chunk_id": {
+          "minLength": 1,
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "rank": {
+          "minimum": 1,
+          "title": "Rank",
+          "type": "integer"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "snippet": {
+          "title": "Snippet",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceCitation"
+        }
+      },
+      "required": [
+        "source",
+        "chunk_id",
+        "snippet",
+        "score",
+        "rank"
+      ],
+      "title": "KnowledgeSearchHit",
+      "type": "object"
+    },
+    "KnowledgeSearchResult": {
+      "additionalProperties": false,
+      "description": "Output of a `knowledge_search_*` tool. `tier` is set by the server from the tool name.",
+      "properties": {
+        "hits": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeSearchHit"
+          },
+          "title": "Hits",
+          "type": "array"
+        },
+        "min_score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Calibrated threshold; None until E17",
+          "title": "Min Score"
+        },
+        "query": {
+          "title": "Query",
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "required": [
+        "tool",
+        "tier",
+        "query",
+        "hits",
+        "min_score"
+      ],
+      "title": "KnowledgeSearchResult",
+      "type": "object"
+    },
+    "McpEndpoint": {
+      "description": "Registered MCP endpoint names (PRD v2 §2). Must match the ArmorIQ console exactly.",
+      "enum": [
+        "memory-mcp",
+        "workspace-mcp"
+      ],
+      "title": "McpEndpoint",
+      "type": "string"
+    },
+    "PersonaKey": {
+      "description": "Fictional demo members (PRD v2 §1). Labels only — never identity proof.",
+      "enum": [
+        "maya",
+        "sam",
+        "priya"
+      ],
+      "title": "PersonaKey",
+      "type": "string"
+    },
+    "PlanProposal": {
+      "additionalProperties": false,
+      "description": "Planner output, built from the user's message only (PRD v2 §7).\n\nUNRESOLVED (Phase 2): maximum step count, an `intent` field, and a\nclarifying-question field. Only the PRD's elevated-tier rule is enforced.",
+      "properties": {
+        "escalation_user_confirmed": {
+          "default": false,
+          "title": "Escalation User Confirmed",
+          "type": "boolean"
+        },
+        "matched_topic_rule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Matched Topic Rule Id"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/PlannedToolCall"
+          },
+          "title": "Steps",
+          "type": "array"
+        },
+        "summary": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "steps",
+        "escalation_user_confirmed",
+        "matched_topic_rule_id"
+      ],
+      "title": "PlanProposal",
+      "type": "object"
+    },
+    "PlannedToolCall": {
+      "additionalProperties": false,
+      "description": "One validated step of a plan. Tier is implied by `tool`, never an argument.\n\nUNRESOLVED (Phase 2): per-tool argument schemas. Until they exist,\n`arguments` is a JSON object screened for forbidden/underscore keys.",
+      "properties": {
+        "arguments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Arguments",
+          "type": "object"
+        },
+        "mcp": {
+          "$ref": "#/$defs/McpEndpoint"
+        },
+        "purpose": {
+          "maxLength": 300,
+          "minLength": 1,
+          "title": "Purpose",
+          "type": "string"
+        },
+        "step_index": {
+          "minimum": 0,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        }
+      },
+      "required": [
+        "step_index",
+        "mcp",
+        "tool",
+        "arguments",
+        "purpose"
+      ],
+      "title": "PlannedToolCall",
+      "type": "object"
+    },
+    "RequestContext": {
+      "additionalProperties": false,
+      "description": "Trusted context created by the backend for every inbound request.",
+      "properties": {
+        "entry_point": {
+          "$ref": "#/$defs/EntryPoint"
+        },
+        "received_at": {
+          "format": "date-time",
+          "title": "Received At",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "requester": {
+          "$ref": "#/$defs/AuthenticatedUser"
+        },
+        "slack_channel_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slack Channel Id"
+        },
+        "slack_event_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Used for event deduplication",
+          "title": "Slack Event Id"
+        },
+        "slack_team_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slack Team Id"
+        },
+        "slack_thread_ts": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Slack Thread Ts"
+        },
+        "trace_id": {
+          "minLength": 1,
+          "title": "Trace Id",
+          "type": "string"
+        },
+        "workspace_id": {
+          "minLength": 1,
+          "title": "Workspace Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "trace_id",
+        "workspace_id",
+        "requester",
+        "entry_point",
+        "received_at",
+        "slack_team_id",
+        "slack_channel_id",
+        "slack_thread_ts",
+        "slack_event_id"
+      ],
+      "title": "RequestContext",
+      "type": "object"
+    },
+    "ReviewStatus": {
+      "description": "Knowledge authority (PRD v2 §8.4). Supersession is tracked separately.",
+      "enum": [
+        "draft",
+        "authoritative"
+      ],
+      "title": "ReviewStatus",
+      "type": "string"
+    },
+    "SourceCitation": {
+      "additionalProperties": false,
+      "description": "Provenance for a knowledge record (PRD v2 §8.1).",
+      "properties": {
+        "author": {
+          "minLength": 1,
+          "title": "Author",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "reference_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "e.g. Slack permalink",
+          "title": "Reference Url"
+        },
+        "review_status": {
+          "$ref": "#/$defs/ReviewStatus"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "superseded_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Superseded By"
+        },
+        "tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source_id",
+        "title",
+        "tier",
+        "author",
+        "created_at",
+        "version",
+        "review_status",
+        "superseded_by",
+        "reference_url"
+      ],
+      "title": "SourceCitation",
+      "type": "object"
+    },
+    "ToolExecutionStatus": {
+      "description": "What actually happened at the tool server, as evidenced by its ledger.",
+      "enum": [
+        "executed",
+        "rejected_by_tool_server",
+        "not_reached",
+        "error",
+        "unknown"
+      ],
+      "title": "ToolExecutionStatus",
+      "type": "string"
+    },
+    "ToolInvocationResult": {
+      "additionalProperties": false,
+      "description": "What the tool server actually did. A plan or ALLOW is not proof of execution.",
+      "properties": {
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        },
+        "jti": {
+          "description": "Application-generated invocation ID (not an ArmorIQ claim)",
+          "minLength": 1,
+          "title": "Jti",
+          "type": "string"
+        },
+        "ledger_entry_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ledger Entry Id"
+        },
+        "plan_id": {
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonValue"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "$ref": "#/$defs/ToolExecutionStatus"
+        },
+        "step_index": {
+          "minimum": 0,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "tool": {
+          "$ref": "#/$defs/ToolName"
+        },
+        "tool_server_reached": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "None when it cannot be determined",
+          "title": "Tool Server Reached"
+        }
+      },
+      "required": [
+        "request_id",
+        "plan_id",
+        "step_index",
+        "tool",
+        "jti",
+        "status",
+        "tool_server_reached",
+        "ledger_entry_id",
+        "result",
+        "error_code",
+        "error_message"
+      ],
+      "title": "ToolInvocationResult",
+      "type": "object"
+    },
+    "ToolName": {
+      "description": "Logical tool/action names from PRD v2 §6.\n\nExact registry representation must be confirmed by experiment E5.",
+      "enum": [
+        "knowledge_search_team",
+        "knowledge_search_confidential",
+        "knowledge_search_restricted",
+        "knowledge_get_source_team",
+        "knowledge_get_source_confidential",
+        "knowledge_get_source_restricted",
+        "read_source_team",
+        "read_source_confidential",
+        "read_source_restricted",
+        "knowledge_save_team_note",
+        "knowledge_confirm_maya_decision",
+        "knowledge_mark_superseded",
+        "create_followup_task",
+        "send_external_message"
+      ],
+      "title": "ToolName",
+      "type": "string"
+    }
+  },
+  "description": "Generated from services.contracts. Do not edit by hand.",
+  "title": "ProxyLeadContracts"
+}

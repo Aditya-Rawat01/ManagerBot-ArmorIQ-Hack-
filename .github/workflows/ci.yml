@@ -14,13 +14,14 @@ concurrency:
 
 # Ordinary CI needs no secrets. Nothing here talks to ArmorIQ, Slack,
 # Anthropic, or Neon; unit tests never count as live experiment evidence.
+# Layout: ProxyLead_PRD_v2.md §3.1 / ProxyLead_Architecture_v2.1.md §11.
 env:
   APP_ENV: test
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
 jobs:
   contracts:
-    name: Contracts (Python 3.12)
+    name: Lint + contracts (Python 3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -28,18 +29,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: contracts/python/pyproject.toml
-      - run: python -m pip install -e "contracts/python[dev]"
-      - name: Lint
-        run: ruff check contracts/python && ruff format --check contracts/python
+          cache-dependency-path: pyproject.toml
+      - run: python -m pip install -e ".[dev]"
+      - name: Ruff (whole repository)
+        run: ruff check . && ruff format --check .
       - name: JSON Schema is up to date
-        run: python -m proxylead_contracts.schema_export --check
-      - name: Tests
-        working-directory: contracts/python
-        run: python -m pytest
+        run: python -m services.contracts.schema_export --check
+      - name: Contract tests
+        run: python -m pytest tests/contracts
 
-  backend:
-    name: Backend (Python 3.12)
+  api:
+    name: apps/api (Python 3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -47,20 +47,14 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: |
-            backend/pyproject.toml
-            contracts/python/pyproject.toml
-      - run: python -m pip install -e contracts/python -e "backend[dev]"
+          cache-dependency-path: pyproject.toml
+      # Only the API extra: proves the API does not depend on toolserver packages.
+      - run: python -m pip install -e ".[api,dev]"
       - run: python -m pip check
-      - name: Lint
-        working-directory: backend
-        run: ruff check . && ruff format --check .
-      - name: Tests
-        working-directory: backend
-        run: python -m pytest
+      - run: python -m pytest tests/api
 
-  mcp-server:
-    name: MCP server (Python 3.12)
+  toolserver:
+    name: services/toolserver (Python 3.12)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -68,31 +62,25 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: |
-            mcp-server/pyproject.toml
-            contracts/python/pyproject.toml
-      - run: python -m pip install -e contracts/python -e "mcp-server[dev]"
+          cache-dependency-path: pyproject.toml
+      # Only the toolserver extra: no armoriq-sdk / anthropic / slack-bolt installed.
+      - run: python -m pip install -e ".[toolserver,dev]"
       - run: python -m pip check
-      - name: Lint
-        working-directory: mcp-server
-        run: ruff check . && ruff format --check .
-      - name: Tests
-        working-directory: mcp-server
-        run: python -m pytest
+      - run: python -m pytest tests/toolserver
 
-  frontend:
-    name: Frontend (Node 22)
+  web:
+    name: apps/web (Node 22)
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: frontend
+        working-directory: apps/web
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: apps/web/package-lock.json
       - run: npm ci
       - name: Generated contract types are up to date
         run: npm run gen:types && git diff --exit-code -- src/types/generated

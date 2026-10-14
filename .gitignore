@@ -34,7 +34,7 @@ htmlcov/
 # Node / frontend
 # ---------------------------------------------------------------------------
 node_modules/
-frontend/dist/
+apps/web/dist/
 *.tsbuildinfo
 .vite/
 .eslintcache

@@ -1,10 +1,11 @@
-# Shared Ruff configuration for every Python project in this repository
-# (backend/, mcp-server/, contracts/python/). Run from the repo root or a
-# sub-project; Ruff discovers this file by walking up the tree.
+# Ruff configuration for all Python code in this repository (apps/api,
+# services/*, tests/, scripts/). Run from the repository root.
 
 target-version = "py312"
 line-length = 100
-extend-exclude = [".venv", "node_modules", "frontend"]
+# Markdown is excluded: Ruff 0.17 would otherwise reformat code blocks and line
+# endings inside the authoritative PRD / architecture documents.
+extend-exclude = [".venv", "node_modules", "apps/web", "*.md"]
 
 [lint]
 select = [
@@ -30,7 +31,7 @@ ignore = [
 ]
 
 [lint.isort]
-known-first-party = ["app", "proxylead_contracts"]
+known-first-party = ["apps", "services"]
 
 [format]
 quote-style = "double"

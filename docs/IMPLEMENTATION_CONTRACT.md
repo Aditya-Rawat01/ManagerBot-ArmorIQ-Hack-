@@ -1,18 +1,18 @@
 # Implementation contract
 
 How the three applications divide responsibility and exchange data. This file
-operationalizes `ProxyLead_PRD_v2.md` and `ProxyLead_Architecture_v2.1.md` for
-this repository layout; where they disagree, those documents win and this file
+operationalizes `ProxyLead_PRD_v2.md` and `ProxyLead_Architecture_v2.1.md`
+(whose folder layout this repository follows, ADR-013); where they disagree, those documents win and this file
 must be updated.
 
 ## 1. Applications and ownership boundaries
 
 | Application | Owns | Must never |
 |---|---|---|
-| `backend/` (FastAPI) | Trusted requester identity (Slack user ID / web session → member), request & trace IDs, planner/responder calls, plan validation, the ArmorIQ gateway, signing `_ctx`, delivery routing (thread vs DM), audit events for request/decision/delivery | Query protected knowledge tables or approved views; import `armoriq_sdk` outside `app/integrations/armoriq/gateway.py`; accept identity, tier, or recipient from chat text or request bodies |
-| `mcp-server/` (MCP tool server) | `memory-mcp` and `workspace-mcp` endpoints, service-credential check, `_ctx` verification, strict argument schemas, hard-coded tier filters, knowledge retrieval, idempotency, hash-chained execution ledger | Import `armoriq_sdk`; trust underscore-prefixed fields as approval; perform real network egress |
-| `frontend/` (React + TS) | Web playground and manager console UI; rendering of real, persisted outcomes | Hold secrets; send a persona/role in chat payloads; show a simulated approval or a predicted outcome as real |
-| `contracts/` | Data shapes shared by all three | Contain behavior beyond shape validation |
+| `apps/api/` (FastAPI) | Trusted requester identity (Slack user ID / web session → member), request & trace IDs, planner/responder calls, plan validation, the ArmorIQ gateway, signing `_ctx`, delivery routing (thread vs DM), audit events for request/decision/delivery | Query protected knowledge tables or approved views; import `armoriq_sdk` outside `services/authorization/armoriq_gateway.py`; accept identity, tier, or recipient from chat text or request bodies |
+| `services/toolserver/` (MCP tool server) + `services/knowledge/` | `memory-mcp` and `workspace-mcp` endpoints, service-credential check, `_ctx` verification, strict argument schemas, hard-coded tier filters, knowledge retrieval, idempotency, hash-chained execution ledger | Import `armoriq_sdk`; trust underscore-prefixed fields as approval; perform real network egress |
+| `apps/web/` (React + TS) | Web playground and manager console UI; rendering of real, persisted outcomes | Hold secrets; send a persona/role in chat payloads; show a simulated approval or a predicted outcome as real |
+| `services/contracts/` | Data shapes shared by all three | Contain behavior beyond shape validation |
 
 ## 2. Data exchange paths
 
@@ -37,8 +37,8 @@ backend ──Slack Web API──▶ Slack (thread reply or DM; chosen by backen
 
 ## 3. Contracts
 
-Source of truth: `contracts/python/src/proxylead_contracts/` (see
-`contracts/README.md` for the generation pipeline).
+Source of truth: `services/contracts/` (see `services/contracts/README.md`
+for the generation pipeline).
 
 | Contract | Status | Notes |
 |---|---|---|
@@ -57,7 +57,7 @@ Source of truth: `contracts/python/src/proxylead_contracts/` (see
 
 - Agent: `proxylead`
 - MCP endpoints: `memory-mcp` (`/memory/mcp`), `workspace-mcp` (`/workspace/mcp`)
-- Tools: see `ToolName` in `contracts/python/src/proxylead_contracts/enums.py`
+- Tools: see `ToolName` in `services/contracts/enums.py`
   (14 names from PRD v2 §6).
 
 ## 5. Security guardrails (apply from the first line of feature code)
