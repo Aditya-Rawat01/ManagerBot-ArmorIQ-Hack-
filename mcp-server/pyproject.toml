@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "proxylead-mcp-server"
+version = "0.1.0"
+description = "ProxyLead MCP tool server: memory-mcp and workspace-mcp endpoints."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "proxylead-contracts==0.1.0",  # installed from ../contracts/python (editable)
+  "mcp==2.3.0",                  # official MCP Python SDK (MCPServer, streamable HTTP)
+  "fastapi==0.143.0",
+  "uvicorn[standard]==0.54.0",
+  "pydantic==2.14.1",
+  "pydantic-settings==2.15.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.17.0"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
