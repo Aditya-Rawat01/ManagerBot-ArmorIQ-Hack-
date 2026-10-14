@@ -17,7 +17,7 @@ not resolved silently.
    [context/AGENT_HANDOFF_PROTOCOL.md](context/AGENT_HANDOFF_PROTOCOL.md).
 2. Pick your task from the index below. Read its phase README and the task file (17 sections).
 3. Before starting, check its hard dependencies (merged?) and the decisions it is blocked by.
-4. Work on one branch with one PR per task. Post the handoff report (protocol §7).
+4. Work on one branch with one PR per task. Post the handoff report (protocol §7). Do not merge your own PR; the merger follows the [PR merge order](#pr-merge-order).
 5. GitHub issue drafts: [GITHUB_ISSUES.md](GITHUB_ISSUES.md). **No issues have been created yet**; see that file for why.
 
 ## Status snapshot (14 Oct 2026)
@@ -298,6 +298,59 @@ owner. Protect that owner's time.
 | 16 Oct AM (freeze 12:00) | P5-02 core security tests | P3-08 E17 | P3-07, P3-09, P5-01 | P4-04, P4-05; prepare P5-03 |
 | 16 Oct PM | P5-02 remainder | Fixes | Fixes; `docs/ARCHITECTURE.md` | P5-03 deploy; rehearse 3× (P5-04) |
 | 17 Oct | Critical fixes only | Critical fixes only | Critical fixes only | P5-04 record + submit (deadline per D-24) |
+
+## PR merge order
+
+Contributors open PRs; only the designated merger merges them, one at a time,
+in the order below. Work proceeds in **waves**. A wave's tasks are built in
+parallel from an up-to-date `main`. The whole wave is merged in order before
+the next wave branches. Waves follow hard dependencies, not phase numbers,
+because Phase 1's live experiments need Phase 2 tools (see Critical path).
+
+### Before Wave 1
+
+- [ ] All local planning and scaffold commits are pushed to `origin/main`. Contributors must branch from a `main` that contains `docs/Todos/`.
+- [ ] The merger has write or maintain access. The repository owner may protect `main`: require a PR, require passing CI, require the branch to be up to date before merging, restrict who can merge.
+- [ ] Interfaces used across PRs in the same wave are agreed before coding (SHARED_INTERFACES.md, ICR per AGENT_HANDOFF_PROTOCOL.md §4). Wave 1 needs `sign_ctx` / `verify_tool_call` (P1-04, used by P1-02 and later P2-06) and decision D-04.
+- [ ] Decisions that block the wave's tasks are resolved (task file §5).
+
+### Merge sequence
+
+Merge left to right within a wave. "Needs" lists the earlier items of the
+**same** wave that must merge before that PR can be finished and rebased. The
+author may build on the other PR's branch meanwhile (stacked PR), but that PR
+merges first.
+
+| Wave | Merge order | Needs (same wave) | Notes |
+|---|---|---|---|
+| 1 — Phase 1 setup | P1-01 → P1-04 → P1-03 → P1-02 → P1-05 | — | All independent. P1-04 first: the gateway and every tool depend on it. P1-03 is the first contract-changing PR. P1-02 rebases onto the real `sign_ctx`. P1-05 deploys the scaffold only |
+| 2 — Data and contracts | P2-02 → P2-01 | — | The P1-08 policy YAML may be drafted now; its PR merges in Wave 6 |
+| 3 — Data layer | P2-07 → P2-03 → P3-01 → P3-03 | — | P2-03 ships the E1 seed record first |
+| 4 — First tool | P2-04 → P2-06 → P3-02 → P2-05 | P2-06 and P2-05 need P2-04 | After P2-06 merges, redeploy the tool server (P1-05 procedure). P1-04 must already be merged (G0) |
+| 5 — E1 and remaining tools | P1-06 → P2-08 → P2-10 → P2-09 → P3-04 → P3-05 → P3-06 → P1-07 | P3-04 and P1-07 need P1-06; P2-09 needs P2-08 (same tools module) | P1-06 (E1) merges only with its live record. P3-04's real-gateway wiring merges after G1. Redeploy after P2-08/P2-10/P2-09 |
+| 6 — Gates | P1-08 → P1-09 → P1-10 → P3-07 → P4-01 → P3-08 | P1-09 needs P1-08; P1-10 needs P1-09 | E5 → E3 → E4, one live run each, records included. P4-01 is backend; UI waits for G1 + G3 |
+| 7 — UI and offline suites | P4-02 → P4-03 → P4-04 → P4-05 → P3-09 | P4-03 and P4-04 need P4-02; P4-05 needs both | Starts only after G1 (P1-06) and G3 (P1-09) passed or fallbacks are recorded |
+| 8 — Release | P5-01 → P5-03 → P5-02 → P5-04 | P5-02 and P5-03 need P5-01; P5-04 needs both | P5-02 core items by 16 Oct 12:00 (freeze) |
+
+This order was validated against every task's hard dependencies, the G1/G3
+gates, and same-file sequences: 38 tasks, no violations.
+
+### Per-PR merge procedure
+
+1. `git checkout main && git pull`.
+2. The author (or merger) rebases the PR branch on `main` and resolves conflicts (rules below).
+3. Green CI on the rebased branch, or `bash scripts/check.sh` locally.
+4. Review the diff against the task file: only files from §6/§7 are touched, the §10 acceptance criteria are met, and the §11 tests are present. Required steward reviews are done (AGENT_HANDOFF_PROTOCOL.md §3).
+5. Live-experiment PRs (P1-06..P1-10, P3-08) include their `docs/EXPERIMENTS.md` record from a real run. Mocked runs never pass a gate.
+6. Merge, then go to the next PR in the sequence. Never merge two PRs from the same wave without rebasing the second on the first.
+
+### Conflict rules
+
+- **Generated files** (`services/contracts/schemas/*.json`, `apps/web/src/types/generated/*`): never hand-merge. Rebase, then regenerate with `python -m services.contracts.schema_export --write` and `cd apps/web && npm run gen:types`.
+- **Steward files** (`services/contracts/*.py`, `apps/api/routes/router.py`, `apps/api/main.py`, `pyproject.toml`, `services/toolserver/{main,config,servers}.py`): keep both sides' additions; the steward reviews.
+- **Migrations:** if two PRs add the same migration number, renumber the later one at merge time. Never edit a merged migration.
+- **`docs/SECURITY.md` and `docs/EXPERIMENTS.md`:** sections are appended; the later PR appends after the earlier one.
+- A PR that would deploy a product tool before P1-04 is merged is not merged (G0).
 
 ## Owner allocation
 
