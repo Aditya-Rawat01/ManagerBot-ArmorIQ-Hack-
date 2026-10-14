@@ -12,7 +12,7 @@ file, which remains the source of truth for scope and acceptance criteria.
 - Phase 1 issue bodies are generated from the task files. They add status, sequencing (merge wave), and resolved `#` references for Phase 1 dependencies.
   - References to Phase 2–5 tasks read "issue not created yet" until those issues exist.
   - When creating them, use the next free number and edit the affected Phase 1 issues.
-- No issue is assigned. Owner handles are unconfirmed (D-25): GitHub has no user `amarth-chawla` (404), and contributor `samarth-chawla` still needs confirmation.
+- No issue is assigned. The security owner's handle `samarth-chawla` was confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` was a typo); the other proposed owners and task assignments still await confirmation (D-25).
 - No milestones or projects were created.
 
 ## How to create them (team member with triage or write access)

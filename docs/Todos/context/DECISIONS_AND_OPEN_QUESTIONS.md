@@ -280,9 +280,11 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-25 — Team handles and ownership interpretation
 
-- The brief lists `amarth-chawla`. GitHub returns **404** for that user. The
-  repository contributor `samarth-chawla` (commit author `samarth-chawla`)
-  exists. This plan uses **`samarth-chawla`**. **Confirm before assigning issues.**
+- **Security owner handle: confirmed.** `samarth-chawla` (confirmed by the
+  project owner on 14 Oct 2026; `amarth-chawla` in the brief was a typo). Task
+  ownership itself remains proposed until the team confirms it.
+- The other proposed owners and their task assignments: still to confirm
+  before assigning issues.
 - `parthgoyal26-03-2005` "frontend and delivery": this plan reads "delivery" as
   safe answer delivery (P3-06) plus release delivery (deployment, demo,
   submission). Confirm.

@@ -368,7 +368,7 @@ the authorization boundary (Arch §18).
 
 **Ownership notes (D-25):**
 
-- The brief named `amarth-chawla`, but GitHub returns 404 for that user. The plan uses the repository contributor `samarth-chawla`. **Confirm before assigning issues.**
+- The security owner's handle is `samarth-chawla`, confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` in the brief was a typo). Task ownership remains proposed: **confirm the other proposed owners and assignments before assigning issues.**
 - "Delivery" for `parthgoyal26-03-2005` is read as safe answer delivery (P3-06) plus release delivery (deployment, demo, submission). Confirm.
 - Identity (P1-03) is assigned to `VTCodeCraft`, who owns the backend that resolves identity (Arch §5.4 layer 1), with `samarth-chawla` as security reviewer. This frees the ArmorIQ owner for the serialized experiments.
 
