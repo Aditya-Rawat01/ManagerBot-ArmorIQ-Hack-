@@ -18,7 +18,8 @@ not resolved silently.
 2. Pick your task from the index below. Read its phase README and the task file (17 sections).
 3. Before starting, check its hard dependencies (merged?) and the decisions it is blocked by.
 4. Work on one branch with one PR per task. Post the handoff report (protocol §7). Do not merge your own PR; the merger follows the [PR merge order](#pr-merge-order).
-5. GitHub issue drafts: [GITHUB_ISSUES.md](GITHUB_ISSUES.md). **No issues have been created yet**; see that file for why.
+5. Live progress: [STATUS.md](STATUS.md), generated from GitHub by `python scripts/update_status.py`. It shows what is done, in review, in progress, ready or waiting, the next PR to merge, and the gate results. Never edit it by hand. After merging PRs, the merger re-runs the script and commits it on its own (`docs: update status`), never inside a feature PR. Anyone can view the current state without changing files: `python scripts/update_status.py --stdout`.
+6. GitHub issue drafts: [GITHUB_ISSUES.md](GITHUB_ISSUES.md). **No issues have been created yet**; see that file for why.
 
 ## Status snapshot (14 Oct 2026)
 
