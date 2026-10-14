@@ -1,6 +1,6 @@
 # Project status
 
-_Generated 2026-10-14 12:25 UTC by `python scripts/update_status.py` from GitHub and the planning docs. Do not edit by hand; re-run the script._
+_Generated 2026-10-14 12:29 UTC by `python scripts/update_status.py` from GitHub and the planning docs. Do not edit by hand; re-run the script._
 
 Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** = open PR with `Closes #n` · **In progress** = assigned, no PR yet · **Ready** = all prerequisites merged, nobody assigned · **Waiting** = prerequisites not merged yet. Phase 3 backend work may begin against fakes before its prerequisites merge (ADR-015).
 
@@ -9,6 +9,8 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | Ready | Waiting |
 |---|---|
 | 7 | 31 |
+
+Testing checkpoints passed: 0 of 8 (see docs/Todos/CHECKPOINTS.md).
 
 **Next to merge:** P1-01 (#2) ArmorIQ organization, members, and agent setup — Ready: all prerequisites merged.
 
@@ -23,6 +25,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #4 | P1-03 Trusted identity mapping and web demo session | **Ready** | all prerequisites merged |
 | #3 | P1-02 ArmorIQ SDK surface verification and `ArmorIQGateway` | **Ready** | all prerequisites merged |
 | #6 | P1-05 Tool-server public HTTPS deployment for experiments | **Ready** | all prerequisites merged |
+| #40 | CP-1 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 2 — Data and contracts
 
@@ -30,6 +33,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 |---|---|---|---|
 | #12 | P2-02 Tool argument and result contracts | **Ready** | all prerequisites merged |
 | #13 | P2-01 Neon schema, migrations, database roles, and grant verification | **Ready** | all prerequisites merged |
+| #41 | CP-2 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 3 — Data layer
 
@@ -39,6 +43,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #15 | P2-03 Synthetic seed corpus, ingestion, and local embeddings | **Waiting** | needs #13 (P2-01) |
 | #16 | P3-01 Request, plan, decision, approval, and delivery persistence (`services/audit`) | **Waiting** | needs #13 (P2-01) |
 | #17 | P3-03 Grounded responder, citation validation, and abstention | **Waiting** | needs #12 (P2-02) |
+| #42 | CP-3 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 4 — First tool
 
@@ -48,6 +53,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #19 | P2-06 `memory-mcp` product-tool wiring and `knowledge_search_team` | **Waiting** | needs #5 (P1-04), #12 (P2-02), #18 (P2-04), #14 (P2-07) |
 | #20 | P3-02 Planner, plan validation, and topic-map tier selection | **Waiting** | needs #12 (P2-02), #16 (P3-01) |
 | #21 | P2-05 Vector retrieval and reciprocal rank fusion | **Waiting** | needs #15 (P2-03), #18 (P2-04) |
+| #43 | CP-4 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 5 — E1 and remaining tools
 
@@ -61,6 +67,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #26 | P3-05 Slack Socket Mode adapter (mentions, DMs, dedupe, `store this`) | **Waiting** | needs #4 (P1-03), #16 (P3-01) |
 | #27 | P3-06 Safe delivery routing and HOLD notification | **Waiting** | needs #16 (P3-01) |
 | #8 | P1-07 E2: off-plan and tampered invocation behavior | **Waiting** | needs #5 (P1-04), #7 (P1-06) |
+| #44 | CP-5 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 6 — Gates
 
@@ -72,6 +79,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #28 | P3-07 "Simulate hijacked model" mode and honeypot attempt routing | **Waiting** | needs #3 (P1-02), #23 (P2-10), #17 (P3-03), #25 (P3-04) |
 | #29 | P4-01 Web request API (submit message, poll status) | **Waiting** | needs #4 (P1-03), #25 (P3-04) |
 | #30 | P3-08 E17: grounding evaluation and `MIN_SCORE` calibration | **Waiting** | needs #15 (P2-03), #21 (P2-05), #17 (P3-03) |
+| #45 | CP-6 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 7 — UI and offline suites
 
@@ -82,6 +90,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #33 | P4-04 Manager console and audit view (API + UI) | **Waiting** | needs #16 (P3-01), #20 (P3-02), #31 (P4-02) |
 | #34 | P4-05 Frontend tests and web access-control verification | **Waiting** | needs #32 (P4-03), #33 (P4-04) |
 | #35 | P3-09 Agent integration, prompt-injection, and failure-mode tests (offline) | **Waiting** | needs #25 (P3-04), #26 (P3-05), #27 (P3-06), #28 (P3-07) |
+| #46 | CP-7 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ### Wave 8 — Release
 
@@ -91,6 +100,7 @@ Legend: **Done** = issue closed by a merged PR · **In review** / **Draft PR** =
 | #37 | P5-03 Public demo deployment and configuration | **Waiting** | needs #6 (P1-05), #36 (P5-01) |
 | #38 | P5-02 End-to-end security regression (Arch §13, SC-01..SC-06) | **Waiting** | needs #8 (P1-07), #11 (P1-10), #30 (P3-08), #36 (P5-01) |
 | #39 | P5-04 Demo script, README claims, video, and submission | **Waiting** | needs #38 (P5-02), #37 (P5-03) |
+| #47 | CP-8 testing checkpoint | **Waiting** | wave not fully merged yet |
 
 ## Security gates
 

@@ -8,6 +8,7 @@ file, which remains the source of truth for scope and acceptance criteria.
 - 14 Oct 2026, created by `VTCodeCraft`:
   - Phase 1: #2–#11, plus blocker/decision tracker #1 (closed 14 Oct 2026; its access item moved to #2);
   - Phases 2–5: #12–#39, created in PR merge-wave order, so issue numbers roughly follow the work order.
+  - Testing checkpoints CP-1 to CP-8: #40–#47, one per merge wave (see CHECKPOINTS.md), labeled `testing`, `gate`.
 - Labels: `phase-1-security`, `phase-2-mcp-knowledge`, `phase-3-agent-slack`, `phase-4-frontend`, `phase-5-release`, `security`, `armoriq`, `experiment`, `gate`, `backend`, `mcp`, `database`, `knowledge`, `agent`, `slack`, `frontend`, `testing`, `deployment` (plus the existing `documentation`).
 - Issue bodies are generated from the task files. They add a Ready/Blocked status, merge position, and `#` references for every dependency.
 - No issue is assigned, by design: contributors self-assign when they pick up a task, and the owners named here are suggestions (D-25). No milestones or projects.
@@ -2071,3 +2072,11 @@ Read before starting: `docs/Todos/context/` (project context, architecture rules
 | P5-02 | [#38](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/38) | `VTCodeCraft` | 2026-10-14 |
 | P5-03 | [#37](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/37) | `VTCodeCraft` | 2026-10-14 |
 | P5-04 | [#39](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/39) | `VTCodeCraft` | 2026-10-14 |
+| CP-1 testing checkpoint | [#40](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/40) | `VTCodeCraft` | 2026-10-14 |
+| CP-2 testing checkpoint | [#41](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/41) | `VTCodeCraft` | 2026-10-14 |
+| CP-3 testing checkpoint | [#42](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/42) | `VTCodeCraft` | 2026-10-14 |
+| CP-4 testing checkpoint | [#43](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/43) | `VTCodeCraft` | 2026-10-14 |
+| CP-5 testing checkpoint | [#44](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/44) | `VTCodeCraft` | 2026-10-14 |
+| CP-6 testing checkpoint | [#45](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/45) | `VTCodeCraft` | 2026-10-14 |
+| CP-7 testing checkpoint | [#46](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/46) | `VTCodeCraft` | 2026-10-14 |
+| CP-8 testing checkpoint | [#47](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/47) | `VTCodeCraft` | 2026-10-14 |

@@ -89,8 +89,12 @@ def experiment_results() -> dict[str, str]:
 def build(repo: str) -> str:
     waves = merge_waves()
     specs = task_specs()
-    issue_list = gh_json(repo, "issue", "list", "--json", "number,state,assignees")
+    issue_list = gh_json(repo, "issue", "list", "--json", "number,state,assignees,title")
     issues = {i["number"]: i for i in issue_list}
+    # Testing checkpoints (docs/Todos/CHECKPOINTS.md): one issue per wave, titled "[CP-n] ...".
+    checkpoints = {
+        int(m.group(1)): i for i in issue_list if (m := re.match(r"\[CP-(\d)\]", i["title"]))
+    }
     prs = gh_json(
         repo, "pr", "list", "--json", "number,state,isDraft,author,closingIssuesReferences,url"
     )
@@ -133,7 +137,29 @@ def build(repo: str) -> str:
     counts: dict[str, int] = {}
     for st, _ in rows.values():
         counts[st] = counts.get(st, 0) + 1
-    nxt = next((t for t in order if rows[t][0] != "Done"), None)
+
+    def cp_state(k: int, pairs: list[tuple[str, int]]) -> tuple[str, str]:
+        cp = checkpoints.get(k)
+        if cp is None:
+            return "Missing", "no checkpoint issue"
+        if cp["state"] == "CLOSED":
+            return "Passed", f"checkpoint issue #{cp['number']} closed"
+        if all(rows[t][0] == "Done" for t, _ in pairs):
+            return "Ready to test", "every wave issue is merged: run it now"
+        return "Waiting", "wave not fully merged yet"
+
+    cps = {k: cp_state(k, pairs) for k, (_, pairs) in enumerate(waves, 1)}
+    # Next action: first wave not fully merged, unless an earlier merged wave still needs its test.
+    next_action = None
+    for k, (_, pairs) in enumerate(waves, 1):
+        if all(rows[t][0] == "Done" for t, _ in pairs):
+            if cps[k][0] != "Passed":
+                next_action = ("checkpoint", k)
+                break
+            continue
+        next_action = ("merge", next(t for t, _ in pairs if rows[t][0] != "Done"))
+        break
+    nxt = next_action[1] if next_action and next_action[0] == "merge" else None
     exp = experiment_results()
     now = dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -154,8 +180,20 @@ def build(repo: str) -> str:
         "|" + "---|" * len(counts),
         "| " + " | ".join(str(v) for v in counts.values()) + " |",
         "",
+        f"Testing checkpoints passed: "
+        f"{sum(1 for st, _ in cps.values() if st == 'Passed')} of {len(waves)} "
+        "(see docs/Todos/CHECKPOINTS.md).",
+        "",
     ]
-    if nxt:
+    if next_action and next_action[0] == "checkpoint":
+        k = next_action[1]
+        n = checkpoints[k]["number"] if k in checkpoints else "?"
+        out += [
+            f"**Next:** run testing checkpoint CP-{k} (#{n}). "
+            f"Wave {k + 1} PRs are not merged until it passes.",
+            "",
+        ]
+    elif nxt:
         st, note = rows[nxt]
         out += [
             f"**Next to merge:** {nxt} (#{issue_of[nxt]}) {specs[nxt]['title']} — {st}: {note}.",
@@ -172,14 +210,17 @@ def build(repo: str) -> str:
                 "",
             ]
     else:
-        out += ["**All tasks are done.**", ""]
+        out += ["**All tasks are merged and every checkpoint has passed.**", ""]
 
     out += ["## Tasks in merge order", ""]
-    for wave, pairs in waves:
+    for k, (wave, pairs) in enumerate(waves, 1):
         out += [f"### Wave {wave}", "", "| Issue | Task | Status | Details |", "|---|---|---|---|"]
         for tid, n in pairs:
             st, note = rows[tid]
             out.append(f"| #{n} | {tid} {specs[tid]['title']} | **{st}** | {note} |")
+        cst, cnote = cps[k]
+        cnum = f"#{checkpoints[k]['number']}" if k in checkpoints else "—"
+        out.append(f"| {cnum} | CP-{k} testing checkpoint | **{cst}** | {cnote} |")
         out.append("")
 
     out += [
