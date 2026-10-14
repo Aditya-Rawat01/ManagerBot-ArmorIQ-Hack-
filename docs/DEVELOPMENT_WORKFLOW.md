@@ -8,7 +8,7 @@ For a four-person team shipping by 17 October 2026. Keep it simple, keep
 | Phase | Content | Gate to start |
 |---|---|---|
 | 0 — Foundation | This scaffold: structure, contracts, health endpoints, CI | — |
-| 1–4 | Detailed plan delivered separately (ArmorIQ experiments first, then the vertical slice, policy/HOLD/manager view, hardening) | Phase 0 merged |
+| 1–5 | Task breakdown, gates and owners: [`docs/Todos/README.md`](Todos/README.md) (ArmorIQ experiments first, then the vertical slice, policy/HOLD/manager view, hardening, release) | Phase 0 merged |
 
 Rules that hold in every phase (PRD v2 §0, Architecture v2.1 §0):
 
