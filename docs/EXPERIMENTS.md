@@ -34,6 +34,7 @@ or deployed MCP endpoint has been used from this repository.
   Persona-to-account mapping for Sam/Priya is a team decision (D-25), still open.
   Hard facts for the gates: Maya is Org Admin and outranks both Analyst accounts (Arch §5.6.8: approver outranks requester, no self-approval).
 - Agent: `proxylead` (exact FIXED name), ID `eae6515b-4095-458d-98f0-03310cf4e3cb`, type Assistant, owner Maya account, environment Development.
+  Registry status: **pending** (registered, unscanned — the scan needs a reachable URL, which lands with the P1-05 deploy + P1-06 endpoint attach; rescan then).
   Registered with placeholder URL `https://proxylead-not-yet-deployed.invalid`
   (RFC-2606 `.invalid`, never resolves) and placeholder API-key auth. Real Render URL
   + real bearer land in P1-06; the console audit note + URL must then be updated (tracked in P5-03).
