@@ -112,9 +112,7 @@ def test_tampered_and_expired_cookie_rejected() -> None:
         client = make_client()
         response = client.get("/api/v1/session", headers=_cookie_header(bad))
         assert response.status_code == 401
-        assert (
-            ErrorResponse.model_validate(response.json()).error.code == "unauthenticated"
-        )
+        assert ErrorResponse.model_validate(response.json()).error.code == "unauthenticated"
 
 
 def test_missing_session_is_401() -> None:
