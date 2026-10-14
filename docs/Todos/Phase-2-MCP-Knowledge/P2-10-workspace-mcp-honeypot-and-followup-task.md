@@ -18,7 +18,7 @@ P2-10 — Implement the non-networked `send_external_message` honeypot (writes o
 The injection demo needs a real target that ArmorIQ blocks and that can never
 cause egress. Outcome:
 
-- two guarded tools in `{WORKSPACE_TOOLS_MODULE}`;
+- two guarded tools in `tools_workspace.py`;
 - the honeypot writes one synthetic `egress_sink` row when executed (only in an explicitly unguarded test) and makes no network call under any circumstances;
 - the follow-up task tool has enum-bounded fields, an injected requester, and an idempotency key, or it is removed from the policy and UI (D-17).
 
@@ -40,7 +40,7 @@ cause egress. Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `services/toolserver/{WORKSPACE_TOOLS_MODULE}` (new; PRD `tools_workspace.py`, Arch `tools_work.py`, D-01)
+- `services/toolserver/tools_workspace.py` (new; name per ADR-027)
 - `tests/toolserver/test_workspace_tools.py` (new)
 
 ## 7. Existing files it may need to modify

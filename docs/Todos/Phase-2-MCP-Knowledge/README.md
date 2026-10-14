@@ -11,7 +11,7 @@ Sources: PRD §3, §6, §8, §9, §10.1; Arch §6, §7, §10, §13.
 
 | ID | Title | Owner | Size | Hard dependencies |
 |---|---|---|---|---|
-| [P2-01](P2-01-database-schema-migrations-and-roles.md) | Neon schema, migrations, roles, grant verification | `Aditya-Rawat01` | M | D-08 |
+| [P2-01](P2-01-database-schema-migrations-and-roles.md) | Neon schema, migrations, roles, grant verification | `Aditya-Rawat01` | M | — (D-08 resolved: ADR-028) |
 | [P2-02](P2-02-tool-argument-and-result-contracts.md) | Tool argument and result contracts | `Aditya-Rawat01` | S | — |
 | [P2-03](P2-03-seed-corpus-ingestion-and-embeddings.md) | Seed corpus, ingestion, local embeddings | `Aditya-Rawat01` | M | P2-01 |
 | [P2-04](P2-04-lexical-retrieval-and-tier-filters.md) | Lexical retrieval + tier filters | `Aditya-Rawat01` | S–M | P2-01, P2-03 |
@@ -24,14 +24,14 @@ Sources: PRD §3, §6, §8, §9, §10.1; Arch §6, §7, §10, §13.
 
 ## Entry criteria
 
-- D-08 decided (migration tooling and driver). D-01 decided before P2-06.
+- D-08 (ADR-028) and D-01 (ADR-027) resolved on 14 Oct 2026.
 - Neon project available to the DB steward.
 - P1-04 merged before any product tool is deployed (G0).
 
 ## Deliverables
 
 - `migrations/`, `seed/`, `services/knowledge/{ingest,embeddings,retrieval}.py`.
-- `services/toolserver/{db,schemas,ledger}.py`, `{MEMORY_TOOLS_MODULE}`, `{WORKSPACE_TOOLS_MODULE}`.
+- `services/toolserver/{db,schemas,ledger}.py`, `tools_memory.py`, `tools_workspace.py`.
 - `services/contracts/tool_args.py`.
 - `scripts/verify_db_grants.py` and `scripts/migrate.py` (supporting).
 - All 14 product tools guarded, deployed, and listed by `tools/list`.
@@ -53,10 +53,10 @@ Sources: PRD §3, §6, §8, §9, §10.1; Arch §6, §7, §10, §13.
 - Start immediately: **P2-02** (unblocks P3-02), **P2-01**.
 - After P2-01: P2-03 and P2-07 in parallel; then P2-04.
 - P2-06 once P1-04, P2-02, P2-04, and P2-07 are merged. This is the critical path to E1.
-- After P2-06: P2-08 and P2-10 (different owners, different files) in parallel. P2-09 after P2-08, because both edit `{MEMORY_TOOLS_MODULE}`. P2-05 any time after P2-04.
+- After P2-06: P2-08 and P2-10 (different owners, different files) in parallel. P2-09 after P2-08, because both edit `tools_memory.py`. P2-05 any time after P2-04.
 
 ## Coordination points
 
-- `{MEMORY_TOOLS_MODULE}` is edited by P2-06 → P2-08 → P2-09 in sequence (same owner).
-- `{WORKSPACE_TOOLS_MODULE}` is created and owned by P2-10. Its single registration line in `servers.py` is reviewed by the steward (`Aditya-Rawat01`).
+- `tools_memory.py` is edited by P2-06 → P2-08 → P2-09 in sequence (same owner).
+- `tools_workspace.py` is created and owned by P2-10. Its single registration line in `servers.py` is reviewed by the steward (`Aditya-Rawat01`).
 - The view names in `tool_args.py` are placeholders until P2-08 (ICR).

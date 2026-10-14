@@ -3,17 +3,14 @@
 Copy-ready drafts for all 38 implementation tasks. Each draft links to its task
 file, which remains the source of truth for scope and acceptance criteria.
 
-## Issue status: **Phase 1 created (#1–#11); Phases 2–5 not created**
+## Issue status: **all 38 tasks created (#2–#39); blocker #1 closed**
 
-- 14 Oct 2026, created by `VTCodeCraft` (push + triage access):
-  - Phase 1 issues #2–#11 (P1-01 to P1-10);
-  - blocker/decision tracker #1;
-  - labels `phase-1-security`, `security`, `armoriq`, `experiment`, `gate`, `backend`, `mcp`, `deployment`.
-- Phase 1 issue bodies are generated from the task files. They add status, sequencing (merge wave), and resolved `#` references for Phase 1 dependencies.
-  - References to Phase 2–5 tasks read "issue not created yet" until those issues exist.
-  - When creating them, use the next free number and edit the affected Phase 1 issues.
-- No issue is assigned, by design: contributors self-assign when they pick up a task, and the owners named here are suggestions (D-25, resolved 14 Oct 2026). The security owner's handle `samarth-chawla` was confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` was a typo).
-- No milestones or projects were created.
+- 14 Oct 2026, created by `VTCodeCraft`:
+  - Phase 1: #2–#11, plus blocker/decision tracker #1 (closed 14 Oct 2026; its access item moved to #2);
+  - Phases 2–5: #12–#39, created in PR merge-wave order, so issue numbers roughly follow the work order.
+- Labels: `phase-1-security`, `phase-2-mcp-knowledge`, `phase-3-agent-slack`, `phase-4-frontend`, `phase-5-release`, `security`, `armoriq`, `experiment`, `gate`, `backend`, `mcp`, `database`, `knowledge`, `agent`, `slack`, `frontend`, `testing`, `deployment` (plus the existing `documentation`).
+- Issue bodies are generated from the task files. They add a Ready/Blocked status, merge position, and `#` references for every dependency.
+- No issue is assigned, by design: contributors self-assign when they pick up a task, and the owners named here are suggestions (D-25). No milestones or projects.
 
 ## How to create them (team member with triage or write access)
 
@@ -692,7 +689,7 @@ The database boundary is a security layer (Arch §5.4 layer 2). Outcome:
 
 ### Prerequisites
 - Hard: none.
-- Decisions: **D-08** (migration tooling and driver) blocks start. D-20 (member columns) is needed to finish.
+- Decisions: D-08 resolved (ADR-028: `psycopg` 3 + plain numbered SQL migrations). D-20 resolved (ADR-021).
 - Blocks: P2-03, P2-04, P2-07, P2-10, P3-01, G0.
 
 ### Acceptance criteria
@@ -1122,7 +1119,7 @@ Body:
 The injection demo needs a real target that ArmorIQ blocks and that can never
 cause egress. Outcome:
 
-- two guarded tools in `{WORKSPACE_TOOLS_MODULE}`;
+- two guarded tools in `tools_workspace.py`;
 - the honeypot writes one synthetic `egress_sink` row when executed (only in an explicitly unguarded test) and makes no network call under any circumstances;
 - the follow-up task tool has enum-bounded fields, an injected requester, and an idempotency key, or it is removed from the policy and UI (D-17).
 
@@ -2046,31 +2043,31 @@ Read before starting: `docs/Todos/context/` (project context, architecture rules
 | P1-08 | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | `VTCodeCraft` | 2026-10-14 |
 | P1-09 | [#10](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/10) | `VTCodeCraft` | 2026-10-14 |
 | P1-10 | [#11](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/11) | `VTCodeCraft` | 2026-10-14 |
-| P2-01 | — | — | — |
-| P2-02 | — | — | — |
-| P2-03 | — | — | — |
-| P2-04 | — | — | — |
-| P2-05 | — | — | — |
-| P2-06 | — | — | — |
-| P2-07 | — | — | — |
-| P2-08 | — | — | — |
-| P2-09 | — | — | — |
-| P2-10 | — | — | — |
-| P3-01 | — | — | — |
-| P3-02 | — | — | — |
-| P3-03 | — | — | — |
-| P3-04 | — | — | — |
-| P3-05 | — | — | — |
-| P3-06 | — | — | — |
-| P3-07 | — | — | — |
-| P3-08 | — | — | — |
-| P3-09 | — | — | — |
-| P4-01 | — | — | — |
-| P4-02 | — | — | — |
-| P4-03 | — | — | — |
-| P4-04 | — | — | — |
-| P4-05 | — | — | — |
-| P5-01 | — | — | — |
-| P5-02 | — | — | — |
-| P5-03 | — | — | — |
-| P5-04 | — | — | — |
+| P2-01 | [#13](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/13) | `VTCodeCraft` | 2026-10-14 |
+| P2-02 | [#12](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/12) | `VTCodeCraft` | 2026-10-14 |
+| P2-03 | [#15](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/15) | `VTCodeCraft` | 2026-10-14 |
+| P2-04 | [#18](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/18) | `VTCodeCraft` | 2026-10-14 |
+| P2-05 | [#21](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/21) | `VTCodeCraft` | 2026-10-14 |
+| P2-06 | [#19](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/19) | `VTCodeCraft` | 2026-10-14 |
+| P2-07 | [#14](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/14) | `VTCodeCraft` | 2026-10-14 |
+| P2-08 | [#22](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/22) | `VTCodeCraft` | 2026-10-14 |
+| P2-09 | [#24](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/24) | `VTCodeCraft` | 2026-10-14 |
+| P2-10 | [#23](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/23) | `VTCodeCraft` | 2026-10-14 |
+| P3-01 | [#16](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/16) | `VTCodeCraft` | 2026-10-14 |
+| P3-02 | [#20](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/20) | `VTCodeCraft` | 2026-10-14 |
+| P3-03 | [#17](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/17) | `VTCodeCraft` | 2026-10-14 |
+| P3-04 | [#25](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/25) | `VTCodeCraft` | 2026-10-14 |
+| P3-05 | [#26](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/26) | `VTCodeCraft` | 2026-10-14 |
+| P3-06 | [#27](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/27) | `VTCodeCraft` | 2026-10-14 |
+| P3-07 | [#28](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/28) | `VTCodeCraft` | 2026-10-14 |
+| P3-08 | [#30](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/30) | `VTCodeCraft` | 2026-10-14 |
+| P3-09 | [#35](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/35) | `VTCodeCraft` | 2026-10-14 |
+| P4-01 | [#29](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/29) | `VTCodeCraft` | 2026-10-14 |
+| P4-02 | [#31](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/31) | `VTCodeCraft` | 2026-10-14 |
+| P4-03 | [#32](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/32) | `VTCodeCraft` | 2026-10-14 |
+| P4-04 | [#33](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/33) | `VTCodeCraft` | 2026-10-14 |
+| P4-05 | [#34](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/34) | `VTCodeCraft` | 2026-10-14 |
+| P5-01 | [#36](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/36) | `VTCodeCraft` | 2026-10-14 |
+| P5-02 | [#38](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/38) | `VTCodeCraft` | 2026-10-14 |
+| P5-03 | [#37](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/37) | `VTCodeCraft` | 2026-10-14 |
+| P5-04 | [#39](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/39) | `VTCodeCraft` | 2026-10-14 |

@@ -40,7 +40,7 @@ Every later tool reuses this path, and E1 needs it. Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `services/toolserver/{MEMORY_TOOLS_MODULE}` (new): PRD `tools_memory.py`, Arch `tools_access.py` (D-01)
+- `services/toolserver/tools_memory.py` (new; name per ADR-027)
 - `services/toolserver/schemas.py` (new; documented): tool → argument/result model registry wiring P2-02 into dispatch
 - `services/toolserver/servers.py` (existing; steward): guarded dispatch and registration
 - `services/toolserver/main.py` (existing; steward): wiring as needed
@@ -72,7 +72,7 @@ Every later tool reuses this path, and E1 needs it. Outcome:
    Any exception → MCP error result with a SHARED_INTERFACES §4 code. No protected details in error text.
 2. **Registration.** Every product tool is registered only through `guarded(...)`. A test fails if any product tool is registered otherwise. Diagnostic tools stay config-gated (M-04).
 3. **`knowledge_search_team` handler.** Calls `retrieval.search(tier=DataTier.TEAM, workspace_id=ctx.workspace_id, query=args.query, limit=args.limit)` with **`DataTier.TEAM` as a literal constant** and maps the hits to `KnowledgeSearchResult`.
-4. Do **not** create `{WORKSPACE_TOOLS_MODULE}`. P2-10 creates and owns it, and adds its one registration line to `servers.py` in a PR you review as steward.
+4. Do **not** create `tools_workspace.py`. P2-10 creates and owns it, and adds its one registration line to `servers.py` in a PR you review as steward.
 5. Verify end to end locally with an MCP client (initialize → `tools/list` → `tools/call`) using a `_ctx` signed with a test secret.
 6. Keep `servers.py` as the transport module (ADR-006). If E1 forces the hand-written transport, it goes into `mcp_protocol.py` under a separate ICR (M-01).
 

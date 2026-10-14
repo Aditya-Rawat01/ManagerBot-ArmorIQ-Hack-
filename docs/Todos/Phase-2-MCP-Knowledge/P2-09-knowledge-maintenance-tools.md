@@ -39,7 +39,7 @@ The memory-authority rules prevent poisoning (PRD §8.4). Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `services/toolserver/{MEMORY_TOOLS_MODULE}` (extend; sequential with P2-08)
+- `services/toolserver/tools_memory.py` (extend; sequential with P2-08)
 - `tests/toolserver/test_maintenance_tools.py` (new)
 
 ## 7. Existing files it may need to modify

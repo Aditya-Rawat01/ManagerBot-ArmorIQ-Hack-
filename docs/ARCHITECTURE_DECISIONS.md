@@ -228,7 +228,7 @@ before committing, and the exclusion prevents a repeat.
 
 ---
 
-ADR-015 to ADR-026 record the Phase 1 planning decisions confirmed by the
+ADR-015 to ADR-028 record the planning decisions confirmed by the
 project owner on 14 Oct 2026 ("accept all recommendations"; hosting =
 Render). Each maps to a `D-xx` entry in
 `docs/Todos/context/DECISIONS_AND_OPEN_QUESTIONS.md`.
@@ -354,6 +354,27 @@ It never carries a raw email.
 
 **Why.** An SDK plan check, application rule, or tool-server rule must never be reported as an ArmorIQ policy decision (PRD §0.6, Arch §0.7).
 
+## ADR-027 — Tool module file names (D-01, U-13)
+
+**Decision.** Use the PRD §3.1 names:
+- `services/toolserver/tools_memory.py`: the `memory-mcp` tools (search, source reads, notes, Maya confirmation, supersession).
+- `services/toolserver/tools_workspace.py`: the `workspace-mcp` tools (`send_external_message` honeypot, optional `create_followup_task`).
+
+The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
+
+**Why.** The names match the registered endpoint names `memory-mcp` and `workspace-mcp`. Confirmed by the project owner on 14 Oct 2026.
+
+## ADR-028 — Database driver and migrations (D-08)
+
+**Decision.**
+- **Driver:** `psycopg` 3 with its connection pool (`psycopg_pool`) and the `pgvector` adapter, pinned in the `api` and `toolserver` extras when P2-01 lands.
+- **Migrations:** plain, numbered SQL files in `migrations/` (`0001_*.sql`, `0002_*.sql`, …), applied in order by `scripts/migrate.py` using `DATABASE_URL_MIGRATE`.
+  - The migration role is never available to running services (PRD §8.1).
+  - Merged migrations are never edited; changes go in a new numbered file.
+  - Roles, grants and `REVOKE`s live in these SQL files, so the backend's denial on protected tables is explicit and testable (`scripts/verify_db_grants.py`).
+
+**Why.** Grants stay visible in SQL, there are few dependencies, and it matches ADR-002. No ORM or Alembic for the hackathon. Confirmed by the project owner on 14 Oct 2026.
+
 ---
 
 ## Unresolved questions (decide before the related phase)
@@ -372,5 +393,5 @@ It never carries a raw email.
 | U-10 | `MIN_SCORE`, score scale, snippet limits | E17 |
 | U-11 | Whether approver identity is observable through the pinned SDK | E4 |
 | U-12 | Official submission deadline hour and format | Hackathon organizers |
-| U-13 | Tool module names: `tools_memory/tools_workspace.py` (PRD) vs `tools_access/tools_work.py` (Architecture) | Before Phase 2 tool work |
+| U-13 | Tool module names: `tools_memory/tools_workspace.py` (PRD) vs `tools_access/tools_work.py` (Architecture) | **Resolved → ADR-027** |
 | U-14 | Probe script names: `probe_v2_e*` (PRD, Architecture §12) vs `probe_e*` (Architecture §11 tree) | **Resolved → ADR-017** |

@@ -24,9 +24,8 @@ not resolved silently.
 
 - Scaffold complete: health endpoints, contracts, MCP transport, web shell, CI ([PROJECT_CONTEXT §7](context/PROJECT_CONTEXT.md)).
 - **No ArmorIQ experiment has run** (E1–E5, E17 = NOT RUN). The documented Day-1 gates (13 Oct) have slipped, so this plan compresses 14–17 Oct.
-- **Resolved 14 Oct 2026** (ADR-015 to ADR-026): D-19, D-07 (Render), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
+- **Resolved 14 Oct 2026** (ADR-015 to ADR-028): D-01 (tool module names), D-08 (`psycopg` 3 + SQL migrations), D-19, D-07 (Render), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
 - Still open:
-  - D-08 (migrations) and D-01 (tool module names), before Phase 2 work;
   - ArmorIQ Org Admin access and the API key (`Aditya-Rawat01`, tracked in P1-01 / #2).
 - Participants: `Aditya-Rawat01` acts as Maya (Org Admin, console approver, host); the team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Blocker issue #1 is closed.
 
@@ -315,6 +314,8 @@ because Phase 1's live experiments need Phase 2 tools (see Critical path).
 
 ### Merge sequence
 
+Issue numbers are shown in parentheses (`#n`); every task has exactly one issue.
+
 Merge left to right within a wave. "Needs" lists the earlier items of the
 **same** wave that must merge before that PR can be finished and rebased. The
 author may build on the other PR's branch meanwhile (stacked PR), but that PR
@@ -322,14 +323,14 @@ merges first.
 
 | Wave | Merge order | Needs (same wave) | Notes |
 |---|---|---|---|
-| 1 — Phase 1 setup | P1-01 → P1-04 → P1-03 → P1-02 → P1-05 | — | All independent. P1-04 first: the gateway and every tool depend on it. P1-03 is the first contract-changing PR. P1-02 rebases onto the real `sign_ctx`. P1-05 deploys the scaffold only |
-| 2 — Data and contracts | P2-02 → P2-01 | — | The P1-08 policy YAML may be drafted now; its PR merges in Wave 6 |
-| 3 — Data layer | P2-07 → P2-03 → P3-01 → P3-03 | — | P2-03 ships the E1 seed record first |
-| 4 — First tool | P2-04 → P2-06 → P3-02 → P2-05 | P2-06 and P2-05 need P2-04 | After P2-06 merges, redeploy the tool server (P1-05 procedure). P1-04 must already be merged (G0) |
-| 5 — E1 and remaining tools | P1-06 → P2-08 → P2-10 → P2-09 → P3-04 → P3-05 → P3-06 → P1-07 | P3-04 and P1-07 need P1-06; P2-09 needs P2-08 (same tools module) | P1-06 (E1) merges only with its live record. P3-04's real-gateway wiring merges after G1. Redeploy after P2-08/P2-10/P2-09 |
-| 6 — Gates | P1-08 → P1-09 → P1-10 → P3-07 → P4-01 → P3-08 | P1-09 needs P1-08; P1-10 needs P1-09 | E5 → E3 → E4, one live run each, records included. P4-01 is backend; UI waits for G1 + G3 |
-| 7 — UI and offline suites | P4-02 → P4-03 → P4-04 → P4-05 → P3-09 | P4-03 and P4-04 need P4-02; P4-05 needs both | Starts only after G1 (P1-06) and G3 (P1-09) passed or fallbacks are recorded |
-| 8 — Release | P5-01 → P5-03 → P5-02 → P5-04 | P5-02 and P5-03 need P5-01; P5-04 needs both | P5-02 core items by 16 Oct 12:00 (freeze) |
+| 1 — Phase 1 setup | P1-01 (#2) → P1-04 (#5) → P1-03 (#4) → P1-02 (#3) → P1-05 (#6) | — | All independent. P1-04 first: the gateway and every tool depend on it. P1-03 is the first contract-changing PR. P1-02 rebases onto the real `sign_ctx`. P1-05 deploys the scaffold only |
+| 2 — Data and contracts | P2-02 (#12) → P2-01 (#13) | — | The P1-08 policy YAML may be drafted now; its PR merges in Wave 6 |
+| 3 — Data layer | P2-07 (#14) → P2-03 (#15) → P3-01 (#16) → P3-03 (#17) | — | P2-03 ships the E1 seed record first |
+| 4 — First tool | P2-04 (#18) → P2-06 (#19) → P3-02 (#20) → P2-05 (#21) | P2-06 and P2-05 need P2-04 | After P2-06 merges, redeploy the tool server (P1-05 procedure). P1-04 must already be merged (G0) |
+| 5 — E1 and remaining tools | P1-06 (#7) → P2-08 (#22) → P2-10 (#23) → P2-09 (#24) → P3-04 (#25) → P3-05 (#26) → P3-06 (#27) → P1-07 (#8) | P3-04 and P1-07 need P1-06; P2-09 needs P2-08 (same tools module) | P1-06 (E1) merges only with its live record. P3-04's real-gateway wiring merges after G1. Redeploy after P2-08/P2-10/P2-09 |
+| 6 — Gates | P1-08 (#9) → P1-09 (#10) → P1-10 (#11) → P3-07 (#28) → P4-01 (#29) → P3-08 (#30) | P1-09 needs P1-08; P1-10 needs P1-09 | E5 → E3 → E4, one live run each, records included. P4-01 is backend; UI waits for G1 + G3 |
+| 7 — UI and offline suites | P4-02 (#31) → P4-03 (#32) → P4-04 (#33) → P4-05 (#34) → P3-09 (#35) | P4-03 and P4-04 need P4-02; P4-05 needs both | Starts only after G1 (P1-06) and G3 (P1-09) passed or fallbacks are recorded |
+| 8 — Release | P5-01 (#36) → P5-03 (#37) → P5-02 (#38) → P5-04 (#39) | P5-02 and P5-03 need P5-01; P5-04 needs both | P5-02 core items by 16 Oct 12:00 (freeze) |
 
 This order was validated against every task's hard dependencies, the G1/G3
 gates, and same-file sequences: 38 tasks, no violations.
@@ -378,7 +379,7 @@ One steward per shared file, with explicit coordination for edits:
 [AGENT_HANDOFF_PROTOCOL.md §3](context/AGENT_HANDOFF_PROTOCOL.md).
 Sequential same-file work:
 
-- `{MEMORY_TOOLS_MODULE}`: P2-06 → P2-08 → P2-09.
+- `tools_memory.py`: P2-06 → P2-08 → P2-09.
 - `services/toolserver/servers.py`: owned by P2-06; P2-10 adds one registration line under steward review.
 - `apps/api/responder.py`: P3-03 → P3-07.
 - `services/knowledge/retrieval.py`: P2-04 → P2-05.

@@ -44,7 +44,7 @@ allowed".
 
 ## 6. Exact files/modules this task owns
 
-- `services/toolserver/{MEMORY_TOOLS_MODULE}` (extend; same owner as P2-06/P2-09; do not develop in parallel branches with P2-09)
+- `services/toolserver/tools_memory.py` (extend; same owner as P2-06/P2-09; do not develop in parallel branches with P2-09)
 - `migrations/<next>_approved_views.sql` (new): synthetic company-data tables and approved per-tier views
 - `tests/toolserver/test_elevated_tier_tools.py` (new)
 - `tests/toolserver/test_source_leakage.py` (new)

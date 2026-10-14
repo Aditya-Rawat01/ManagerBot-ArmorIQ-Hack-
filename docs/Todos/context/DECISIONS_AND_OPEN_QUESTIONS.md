@@ -18,6 +18,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-01 — Tool module file names (= U-13)
 
+**RESOLVED 14 Oct 2026 → ADR-027:** PRD names `tools_memory.py` and `tools_workspace.py`. Task files now use these names.
+
 - **PRD §3.1:** `services/toolserver/{…,tools_memory.py,tools_workspace.py,…}`
 - **Arch §11:** `services/toolserver/{…,tools_access.py,tools_work.py,…}`
 - Neither document resolves the conflict. Observation only: the PRD names match
@@ -294,6 +296,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `parthgoyal26-03-2005` with the team, **today**. Needed before **P1-05**. Blocking: **start**.
 
 ### D-08 — Migration tooling and database driver
+
+**RESOLVED 14 Oct 2026 → ADR-028:** `psycopg` 3 (+ `psycopg_pool`, `pgvector` adapter) and plain numbered SQL migrations applied by `scripts/migrate.py`.
 
 - Not in PRD/Arch. Scaffold ADR-002 notes `psycopg` 3 + `pgvector` adapter.
 - PROPOSED default: plain ordered SQL files in `migrations/` applied by a small

@@ -38,21 +38,21 @@ The database boundary is a security layer (Arch §5.4 layer 2). Outcome:
 ## 5. Prerequisites and dependencies
 
 - Hard: none.
-- Decisions: **D-08** (migration tooling and driver) blocks start. D-20 (member columns) is needed to finish.
+- Decisions: D-08 resolved (ADR-028: `psycopg` 3 + plain numbered SQL migrations). D-20 resolved (ADR-021).
 - Blocks: P2-03, P2-04, P2-07, P2-10, P3-01, G0.
 
 ## 6. Exact files/modules this task owns
 
 - `migrations/` (new directory; DB steward): initial numbered SQL migrations and `migrations/README.md` (ordering and append-only rule).
-- `scripts/migrate.py` (new, PROPOSED supporting infrastructure under D-08): applies pending migrations with `DATABASE_URL_MIGRATE`.
+- `scripts/migrate.py` (new; supporting infrastructure per ADR-028): applies pending migrations with `DATABASE_URL_MIGRATE`.
 - `scripts/verify_db_grants.py` (new; documented name).
 - `services/toolserver/db.py` (new; documented name): toolserver-role connection helper with statement timeout and read-only transactions for read tools.
 - `tests/toolserver/test_db_grants.py` (new; live database; skipped when DSNs are absent).
 
 ## 7. Existing files it may need to modify
 
-- `pyproject.toml` (steward `VTCodeCraft`): add the database driver (D-08) to the `toolserver` and `api` extras.
-- `docs/ARCHITECTURE_DECISIONS.md` (steward `VTCodeCraft`): ADR for D-08 and the grant design.
+- `pyproject.toml` (steward `VTCodeCraft`): add `psycopg[binary]`, `psycopg_pool` and `pgvector` (ADR-028) to the `toolserver` and `api` extras.
+- `docs/ARCHITECTURE_DECISIONS.md` (steward `VTCodeCraft`): ADR for the grant design (D-08 is ADR-028).
 - `.env.example`: no change expected (`DATABASE_URL_BACKEND`, `DATABASE_URL_TOOLSERVER`, `DATABASE_URL_MIGRATE` exist).
 
 ## 8. Shared interfaces and contracts
@@ -78,7 +78,7 @@ The database boundary is a security layer (Arch §5.4 layer 2). Outcome:
    - `proxylead_toolserver`: the minimum needed for P2-04..P2-10.
    - No runtime role may `UPDATE` or `DELETE` ledger or event tables.
    - Set a per-role `statement_timeout`.
-5. `services/toolserver/db.py`: async or sync connection helper per D-08, a single pool, statement timeout, a read-only transaction helper, and parameterized queries only (no string-built SQL from inputs).
+5. `services/toolserver/db.py`: async or sync connection helper using `psycopg` 3 and `psycopg_pool` (ADR-028), a single pool, statement timeout, a read-only transaction helper, and parameterized queries only (no string-built SQL from inputs).
 6. `scripts/verify_db_grants.py`: connect as the backend role and attempt `SELECT` on each protected table and view. Expect *permission denied*; any success exits non-zero. Then confirm the allowed tables work and that the toolserver role reaches the knowledge tables. Print table names and results only, never DSNs.
 7. Neon cold start: document the expected delay and the timeout used (Arch §7.1). Never bypass authorization because a query is slow.
 
@@ -111,7 +111,7 @@ python -m pytest tests/toolserver/test_db_grants.py -q
 ## 14. Risks and unresolved questions
 
 - The Neon role-creation method or limits may differ. Record them.
-- D-08, D-20.
+- Neon role-creation limits (ADR-028 assumes roles and grants can be expressed in SQL; record any console-only step).
 - D-12 may later require a metadata-only table or view for the manager console (a new migration by the deciding task).
 
 ## 15. Handoff deliverables for dependent agents
