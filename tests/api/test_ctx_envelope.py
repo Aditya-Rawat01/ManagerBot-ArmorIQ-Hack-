@@ -60,12 +60,18 @@ def test_signing_is_canonical() -> None:
 
 
 def test_tampered_payload_rejected() -> None:
+    import base64
+
     token = sign_ctx(make_envelope(), SECRET)
     payload, _, mac = token.partition(".")
-    flipped = "A" if payload[-1] != "A" else "B"
+    # Flip a middle payload byte (not the last base64 char, which may only
+    # touch spare padding bits and still verify) without re-signing.
+    raw = bytearray(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    raw[len(raw) // 2] ^= 0x01
+    forged = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode()
     with pytest.raises(CtxError):
         verify_ctx(
-            f"{payload[:-1]}{flipped}.{mac}",
+            f"{forged}.{mac}",
             SECRET,
             expected_aud="memory-mcp",
             expected_tool="knowledge_search_team",
