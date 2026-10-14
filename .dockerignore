@@ -1,0 +1,46 @@
+# Docker build context exclusions (P1-05, ADR-029).
+# Required: secrets and local-only files must never reach an image layer.
+# Reused by P1-11's compose builds and the Render Docker services.
+
+# Secrets and local configuration — never bake into images
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials.json
+.armoriq/
+
+# Local-only progress journals (untracked scratch files)
+LOCAL_PROGRESS.md
+
+# Python / Node artifacts (reinstalled inside the image)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+node_modules/
+apps/web/dist/
+
+# VCS, editors, OS
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Caches, logs, local data
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+logs/
+.fastembed_cache/
+.cache/
+coverage/
+htmlcov/
