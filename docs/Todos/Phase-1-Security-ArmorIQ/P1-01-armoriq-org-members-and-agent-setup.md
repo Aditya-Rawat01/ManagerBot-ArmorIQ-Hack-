@@ -32,7 +32,7 @@ end of this task:
 ## 4. Owner and proposed contributors
 
 - Owner: `samarth-chawla`.
-- Contributors: the team members whose real accounts act as Maya, Sam, and Priya (named by the team; one must be the ArmorIQ Org Admin).
+- Contributors: the team members whose real accounts act as Maya, Sam, and Priya. Maya (ArmorIQ Org Admin, console approver, host) is `Aditya-Rawat01`, the project owner (confirmed 14 Oct 2026). The team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Org Admin access and the API key were moved here from blocker issue #1.
 - Reviewer: `VTCodeCraft`.
 
 ## 5. Prerequisites and dependencies

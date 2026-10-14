@@ -302,7 +302,7 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-25 — Team handles and ownership interpretation
 
-**RESOLVED 14 Oct 2026 (ownership; no ADR):** the security owner's handle is `samarth-chawla`. Issues are never assigned: contributors self-assign when they pick a task, and the owners in this plan are suggestions. The Maya/Sam/Priya participants are tracked separately in issue #1.
+**RESOLVED 14 Oct 2026 (ownership; no ADR):** the security owner's handle is `samarth-chawla`. Issues are never assigned: contributors self-assign when they pick a task, and the owners in this plan are suggestions. Participants are the four repository collaborators: `Aditya-Rawat01` (project owner) acts as Maya (Org Admin, console approver, host); the team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Org Admin access and the ArmorIQ API key are part of P1-01 (#2).
 
 - **Security owner handle: confirmed.** `samarth-chawla` (confirmed by the
   project owner on 14 Oct 2026; `amarth-chawla` in the brief was a typo). Task
