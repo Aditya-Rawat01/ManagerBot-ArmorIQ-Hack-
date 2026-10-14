@@ -86,7 +86,9 @@
         "step_index",
         "tool",
         "state",
-        "requested_at"
+        "delegation_id",
+        "requested_at",
+        "resolved_at"
       ],
       "title": "ApprovalStatus",
       "type": "object"
@@ -158,6 +160,10 @@
       "required": [
         "outcome",
         "source",
+        "reason",
+        "enforcement_action",
+        "armoriq_plan_id",
+        "delegation_id",
         "decided_at"
       ],
       "title": "ArmorIQDecision",
@@ -251,7 +257,12 @@
         "occurred_at",
         "event_type",
         "request_id",
-        "trace_id"
+        "trace_id",
+        "plan_id",
+        "step_index",
+        "jti",
+        "decision_source",
+        "payload"
       ],
       "title": "AuditEvent",
       "type": "object"
@@ -321,7 +332,8 @@
         "persona",
         "display_name",
         "app_role",
-        "masked_email"
+        "masked_email",
+        "slack_user_id"
       ],
       "title": "AuthenticatedUser",
       "type": "object"
@@ -410,7 +422,9 @@
       },
       "required": [
         "code",
-        "message"
+        "message",
+        "request_id",
+        "details"
       ],
       "title": "ErrorBody",
       "type": "object"
@@ -452,6 +466,7 @@
         }
       },
       "required": [
+        "status",
         "service",
         "version",
         "environment"
@@ -534,7 +549,9 @@
       "required": [
         "tool",
         "tier",
-        "query"
+        "query",
+        "hits",
+        "min_score"
       ],
       "title": "KnowledgeSearchResult",
       "type": "object"
@@ -594,7 +611,10 @@
         }
       },
       "required": [
-        "summary"
+        "summary",
+        "steps",
+        "escalation_user_confirmed",
+        "matched_topic_rule_id"
       ],
       "title": "PlanProposal",
       "type": "object"
@@ -632,6 +652,7 @@
         "step_index",
         "mcp",
         "tool",
+        "arguments",
         "purpose"
       ],
       "title": "PlannedToolCall",
@@ -723,7 +744,11 @@
         "workspace_id",
         "requester",
         "entry_point",
-        "received_at"
+        "received_at",
+        "slack_team_id",
+        "slack_channel_id",
+        "slack_thread_ts",
+        "slack_event_id"
       ],
       "title": "RequestContext",
       "type": "object"
@@ -805,7 +830,9 @@
         "author",
         "created_at",
         "version",
-        "review_status"
+        "review_status",
+        "superseded_by",
+        "reference_url"
       ],
       "title": "SourceCitation",
       "type": "object"
@@ -920,7 +947,11 @@
         "tool",
         "jti",
         "status",
-        "tool_server_reached"
+        "tool_server_reached",
+        "ledger_entry_id",
+        "result",
+        "error_code",
+        "error_message"
       ],
       "title": "ToolInvocationResult",
       "type": "object"

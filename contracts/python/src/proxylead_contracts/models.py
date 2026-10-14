@@ -31,9 +31,17 @@ from .tools import FORBIDDEN_ARGUMENT_KEYS, SEARCH_TOOLS, tool_spec
 
 
 class ContractModel(BaseModel):
-    """Base: immutable, rejects unknown fields so drift is caught early."""
+    """Base: immutable, rejects unknown fields so drift is caught early.
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    Serialized output always contains defaulted fields, so the exported
+    (serialization-mode) JSON Schema marks them required for TypeScript.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        json_schema_serialization_defaults_required=True,
+    )
 
 
 # ---------------------------------------------------------------------------
