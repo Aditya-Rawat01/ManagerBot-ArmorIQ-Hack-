@@ -195,6 +195,9 @@ export type SlackTeamId = string | null;
 export type SlackThreadTs = string | null;
 export type TraceId1 = string;
 export type WorkspaceId = string;
+export type Passcode = string;
+export type DisplayName1 = string;
+export type MaskedEmail1 = string;
 /**
  * What actually happened at the tool server, as evidenced by its ledger.
  *
@@ -422,6 +425,28 @@ export interface RequestContext {
   slack_thread_ts: SlackThreadTs;
   trace_id: TraceId1;
   workspace_id: WorkspaceId;
+}
+/**
+ * Sign-in body. The only request body that may carry a persona (PRD §4.1).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "SessionCreateRequest".
+ */
+export interface SessionCreateRequest {
+  passcode: Passcode;
+  persona: PersonaKey;
+}
+/**
+ * Current session. Carries the masked email, never the raw address.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "SessionInfo".
+ */
+export interface SessionInfo {
+  app_role: AppRole;
+  display_name: DisplayName1;
+  masked_email: MaskedEmail1;
+  persona: PersonaKey;
 }
 /**
  * What the tool server actually did. A plan or ALLOW is not proof of execution.
