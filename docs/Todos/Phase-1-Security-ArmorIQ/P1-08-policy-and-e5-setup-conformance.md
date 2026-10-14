@@ -37,7 +37,7 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 
 - Hard: P1-01; P1-06 (E1 path known); **P2-08, P2-10** (tier search/source tools and honeypot deployed: what E5/E3 exercise).
 - Soft: P2-09 (maintenance tools). When it deploys, re-register, re-apply the policy if needed, and re-run `check_setup.py`. The E3/UI gate does not wait for it (Arch §12 build gate).
-- Decisions: D-26 (placeholders in a public repo; blocks finish), D-17 (`create_followup_task` in or out), D-12 (option (a) adds a tool to the policy), D-02 (`{E5_PROBE}` name), D-18.
+- Decisions: D-26 (placeholders in a public repo; blocks finish), D-17 (`create_followup_task` in or out), D-12 (option (a) adds a tool to the policy), D-02 (`probe_v2_e5_setup.py` name), D-18.
 - Note: drafting the YAML can start immediately. Only the console steps wait.
 - Blocks: P1-09.
 
@@ -45,7 +45,7 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 
 - `policy/proxylead-policy.yaml` (new; **placeholders only**, per D-26)
 - `scripts/check_setup.py` (new)
-- `scripts/{E5_PROBE}`: PRD name `probe_v2_e5_setup.py`; the Arch §11 tree has no equivalent (D-02)
+- `scripts/probe_v2_e5_setup.py` (new; name per ADR-017)
 - `docs/EXPERIMENTS.md` § E5
 - `docs/SECURITY.md` § "Policy" (what was accepted and the verified schema facts)
 
@@ -77,7 +77,7 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
    - the three persona emails are configured and distinct;
    - one real ALLOW decision per member on `knowledge_search_team` (through the gateway or SDK per D-18).
    It exits non-zero on any mismatch.
-6. `{E5_PROBE}`: deliberately invoke a misnamed tool (for example a registered tool name with a suffix) and confirm the outcome is BLOCK or error, never ALLOW. Record the enforcing layer.
+6. `probe_v2_e5_setup.py`: deliberately invoke a misnamed tool (for example a registered tool name with a suffix) and confirm the outcome is BLOCK or error, never ALLOW. Record the enforcing layer.
 7. Record E5 using the template.
 
 ## 10. Acceptance criteria
@@ -92,14 +92,14 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 
 ## 11. Required unit, integration, and security tests
 
-- Live: `check_setup.py` + `{E5_PROBE}`.
+- Live: `check_setup.py` + `probe_v2_e5_setup.py`.
 - Offline unit test for the comparison logic in `check_setup.py` (pure function over two name sets): `tests/api/test_check_setup_logic.py` (owned by this task).
 
 ## 12. Commands for verification
 
 ```bash
 python scripts/check_setup.py
-python scripts/<E5 probe per D-02>.py
+python scripts/probe_v2_e5_setup.py
 python -m pytest tests/api/test_check_setup_logic.py -q
 git grep -nE "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" -- policy/ || echo "no emails"
 ```

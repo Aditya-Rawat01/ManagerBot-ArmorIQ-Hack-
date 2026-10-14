@@ -42,7 +42,7 @@ per requester. Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `scripts/{E3_PROBE}`: PRD name `probe_v2_e3_per_user.py`; Arch §11 tree `probe_e4_per_user.py` (legacy number; Arch §12 says to rename) (D-02).
+- `scripts/probe_v2_e3_per_user.py` (new; name per ADR-017)
 - `docs/EXPERIMENTS.md` § E3.
 
 ## 7. Existing files it may need to modify
@@ -97,7 +97,7 @@ per requester. Outcome:
 ## 12. Commands for verification
 
 ```bash
-python scripts/<E3 probe per D-02>.py
+python scripts/probe_v2_e3_per_user.py
 git diff -- docs/EXPERIMENTS.md
 ```
 

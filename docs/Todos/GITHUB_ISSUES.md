@@ -12,7 +12,7 @@ file, which remains the source of truth for scope and acceptance criteria.
 - Phase 1 issue bodies are generated from the task files. They add status, sequencing (merge wave), and resolved `#` references for Phase 1 dependencies.
   - References to Phase 2–5 tasks read "issue not created yet" until those issues exist.
   - When creating them, use the next free number and edit the affected Phase 1 issues.
-- No issue is assigned. The security owner's handle `samarth-chawla` was confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` was a typo); the other proposed owners and task assignments still await confirmation (D-25).
+- No issue is assigned, by design: contributors self-assign when they pick up a task, and the owners named here are suggestions (D-25, resolved 14 Oct 2026). The security owner's handle `samarth-chawla` was confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` was a typo).
 - No milestones or projects were created.
 
 ## How to create them (team member with triage or write access)
@@ -23,7 +23,7 @@ file, which remains the source of truth for scope and acceptance criteria.
 4. Create issues in dependency order (roots first: P1-01, P1-02, P1-03, P1-04, P1-05, P2-01, P2-02).
    Then edit the later issues to replace task IDs with `#numbers`, or use GitHub's
    "blocked by" relationships.
-5. Assign only after D-25 confirms the handles. Bodies mention owners as code spans
+5. Do not assign issues; contributors self-assign when they pick one up (D-25). Bodies mention owners as code spans
    (no `@`), so creating them sends no notifications.
 6. Record each number in the mapping table at the end of this file. Commit that
    change in a docs PR.
@@ -200,6 +200,8 @@ Live behavior is **not** claimed here. E1–E4 confirm or correct the mapping.
   - a fresh `jti` per invocation;
   - no secret appears in captured logs.
 - [ ] The decision-mapping table is documented and labeled "provisional until E1–E4".
+- [ ] `ARMORIQ_POLICY_SOURCES` exists, excludes `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule` and `unknown`, and the JSON Schema and TypeScript are regenerated (ADR-026).
+- [ ] The guardrail test fails if any file under `scripts/` imports `armoriq_sdk` (ADR-018).
 
 ### Evidence required for completion
 - [ ] Handoff report posted (`docs/Todos/context/AGENT_HANDOFF_PROTOCOL.md` §7) with the commands run and their results.
@@ -360,7 +362,7 @@ components is P5-03.
 
 ### Prerequisites
 - Hard: none for the scaffold build.
-- Decisions: **D-07 hosting platform (blocks start)**.
+- Decisions: D-07 resolved: **Render** (ADR-016). Verify the ADR-016 requirements (RAM, no idle sleep, HTTPS, secrets in Render settings) when provisioning.
 - Soft: P2-06 (redeploy with the first product tool before E1); P2-01 (`DATABASE_URL_TOOLSERVER`); P2-05 (FastEmbed memory).
 - Blocks: P1-06, P5-03 (reuses the procedure).
 
@@ -439,7 +441,7 @@ recorded with evidence, plus the chosen fallback if not `PASS`.
 - [ ] Verification commands (task file §12) pass:
 
 ```bash
-python scripts/<E1 probe per D-02>.py      # from repo root, with .env containing real values
+python scripts/probe_v2_e1_allowed.py      # from repo root, with .env containing real values
 git diff -- docs/EXPERIMENTS.md
 ```
 
@@ -485,7 +487,7 @@ Outcome: an evidence table that P3-07 and P5-02 can cite.
 - [ ] Verification commands (task file §12) pass:
 
 ```bash
-python scripts/<E2 probe per D-02>.py
+python scripts/probe_v2_e2_offplan.py
 git diff -- docs/EXPERIMENTS.md
 ```
 
@@ -521,7 +523,7 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 ### Prerequisites
 - Hard: P1-01; P1-06 (E1 path known); **P2-08, P2-10** (tier search/source tools and honeypot deployed: what E5/E3 exercise).
 - Soft: P2-09 (maintenance tools). When it deploys, re-register, re-apply the policy if needed, and re-run `check_setup.py`. The E3/UI gate does not wait for it (Arch §12 build gate).
-- Decisions: D-26 (placeholders in a public repo; blocks finish), D-17 (`create_followup_task` in or out), D-12 (option (a) adds a tool to the policy), D-02 (`{E5_PROBE}` name), D-18.
+- Decisions: D-26 (placeholders in a public repo; blocks finish), D-17 (`create_followup_task` in or out), D-12 (option (a) adds a tool to the policy), D-02 (`probe_v2_e5_setup.py` name), D-18.
 - Note: drafting the YAML can start immediately. Only the console steps wait.
 - Blocks: P1-09.
 
@@ -541,7 +543,7 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 
 ```bash
 python scripts/check_setup.py
-python scripts/<E5 probe per D-02>.py
+python scripts/probe_v2_e5_setup.py
 python -m pytest tests/api/test_check_setup_logic.py -q
 git grep -nE "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" -- policy/ || echo "no emails"
 ```
@@ -597,7 +599,7 @@ per requester. Outcome:
 - [ ] Verification commands (task file §12) pass:
 
 ```bash
-python scripts/<E3 probe per D-02>.py
+python scripts/probe_v2_e3_per_user.py
 git diff -- docs/EXPERIMENTS.md
 ```
 
@@ -649,7 +651,7 @@ Outcome:
 - [ ] Verification commands (task file §12) pass:
 
 ```bash
-python scripts/<E4 probe per D-02>.py --scenario approve|reject|timeout|expiry|duplicate
+python scripts/probe_v2_e4_hold.py --scenario approve|reject|timeout|expiry|duplicate
 git diff -- docs/EXPERIMENTS.md
 ```
 
@@ -1509,13 +1511,13 @@ Body:
 `MIN_SCORE` must be calibrated, not guessed (PRD §8.2). Outcome:
 
 - `seed/eval/` holds the labeled questions;
-- `{E17_EVAL}` runs retrieval + responder against the seeded corpus through the tool-server retrieval path and records every required field;
+- `eval_e17_grounding.py` runs retrieval + responder against the seeded corpus through the tool-server retrieval path and records every required field;
 - `MIN_SCORE`, the model version, and the results are recorded;
 - the threshold is set in configuration.
 
 ### Prerequisites
 - Hard: P2-05 (fused scores), P3-03 (responder abstention), P2-03 (corpus with the case types).
-- Decisions: D-02 (`{E17_EVAL}` name: PRD `eval_e17_grounding.py`; the Arch §11 tree has none), D-23 (score scale and threshold location, decided here).
+- Decisions: D-02 (resolved: `eval_e17_grounding.py`, ADR-017), D-23 (score scale and threshold location, decided here).
 - Blocks: P5-02 (grounding claims), P5-04 (README claims).
 
 ### Acceptance criteria
@@ -1530,8 +1532,8 @@ Body:
 - [ ] Verification commands (task file §12) pass:
 
 ```bash
-python scripts/<E17 eval per D-02>.py --split train
-python scripts/<E17 eval per D-02>.py --split heldout
+python scripts/eval_e17_grounding.py --split train
+python scripts/eval_e17_grounding.py --split heldout
 python -m pytest tests/toolserver/test_e17_metrics.py -q
 ```
 

@@ -18,7 +18,7 @@ P3-08 — Build the E17 evaluation set and harness, calibrate `MIN_SCORE` on a h
 `MIN_SCORE` must be calibrated, not guessed (PRD §8.2). Outcome:
 
 - `seed/eval/` holds the labeled questions;
-- `{E17_EVAL}` runs retrieval + responder against the seeded corpus through the tool-server retrieval path and records every required field;
+- `eval_e17_grounding.py` runs retrieval + responder against the seeded corpus through the tool-server retrieval path and records every required field;
 - `MIN_SCORE`, the model version, and the results are recorded;
 - the threshold is set in configuration.
 
@@ -36,13 +36,13 @@ P3-08 — Build the E17 evaluation set and harness, calibrate `MIN_SCORE` on a h
 ## 5. Prerequisites and dependencies
 
 - Hard: P2-05 (fused scores), P3-03 (responder abstention), P2-03 (corpus with the case types).
-- Decisions: D-02 (`{E17_EVAL}` name: PRD `eval_e17_grounding.py`; the Arch §11 tree has none), D-23 (score scale and threshold location, decided here).
+- Decisions: D-02 (resolved: `eval_e17_grounding.py`, ADR-017), D-23 (score scale and threshold location, decided here).
 - Blocks: P5-02 (grounding claims), P5-04 (README claims).
 
 ## 6. Exact files/modules this task owns
 
 - `seed/eval/` (new): question sets with expected answerability, expected source IDs, tier, and case type; train and held-out split
-- `scripts/{E17_EVAL}` (new)
+- `scripts/eval_e17_grounding.py` (new; name per ADR-017)
 
 ## 7. Existing files it may need to modify
 
@@ -89,8 +89,8 @@ P3-08 — Build the E17 evaluation set and harness, calibrate `MIN_SCORE` on a h
 ## 12. Commands for verification
 
 ```bash
-python scripts/<E17 eval per D-02>.py --split train
-python scripts/<E17 eval per D-02>.py --split heldout
+python scripts/eval_e17_grounding.py --split train
+python scripts/eval_e17_grounding.py --split heldout
 python -m pytest tests/toolserver/test_e17_metrics.py -q
 ```
 

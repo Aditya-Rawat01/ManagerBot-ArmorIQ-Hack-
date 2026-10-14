@@ -39,7 +39,7 @@ components is P5-03.
 ## 5. Prerequisites and dependencies
 
 - Hard: none for the scaffold build.
-- Decisions: **D-07 hosting platform (blocks start)**.
+- Decisions: D-07 resolved: **Render** (ADR-016). Verify the ADR-016 requirements (RAM, no idle sleep, HTTPS, secrets in Render settings) when provisioning.
 - Soft: P2-06 (redeploy with the first product tool before E1); P2-01 (`DATABASE_URL_TOOLSERVER`); P2-05 (FastEmbed memory).
 - Blocks: P1-06, P5-03 (reuses the procedure).
 
@@ -102,7 +102,7 @@ curl -sN -X POST https://<host>/memory/mcp \
 
 ## 14. Risks and unresolved questions
 
-- D-07 undecided: blocks the critical path.
+- Render instance limits (memory, idle behavior) must meet ADR-016; record them. A shortfall is recorded, never worked around by weakening checks.
 - Memory limits may not fit FastEmbed. Record them; the fallback needs a documented decision (PRD §8.2 forbids silently sending confidential text to a hosted embedder).
 - Cold starts or idle sleep may cause E1 timeouts. Record the platform behavior.
 - Proxy-compatible transport (D-06) is verified in E1, not here.

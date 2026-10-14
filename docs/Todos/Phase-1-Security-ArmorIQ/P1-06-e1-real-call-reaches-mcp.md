@@ -49,7 +49,7 @@ recorded with evidence, plus the chosen fallback if not `PASS`.
 
 ## 6. Exact files/modules this task owns
 
-- `scripts/{E1_PROBE}`: PRD name `probe_v2_e1_allowed.py`, Arch name `probe_e1_allowed.py` (D-02).
+- `scripts/probe_v2_e1_allowed.py` (new; name per ADR-017)
 - `docs/EXPERIMENTS.md` § E1 (steward: this owner).
 
 ## 7. Existing files it may need to modify
@@ -94,7 +94,7 @@ Follow PRD §11 exactly:
 ## 12. Commands for verification
 
 ```bash
-python scripts/<E1 probe per D-02>.py      # from repo root, with .env containing real values
+python scripts/probe_v2_e1_allowed.py      # from repo root, with .env containing real values
 git diff -- docs/EXPERIMENTS.md
 ```
 

@@ -39,7 +39,7 @@ Outcome: an evidence table that P3-07 and P5-02 can cite.
 
 ## 6. Exact files/modules this task owns
 
-- `scripts/{E2_PROBE}`: PRD name `probe_v2_e2_offplan.py`, Arch name `probe_e2_offplan.py` (D-02).
+- `scripts/probe_v2_e2_offplan.py` (new; name per ADR-017)
 - `docs/EXPERIMENTS.md` § E2.
 
 ## 7. Existing files it may need to modify
@@ -72,7 +72,7 @@ Outcome: an evidence table that P3-07 and P5-02 can cite.
 ## 12. Commands for verification
 
 ```bash
-python scripts/<E2 probe per D-02>.py
+python scripts/probe_v2_e2_offplan.py
 git diff -- docs/EXPERIMENTS.md
 ```
 

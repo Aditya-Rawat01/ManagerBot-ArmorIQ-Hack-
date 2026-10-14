@@ -50,7 +50,8 @@ Live behavior is **not** claimed here. E1–E4 confirm or correct the mapping.
 ## 7. Existing files it may need to modify
 
 - `apps/api/core/config.py` (steward `VTCodeCraft`): only if a documented variable is missing. All PRD §12 ArmorIQ variables already exist.
-- `services/contracts/models.py` / `enums.py` (steward `VTCodeCraft`): only via ICR, for example if E-evidence requires a new field.
+- `services/contracts/models.py` / `enums.py` (steward `VTCodeCraft`): add `ARMORIQ_POLICY_SOURCES` (ADR-026); any other change only via ICR, for example if E-evidence requires a new field.
+- `tests/api/test_guardrails.py` (steward `VTCodeCraft`): extend the single-`armoriq_sdk`-importer scan to `scripts/` (ADR-018).
 
 ## 8. Shared interfaces and contracts
 
@@ -80,6 +81,8 @@ Live behavior is **not** claimed here. E1–E4 confirm or correct the mapping.
 7. **Fail closed.** Missing API key, unknown member, network error, unexpected SDK type, or timeout → `unverified` with source `unknown`, or `armoriq_issuance` if minting failed at ArmorIQ. Never `allow`.
 8. **Logging.** Log `request_id`, `trace_id`, `plan_id`, `step_index`, `jti`, outcome, and source. Never log tokens, API keys, `_ctx`, or unmasked emails.
 9. Provide a `FakeArmorIQGateway` for other tasks' offline tests (in the test module or `tests/api/fakes/`; coordinate the location with P3-04).
+10. **Probe entry points (ADR-018).** Probes and `scripts/check_setup.py` call only this gateway. Expose what E1–E5 need (for example a per-member planned call, `attempt_off_plan`, a deliberately misnamed tool for E5) so no script imports `armoriq_sdk`.
+11. **Policy evidence set (ADR-026).** Add `ARMORIQ_POLICY_SOURCES = {armoriq_issuance, armoriq_policy_decision, armoriq_proxy_decision}` to `services/contracts/enums.py` and export it. Use it for every "ArmorIQ allowed, blocked or held" claim; `ARMORIQ_DECISION_SOURCES` stays only for the HOLD validator.
 
 ## 10. Acceptance criteria
 
@@ -96,6 +99,8 @@ Live behavior is **not** claimed here. E1–E4 confirm or correct the mapping.
   - a fresh `jti` per invocation;
   - no secret appears in captured logs.
 - The decision-mapping table is documented and labeled "provisional until E1–E4".
+- `ARMORIQ_POLICY_SOURCES` exists, excludes `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule` and `unknown`, and the JSON Schema and TypeScript are regenerated (ADR-026).
+- The guardrail test fails if any file under `scripts/` imports `armoriq_sdk` (ADR-018).
 
 ## 11. Required unit, integration, and security tests
 
@@ -108,7 +113,8 @@ Live behavior is **not** claimed here. E1–E4 confirm or correct the mapping.
 - `test_hold_maps_to_pending_then_resolves__offline_fake_sdk`
 - `test_off_plan_attempt_never_executes__offline_fake_sdk`
 - `test_no_secrets_in_logs__offline_fake_sdk`
-- Existing: `tests/api/test_guardrails.py::test_armoriq_sdk_is_imported_only_by_the_gateway`
+- Existing, extended to `scripts/`: `tests/api/test_guardrails.py::test_armoriq_sdk_is_imported_only_by_the_gateway`
+- `tests/contracts/test_contracts.py`: `ARMORIQ_POLICY_SOURCES` contents (owned by the contract steward; added in this PR)
 
 ## 12. Commands for verification
 

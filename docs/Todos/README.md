@@ -24,12 +24,10 @@ not resolved silently.
 
 - Scaffold complete: health endpoints, contracts, MCP transport, web shell, CI ([PROJECT_CONTEXT §7](context/PROJECT_CONTEXT.md)).
 - **No ArmorIQ experiment has run** (E1–E5, E17 = NOT RUN). The documented Day-1 gates (13 Oct) have slipped, so this plan compresses 14–17 Oct.
-- Decisions that block work **today**:
-  - D-07 (hosting), D-08 (migrations), D-19 (parallel-work rule);
-  - D-01 (tool module names, before P2-06);
-  - D-02 and D-18 (probes, before P1-06);
-  - D-25 (confirm handles).
-- Decide by **15 Oct AM**: D-12 (manager review-queue access; option (a) changes the E5 tool list), D-29 (honeypot arguments).
+- **Resolved 14 Oct 2026** (ADR-015 to ADR-026): D-19, D-07 (Render), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
+- Still open:
+  - D-08 (migrations) and D-01 (tool module names), before Phase 2 work;
+  - the Maya/Sam/Priya participants, ArmorIQ Org Admin access and the API key (issue #1).
 
 ## Phases
 
@@ -368,7 +366,8 @@ the authorization boundary (Arch §18).
 
 **Ownership notes (D-25):**
 
-- The security owner's handle is `samarth-chawla`, confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` in the brief was a typo). Task ownership remains proposed: **confirm the other proposed owners and assignments before assigning issues.**
+- The security owner's handle is `samarth-chawla`, confirmed by the project owner on 14 Oct 2026 (`amarth-chawla` in the brief was a typo).
+- **Issues are never assigned.** Contributors self-assign when they pick up a task; the owners in this plan are suggestions (D-25, resolved 14 Oct 2026).
 - "Delivery" for `parthgoyal26-03-2005` is read as safe answer delivery (P3-06) plus release delivery (deployment, demo, submission). Confirm.
 - Identity (P1-03) is assigned to `VTCodeCraft`, who owns the backend that resolves identity (Arch §5.4 layer 1), with `samarth-chawla` as security reviewer. This frees the ArmorIQ owner for the serialized experiments.
 

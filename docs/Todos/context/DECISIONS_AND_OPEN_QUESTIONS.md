@@ -30,6 +30,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-02 — Probe and eval script names (= U-14)
 
+**RESOLVED 14 Oct 2026 → ADR-017:** PRD names (`probe_v2_e1_allowed.py` … `probe_v2_e5_setup.py`, `eval_e17_grounding.py`). Task files now use these names.
+
 - **PRD §3.1:** `scripts/{check_setup.py, probe_v2_e1_allowed.py, probe_v2_e2_offplan.py, probe_v2_e3_per_user.py, probe_v2_e4_hold.py, probe_v2_e5_setup.py, eval_e17_grounding.py, verify_db_grants.py}`
 - **Arch §11:** `scripts/{check_setup.py, probe_e1_allowed.py, probe_e2_offplan.py, probe_e4_per_user.py, probe_e5_hold.py, verify_db_grants.py}`. There is no E5-setup probe and no E17 script, and two names carry legacy numbers (`probe_e4_per_user` tests Arch E3; `probe_e5_hold` tests Arch E4).
 - **Arch §12** (last paragraph) says to rename to `probe_v2_e3_per_user.py` and `probe_v2_e4_hold.py` or add a mapping wrapper, and not to leave `probe_e4_per_user.py`.
@@ -38,6 +40,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-03 — Decision-source label set
 
+**RESOLVED 14 Oct 2026 → ADR-019:** keep the ADR-009 union.
+
 - **PRD §10.1:** `armoriq_issuance`, `armoriq_sdk_plan_check`, `armoriq_proxy_decision`, `tool_server_rule`, `application_rule`, `unknown`.
 - **Arch §5.3:** `sdk_plan_check`, `armoriq_proxy_decision`, `armoriq_policy_decision`, `tool_server_rule`, `application_rule`, `unknown`.
 - **Arch §6.2 and PRD §6.2** both write `armoriq_sdk_plan_check`.
@@ -45,6 +49,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `samarth-chawla`. Needed before **P1-02** finishes. Blocking: **finish**.
 
 ### D-04 — `_ctx` field set
+
+**RESOLVED 14 Oct 2026 → ADR-020:** union of fields without the raw email (`requester_member_id` + `armoriq_member_email_ref` env-key name).
 
 - **PRD §9:** requester/workspace, request, plan/step, tool, audience, expiry, app-generated `jti`.
 - **Arch §6.3:** request ID, workspace ID, requester ID, mapped ArmorIQ email, role label, issued-at, expiry, `jti`.
@@ -116,6 +122,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-12 — Manager console access to protected content (= U-8)
 
+**RESOLVED 14 Oct 2026 → ADR-023:** option (b), a metadata-only view (no title or content); content through `knowledge_get_source_team` via ArmorIQ; no new tool.
+
 - PRD §10.2 / Arch §9 require a draft review queue and authoritative decisions
   with provenance.
 - PRD §8.1 / Arch §7.5 deny the backend `SELECT` on protected tables. Arch §7.5
@@ -154,12 +162,16 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-17 — Does `create_followup_task` ship?
 
+**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI.
+
 - Optional (PRD §6.2). Arch §6.2: if not fully implemented and tested, remove it
   from the policy and UI.
 - Decider: `samarth-chawla` (P2-10 owner) with the team, by **16 Oct 12:00**
   (feature freeze, PRD §13). Blocking: **defer**.
 
 ### D-18 — Do experiment probes import `armoriq_sdk` directly?
+
+**RESOLVED 14 Oct 2026 → ADR-018:** probes call only `ArmorIQGateway`; the guardrail test also scans `scripts/`.
 
 - PRD §3 and §9 / Arch §2 say `ArmorIQGateway` is "the only module importing
   `armoriq_sdk`".
@@ -170,6 +182,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `samarth-chawla`. Needed before **P1-06**. Blocking: **start**.
 
 ### D-19 — Parallel development before the build gate
+
+**RESOLVED 14 Oct 2026 → ADR-015:** the proposed rule is accepted.
 
 - Arch §0.2 and §12: "Do not build the full product until" E1/E3 pass (or a
   fallback is recorded); "E1 and E3 must pass before the full implementation".
@@ -184,6 +198,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: whole team, **today**. Blocking: **start** for Phase 3/4 work.
 
 ### D-20 — Member and workspace bootstrap
+
+**RESOLVED 14 Oct 2026 → ADR-021:** env is the source; the seed writes stable IDs; `armoriq_member_email_ref` stores the env-key name.
 
 - PRD §4.1: mapping from env variables. Arch §4: "bootstrap … from
   environment/config or an explicit manager setup step". Arch §7.2: `members`
@@ -219,6 +235,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-26 — Policy file contents in a public repository
 
+**RESOLVED 14 Oct 2026 → ADR-022:** placeholders only in the repository.
+
 - The Arch §5.5 template is keyed by real member emails. PRD §4.1 masks emails,
   and the GitHub repository is **public**.
 - PROPOSED default: commit `policy/proxylead-policy.yaml` with placeholders
@@ -240,6 +258,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `VTCodeCraft` with `samarth-chawla`. Needed before **P3-07**. Blocking: **finish**.
 
 ### D-29 — Honeypot arguments versus the "no model-selected recipient" rule
+
+**RESOLVED 14 Oct 2026 → ADR-025:** option (a), a fixed `synthetic_sink` destination plus a bounded message.
 
 - **PRD §7.3:** plan validation rejects any "model-selected identity/tier/recipient". The scaffold's `FORBIDDEN_ARGUMENT_KEYS` includes `recipient` and `channel`.
 - **PRD §10.3 / Arch §6.2:** when the user confirms a new plan containing `send_external_message`, "ArmorIQ policy must BLOCK the honeypot for every persona".
@@ -263,6 +283,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-07 — Hosting platform(s)
 
+**RESOLVED 14 Oct 2026 → ADR-016:** Render (requirements to verify are listed in the ADR).
+
 - Requirements from the docs:
   - tool server on public HTTPS with about 1 GB RAM for FastEmbed (PRD §3,
     §8.2; Arch §5.1);
@@ -279,6 +301,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `Aditya-Rawat01`. Needed before **P2-01**. Blocking: **start**.
 
 ### D-25 — Team handles and ownership interpretation
+
+**RESOLVED 14 Oct 2026 (ownership; no ADR):** the security owner's handle is `samarth-chawla`. Issues are never assigned: contributors self-assign when they pick a task, and the owners in this plan are suggestions. The Maya/Sam/Priya participants are tracked separately in issue #1.
 
 - **Security owner handle: confirmed.** `samarth-chawla` (confirmed by the
   project owner on 14 Oct 2026; `amarth-chawla` in the brief was a typo). Task

@@ -43,7 +43,7 @@ Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `scripts/{E4_PROBE}`: PRD name `probe_v2_e4_hold.py`; Arch §11 tree `probe_e5_hold.py` (legacy number; Arch §12 says to rename) (D-02).
+- `scripts/probe_v2_e4_hold.py` (new; name per ADR-017)
 - `docs/EXPERIMENTS.md` § E4.
 
 ## 7. Existing files it may need to modify
@@ -83,7 +83,7 @@ Outcome:
 ## 12. Commands for verification
 
 ```bash
-python scripts/<E4 probe per D-02>.py --scenario approve|reject|timeout|expiry|duplicate
+python scripts/probe_v2_e4_hold.py --scenario approve|reject|timeout|expiry|duplicate
 git diff -- docs/EXPERIMENTS.md
 ```
 

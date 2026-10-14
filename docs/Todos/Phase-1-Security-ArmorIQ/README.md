@@ -15,7 +15,7 @@ Sources: PRD §0, §4.1, §5.3, §7, §9, §11, §13; Arch §0, §5, §6.3, §12
 | [P1-02](P1-02-armoriq-sdk-verification-and-gateway.md) | SDK surface verification + `ArmorIQGateway` | `samarth-chawla` | L | — | — |
 | [P1-03](P1-03-trusted-identity-and-web-session.md) | Trusted identity + web session | `VTCodeCraft` | M | — | — |
 | [P1-04](P1-04-signed-ctx-and-toolserver-request-security.md) | Signed `_ctx` + tool-server request security | `samarth-chawla` | M | — | **G0** |
-| [P1-05](P1-05-toolserver-public-https-experiment-deployment.md) | Tool server on public HTTPS (experiments) | `parthgoyal26-03-2005` | S–M | D-07 | prereq |
+| [P1-05](P1-05-toolserver-public-https-experiment-deployment.md) | Tool server on public HTTPS (experiments) | `parthgoyal26-03-2005` | S–M | — (D-07 resolved: Render) | prereq |
 | [P1-06](P1-06-e1-real-call-reaches-mcp.md) | E1: real call reaches MCP | `samarth-chawla` | M | P1-01, P1-02, P1-05, P2-06 | **G1** |
 | [P1-07](P1-07-e2-off-plan-and-tamper.md) | E2: off-plan and tamper | `samarth-chawla` | S–M | P1-06, P1-04 | **G5** |
 | [P1-08](P1-08-policy-and-e5-setup-conformance.md) | Policy + E5 setup conformance | `samarth-chawla` | M | P1-01, P1-06, P2-08, P2-10 | **G2** |
@@ -26,7 +26,7 @@ Sources: PRD §0, §4.1, §5.3, §7, §9, §11, §13; Arch §0, §5, §6.3, §12
 
 - Repository at or after `5e97604` with green CI.
 - Real ArmorIQ console access for the owner, and a team member able to act as Maya (Org Admin).
-- Decisions resolved before the affected task starts: D-02 and D-18 (probes), D-07 (hosting). D-19 (parallel-work rule) confirmed by the team.
+- Decisions D-02, D-18, D-07 (Render), D-19 and the other Phase 1 decisions were resolved on 14 Oct 2026 (ADR-015 to ADR-026).
 
 ## Deliverables
 
@@ -63,23 +63,23 @@ ArmorIQ behavior may be built against fakes earlier. UI starts after G1 + G3.
 
 ## Parallelization inside the phase
 
-- Immediately and in parallel: P1-01, P1-02, P1-03, P1-04, P1-05 (after D-07). The P1-08 YAML draft can also start now.
+- Immediately and in parallel: P1-01, P1-02, P1-03, P1-04, P1-05 (Render, ADR-016). The P1-08 YAML draft can also start now.
 - Sequential (live): P1-06 → P1-07 ‖ P1-08 → P1-09 → P1-10. All live runs are by one owner; schedule a Maya approver for P1-10.
 
 ## Issue tracking and readiness
 
-GitHub issue numbers are recorded in [../GITHUB_ISSUES.md](../GITHUB_ISSUES.md) (mapping table). Decisions and owner handles are tracked in [#1](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/1). No issue is assigned until the owner handles are confirmed (D-25). "Ready" means work may begin; it is not a claim that a gate has passed.
+GitHub issue numbers are recorded in [../GITHUB_ISSUES.md](../GITHUB_ISSUES.md) (mapping table). Decisions and owner handles are tracked in [#1](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/1). Issues are not assigned: contributors self-assign when they pick up a task (D-25). "Ready" means work may begin; it is not a claim that a gate has passed.
 
 | Task | Issue | Can start | Must wait for before merge |
 |---|---|---|---|
 | P1-01 | [#2](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/2) | Now (needs real ArmorIQ Org Admin access) | — |
-| P1-02 | [#3](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/3) | Now (offline, fake SDK) | D-03 decided; P1-04 merged so the gateway uses the real `sign_ctx` |
-| P1-03 | [#4](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/4) | Now | D-20 decided |
-| P1-04 | [#5](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/5) | Now | D-04 decided; D-05 code inspection recorded |
-| P1-05 | [#6](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/6) | After D-07 | — (scaffold deploy only; no product tool before P1-04 merges) |
-| P1-06 (E1) | [#7](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/7) | After P1-01, P1-02, P1-05, P2-06 merge, and after D-02, D-18 | Live E1 record in `docs/EXPERIMENTS.md` |
+| P1-02 | [#3](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/3) | Now (offline, fake SDK) | P1-04 merged so the gateway uses the real `sign_ctx` (D-03 resolved, ADR-019) |
+| P1-03 | [#4](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/4) | Now | — (D-20 resolved, ADR-021) |
+| P1-04 | [#5](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/5) | Now | D-05 code inspection recorded (D-04 resolved, ADR-020) |
+| P1-05 | [#6](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/6) | Now (Render, ADR-016) | — (scaffold deploy only; no product tool before P1-04 merges) |
+| P1-06 (E1) | [#7](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/7) | After P1-01, P1-02, P1-05, P2-06 merge | Live E1 record in `docs/EXPERIMENTS.md` |
 | P1-07 (E2) | [#8](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/8) | After P1-06, P1-04 merge | Live E2 record |
-| P1-08 (E5) | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | YAML draft now (placeholders, D-26); console work after P1-01, P1-06, P2-08, P2-10 merge | D-26, D-17, D-12 (option (a) changes the tool list), D-02, D-18; live E5 record |
+| P1-08 (E5) | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | YAML draft now (placeholders, ADR-022); console work after P1-01, P1-06, P2-08, P2-10 merge | Live E5 record (D-12, D-17, D-26 resolved: ADR-023, ADR-024, ADR-022) |
 | P1-09 (E3) | [#10](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/10) | After P1-08 merges | Live E3 record meeting the ArmorIQ evidence rule |
 | P1-10 (E4) | [#11](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/11) | After P1-09 merges and a Maya approver is scheduled | Live E4 record (PASS or documented fallback) |
 
@@ -89,7 +89,7 @@ GitHub issue numbers are recorded in [../GITHUB_ISSUES.md](../GITHUB_ISSUES.md) 
 
 Run this **after** every Phase 1 PR, and the Phase 2 PRs listed above, are merged and the integration branch (`main`) is up to date and deployed. Each individual PR still runs its own scoped tests (task file §11–§12) before it merges.
 
-"Verified" below means the command or file exists in the repository today. Items created by a task are **unverified until that task's PR merges**. Probe file names are pending D-02; the PRD names are shown.
+"Verified" below means the command or file exists in the repository today. Items created by a task are **unverified until that task's PR merges**. Probe file names are fixed by ADR-017.
 
 ### 1. Local automated checks (verified)
 
@@ -121,7 +121,7 @@ These all run inside `bash scripts/check.sh` once merged. They are offline and *
 
 ### 3. Real ArmorIQ integration experiments (all unverified; scripts do not exist yet)
 
-| Gate | Command (PRD names, pending D-02) | Record |
+| Gate | Command (names per ADR-017) | Record |
 |---|---|---|
 | E5 setup check | `python scripts/check_setup.py` | `docs/EXPERIMENTS.md` § E5 |
 | G1 E1 | `python scripts/probe_v2_e1_allowed.py` | § E1 |

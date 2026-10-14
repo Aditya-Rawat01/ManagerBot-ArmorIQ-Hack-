@@ -69,7 +69,7 @@ All under `apps/web/src/`:
 ## 9. Step-by-step implementation requirements
 
 1. Composer → `submitRequest`. Poll `getRequestStatus` until a terminal state. HOLD pending is non-terminal with slow polling.
-2. `OutcomeBadge` maps the outcome **and** source to text, for example "Blocked by ArmorIQ policy" only for ArmorIQ sources, "Rejected by tool server" for `tool_server_rule`, "Blocked by application rule", "Authorization could not be verified".
+2. `OutcomeBadge` maps the outcome **and** source to text, for example "Blocked by ArmorIQ policy" only for `ARMORIQ_POLICY_SOURCES` (ADR-026), "ArmorIQ SDK plan check (client-side)" for `armoriq_sdk_plan_check`, "Rejected by tool server" for `tool_server_rule`, "Blocked by application rule", "Authorization could not be verified".
 3. `HoldNotice`: "Waiting for manager approval in ArmorIQ". No approve or reject controls. Wording reflects G4 (verified vs unverified resume).
 4. `CitationList`: only the citations in the status view (already validated server-side). Show title, author, version, review status (draft vs authoritative), supersession.
 5. Show answers only when the status view includes them for this session (`web_private`). Visually separate assistant prose from system records (decision and citation metadata).
