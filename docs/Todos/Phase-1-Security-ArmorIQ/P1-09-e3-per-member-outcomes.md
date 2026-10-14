@@ -72,7 +72,7 @@ per requester. Outcome:
    | `send_external_message` | BLOCK | BLOCK | BLOCK |
 
    Leave Sam's HOLD unresolved, or reject it in the console. Approval is E4.
-3. For every cell record: decision, `DecisionSource`, ArmorIQ evidence reference, tool server reached (yes/no), ledger row (only for ALLOW).
+3. For every cell record: decision, `DecisionSource`, ArmorIQ evidence reference, tool server reached (yes/no), ledger row (only for ALLOW). Classify each BLOCK/HOLD cell with the ArmorIQ evidence rule in §10.
 4. **Concurrency.** Run the three personas in parallel (for example 3 × 5 requests). Verify that each ledger row's `requester_member_id` (from verified `_ctx`) and the console attribution match the invoking member.
 5. **Server-side tier check.** Call `knowledge_search_restricted` directly at the tool server with a valid `_ctx` for Sam or Priya. Expect a tool-server rejection independent of ArmorIQ (R-26). This is only possible if the tool server knows the requester's allowed tiers. See risks.
 6. Record E3 with the template.
@@ -80,9 +80,15 @@ per requester. Outcome:
 ## 10. Acceptance criteria
 
 - All 12 cells match. Any mismatch → `FAIL`, with the 2-hour diagnosis rule and the fallback recorded.
+- **ArmorIQ evidence rule.** A BLOCK or HOLD cell (including all three `send_external_message` cells) counts as matching only if all three hold:
+  1. its `DecisionSource` is `armoriq_policy_decision`, `armoriq_proxy_decision`, or `armoriq_issuance`;
+  2. an ArmorIQ evidence reference is recorded (the SDK response or exception, and/or the console record);
+  3. the tool server was not reached (no request log, no ledger row).
+
+  A cell stopped by `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule`, or `unknown` is `FAIL` for E3, with the actual layer recorded. It is never reported as an ArmorIQ policy decision.
 - Ledger rows exist only for ALLOW cells. No execution on BLOCK or HOLD.
 - No cross-persona attribution error in the concurrent run.
-- Step 5 result recorded honestly (enforced / not enforced).
+- Step 5 (the tool-server tier ceiling) is reported in a separate table, honestly (enforced / not enforced), and never counted toward the 12 matrix cells.
 
 ## 11. Required unit, integration, and security tests
 

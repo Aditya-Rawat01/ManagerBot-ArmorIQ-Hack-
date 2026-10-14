@@ -84,7 +84,10 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 
 - The live console shows one **active** policy for `proxylead`. The repository copy contains no real emails.
 - `python scripts/check_setup.py` exits `0` against the live setup and non-zero when one env name is altered (demonstrated).
-- The name-mismatch attempt fails closed, with evidence.
+- The name-mismatch attempt fails closed, with evidence, and the record names the enforcing layer.
+- **ArmorIQ evidence rule.** Policy evidence and fail-closed evidence are recorded separately.
+  - Any decision cited as proof that the ArmorIQ policy applies (the per-member decisions from `check_setup.py`, or a policy BLOCK/HOLD) must carry `armoriq_policy_decision`, `armoriq_proxy_decision`, or `armoriq_issuance` plus an ArmorIQ evidence reference. A BLOCK/HOLD must also show that the tool server was not reached.
+  - A mismatch stopped by `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule`, or `unknown` still proves fail-closed behavior, but is never cited as proof that the ArmorIQ policy applies.
 - E5 record complete; U-6 answered; ICR filed if tool-name representation differs from `ToolName`.
 
 ## 11. Required unit, integration, and security tests

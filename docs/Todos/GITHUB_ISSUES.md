@@ -3,20 +3,17 @@
 Copy-ready drafts for all 38 implementation tasks. Each draft links to its task
 file, which remains the source of truth for scope and acceptance criteria.
 
-## Issue status: **NOT CREATED**
+## Issue status: **Phase 1 created (#1–#11); Phases 2–5 not created**
 
-Investigation on 14 Oct 2026, read-only:
-
-- Repository `Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-` (public, issues enabled): **0 issues, 0 pull requests, 0 milestones**.
-  Only GitHub's default labels exist. There is nothing to deduplicate against.
-- `gh` CLI on the planning machine:
-  - the active account is `Vishesh-Gudz`, which is not one of the four team members;
-  - the stored token for `VTCodeCraft` is invalid;
-  - the viewer permission on the repository is **READ**.
-- Creating issues would publish them under a non-team identity, and applying
-  labels needs triage rights. Per the planning instructions, no issues were created.
-- Assignee handles: GitHub has no user `amarth-chawla` (404). Repository contributor
-  `samarth-chawla` is used in these drafts. Confirm before assigning (D-25).
+- 14 Oct 2026, created by `VTCodeCraft` (push + triage access):
+  - Phase 1 issues #2–#11 (P1-01 to P1-10);
+  - blocker/decision tracker #1;
+  - labels `phase-1-security`, `security`, `armoriq`, `experiment`, `gate`, `backend`, `mcp`, `deployment`.
+- Phase 1 issue bodies are generated from the task files. They add status, sequencing (merge wave), and resolved `#` references for Phase 1 dependencies.
+  - References to Phase 2–5 tasks read "issue not created yet" until those issues exist.
+  - When creating them, use the next free number and edit the affected Phase 1 issues.
+- No issue is assigned. Owner handles are unconfirmed (D-25): GitHub has no user `amarth-chawla` (404), and contributor `samarth-chawla` still needs confirmation.
+- No milestones or projects were created.
 
 ## How to create them (team member with triage or write access)
 
@@ -30,6 +27,7 @@ Investigation on 14 Oct 2026, read-only:
    (no `@`), so creating them sends no notifications.
 6. Record each number in the mapping table at the end of this file. Commit that
    change in a docs PR.
+7. Phase 1 is done; continue with Phase 2 (`phase-2-mcp-knowledge` label still needs creating).
 
 ### Labels
 
@@ -530,7 +528,10 @@ policy is not accepted (Arch §5.1, §5.5). Outcome:
 ### Acceptance criteria
 - [ ] The live console shows one **active** policy for `proxylead`. The repository copy contains no real emails.
 - [ ] `python scripts/check_setup.py` exits `0` against the live setup and non-zero when one env name is altered (demonstrated).
-- [ ] The name-mismatch attempt fails closed, with evidence.
+- [ ] The name-mismatch attempt fails closed, with evidence, and the record names the enforcing layer.
+- [ ] **ArmorIQ evidence rule.** Policy evidence and fail-closed evidence are recorded separately.
+  - Any decision cited as proof that the ArmorIQ policy applies (the per-member decisions from `check_setup.py`, or a policy BLOCK/HOLD) must carry `armoriq_policy_decision`, `armoriq_proxy_decision`, or `armoriq_issuance` plus an ArmorIQ evidence reference. A BLOCK/HOLD must also show that the tool server was not reached.
+  - A mismatch stopped by `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule`, or `unknown` still proves fail-closed behavior, but is never cited as proof that the ArmorIQ policy applies.
 - [ ] E5 record complete; U-6 answered; ICR filed if tool-name representation differs from `ToolName`.
 
 ### Evidence required for completion
@@ -581,9 +582,14 @@ per requester. Outcome:
 
 ### Acceptance criteria
 - [ ] All 12 cells match. Any mismatch → `FAIL`, with the 2-hour diagnosis rule and the fallback recorded.
+- [ ] **ArmorIQ evidence rule.** A BLOCK or HOLD cell (including all three `send_external_message` cells) counts as matching only if all three hold:
+  1. its `DecisionSource` is `armoriq_policy_decision`, `armoriq_proxy_decision`, or `armoriq_issuance`;
+  2. an ArmorIQ evidence reference is recorded (the SDK response or exception, and/or the console record);
+  3. the tool server was not reached (no request log, no ledger row).
+  A cell stopped by `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule`, or `unknown` is `FAIL` for E3, with the actual layer recorded. It is never reported as an ArmorIQ policy decision.
 - [ ] Ledger rows exist only for ALLOW cells. No execution on BLOCK or HOLD.
 - [ ] No cross-persona attribution error in the concurrent run.
-- [ ] Step 5 result recorded honestly (enforced / not enforced).
+- [ ] Step 5 (the tool-server tier ceiling) is reported in a separate table, honestly (enforced / not enforced), and never counted toward the 12 matrix cells.
 
 ### Evidence required for completion
 - [ ] Live result recorded in `docs/EXPERIMENTS.md` using the record template (UTC time, SDK version, IDs, evidence references). Mocked runs never count.
@@ -2023,20 +2029,21 @@ Video recorded (≤ 3:00); DEMO.md and README merged with evidence-backed claims
 Read before starting: `docs/Todos/context/` (project context, architecture rules, shared interfaces, handoff protocol, decisions).
 ````
 
-## Issue number mapping (fill in after creation)
+## Issue number mapping
 
 | Task | Issue | Created by | Date |
 |---|---|---|---|
-| P1-01 | — | — | — |
-| P1-02 | — | — | — |
-| P1-03 | — | — | — |
-| P1-04 | — | — | — |
-| P1-05 | — | — | — |
-| P1-06 | — | — | — |
-| P1-07 | — | — | — |
-| P1-08 | — | — | — |
-| P1-09 | — | — | — |
-| P1-10 | — | — | — |
+| Phase 1 blocker/decision tracker | [#1](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/1) | `VTCodeCraft` | 2026-10-14 |
+| P1-01 | [#2](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/2) | `VTCodeCraft` | 2026-10-14 |
+| P1-02 | [#3](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/3) | `VTCodeCraft` | 2026-10-14 |
+| P1-03 | [#4](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/4) | `VTCodeCraft` | 2026-10-14 |
+| P1-04 | [#5](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/5) | `VTCodeCraft` | 2026-10-14 |
+| P1-05 | [#6](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/6) | `VTCodeCraft` | 2026-10-14 |
+| P1-06 | [#7](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/7) | `VTCodeCraft` | 2026-10-14 |
+| P1-07 | [#8](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/8) | `VTCodeCraft` | 2026-10-14 |
+| P1-08 | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | `VTCodeCraft` | 2026-10-14 |
+| P1-09 | [#10](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/10) | `VTCodeCraft` | 2026-10-14 |
+| P1-10 | [#11](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/11) | `VTCodeCraft` | 2026-10-14 |
 | P2-01 | — | — | — |
 | P2-02 | — | — | — |
 | P2-03 | — | — | — |
