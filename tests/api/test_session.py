@@ -102,13 +102,25 @@ def _cookie_header(token: str) -> dict[str, str]:
     return {"Cookie": f"{SESSION_COOKIE_NAME}={token}"}
 
 
+def _tamper(token: str) -> str:
+    """Flip a payload byte without re-signing. Deterministic: unlike flipping the
+    last base64 char (which may only touch spare padding bits and verify fine),
+    a middle payload byte always changes the HMAC input."""
+    import base64
+
+    payload_b64, _, mac_b64 = token.partition(".")
+    raw = bytearray(base64.urlsafe_b64decode(payload_b64 + "=" * (-len(payload_b64) % 4)))
+    raw[len(raw) // 2] ^= 0x01
+    forged_payload = base64.urlsafe_b64encode(bytes(raw)).rstrip(b"=").decode()
+    return f"{forged_payload}.{mac_b64}"
+
+
 def test_tampered_and_expired_cookie_rejected() -> None:
     # Fresh client: the jar is empty, so only the explicit header is evaluated.
     secret = "test-session-secret-not-real"
     valid = mint_session_token(PersonaKey.MAYA, secret, time.time())
-    tampered = valid[:-1] + ("A" if valid[-1] != "A" else "B")
     expired = mint_session_token(PersonaKey.MAYA, secret, time.time() - SESSION_TTL_S - 60.0)
-    for bad in (tampered, expired, "not-a-token"):
+    for bad in (_tamper(valid), expired, "not-a-token"):
         client = make_client()
         response = client.get("/api/v1/session", headers=_cookie_header(bad))
         assert response.status_code == 401
