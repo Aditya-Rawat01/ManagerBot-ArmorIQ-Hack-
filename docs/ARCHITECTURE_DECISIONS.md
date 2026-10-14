@@ -228,7 +228,7 @@ before committing, and the exclusion prevents a repeat.
 
 ---
 
-ADR-015 to ADR-028 record the planning decisions confirmed by the
+ADR-015 to ADR-029 record the planning decisions confirmed by the
 project owner on 14 Oct 2026 ("accept all recommendations"; hosting =
 Render). Each maps to a `D-xx` entry in
 `docs/Todos/context/DECISIONS_AND_OPEN_QUESTIONS.md`.
@@ -374,6 +374,29 @@ The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
   - Roles, grants and `REVOKE`s live in these SQL files, so the backend's denial on protected tables is explicit and testable (`scripts/verify_db_grants.py`).
 
 **Why.** Grants stay visible in SQL, there are few dependencies, and it matches ADR-002. No ORM or Alembic for the hackathon. Confirmed by the project owner on 14 Oct 2026.
+
+
+## ADR-029 — Containerization: Docker for local development and Render services
+
+**Decision.** Confirmed by the project owner on 14 Oct 2026 ("go with recommendations"). Supporting infrastructure, not required by PRD v2 or Architecture v2.1.
+
+**Images and services:**
+- `deploy/api/Dockerfile` (P1-11) and `deploy/toolserver/Dockerfile` (P1-05): `python:3.12-slim`, non-root.
+  - The API image installs only `.[api]`; the tool-server image installs only `.[toolserver]` (the same split as CI).
+  - Render runs both as Docker web services. The web app stays a Render static site.
+- `docker-compose.yml` (P1-11) runs `api`, `toolserver`, `web` (Vite dev server) and `db`, a local `pgvector/pgvector` Postgres, for development only. Production uses Neon.
+- Profile-gated one-off services:
+  - `migrate`: the only container given `DATABASE_URL_MIGRATE` (PRD §8.1);
+  - `dev`: Python 3.12 + Node 22, for `bash scripts/check.sh`.
+
+**Rules:**
+- Secrets come only from `.env` or Render's environment at runtime, never baked into images. `.dockerignore` excludes `.env`, `.venv`, `node_modules`, `research/`.
+- Each runtime container gets only its own database DSN.
+- Diagnostic MCP tools are off in any Render deployment.
+
+**Why.** One command to run everything, pinned Python and Node versions for every teammate, a free local database for the DB-backed tests, and the same images locally and on Render.
+
+**Not covered.** ArmorIQ still needs the public HTTPS tool server on Render for E1–E5. Real secrets are shared privately. Grant checks must also pass on Neon.
 
 ---
 

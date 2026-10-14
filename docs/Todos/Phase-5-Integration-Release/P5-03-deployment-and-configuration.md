@@ -50,7 +50,7 @@ Outcome:
 
 ## 6. Exact files/modules this task owns
 
-- `deploy/` (from P1-05; extended for API and web)
+- `deploy/README.md` (new): Render service settings for the API (`deploy/api/Dockerfile`, from P1-11), the tool server (`deploy/toolserver/Dockerfile`, from P1-05) and the web static site (ADR-016, ADR-029). Changes to those Dockerfiles go through their owners.
 - `.env.example` (steward: this owner): comments for the calibrated `MIN_SCORE`, the final credential path, and production toggles (no secrets)
 - `.github/workflows/ci.yml`, `scripts/check.sh` (steward: this owner): only release-required changes (for example excluding `tests/e2e` from default runs if needed)
 - Reset procedure documentation: `deploy/RESET.md` (new) per D-16

@@ -73,7 +73,7 @@ passes.
 
 ## CP-1: Phase 1 foundation (after Wave 1)
 
-**Issues:** #2 (P1-01), #5 (P1-04), #4 (P1-03), #3 (P1-02), #6 (P1-05)
+**Issues:** #2 (P1-01), #5 (P1-04), #4 (P1-03), #3 (P1-02), #6 (P1-05), #48 (P1-11)
 
 **Automated** (each file must exist and pass):
 - `tests/api/test_ctx_envelope.py`
@@ -102,6 +102,8 @@ grep -n "ctx_envelope" services/authorization/armoriq_gateway.py   # gateway use
   ```
 
   An authenticated `initialize` returns an SSE `event: message`. `tools/list` shows **no diagnostic tools and no product tools** (nothing may be deployed before G0).
+
+- **P1-11 (Docker, ADR-029):** on a clean clone, `cp .env.example .env && docker compose up --build -d`. Both `/health` endpoints return 200 and the web app loads on :5173. `docker compose run --rm dev bash scripts/check.sh` passes. `docker compose config` shows `DATABASE_URL_MIGRATE` only on `migrate`.
 
 **Pass:** all of the above. **Unlocks:** merging Wave 2.
 

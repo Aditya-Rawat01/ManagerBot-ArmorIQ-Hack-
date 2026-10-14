@@ -25,7 +25,7 @@ not resolved silently.
 
 - Scaffold complete: health endpoints, contracts, MCP transport, web shell, CI ([PROJECT_CONTEXT §7](context/PROJECT_CONTEXT.md)).
 - **No ArmorIQ experiment has run** (E1–E5, E17 = NOT RUN). The documented Day-1 gates (13 Oct) have slipped, so this plan compresses 14–17 Oct.
-- **Resolved 14 Oct 2026** (ADR-015 to ADR-028): D-01 (tool module names), D-08 (`psycopg` 3 + SQL migrations), D-19, D-07 (Render), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
+- **Resolved 14 Oct 2026** (ADR-015 to ADR-029): containerization with Docker (ADR-029), D-01 (tool module names), D-08 (`psycopg` 3 + SQL migrations), D-19, D-07 (Render), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
 - Still open:
   - ArmorIQ Org Admin access and the API key (`Aditya-Rawat01`, tracked in P1-01 / #2).
 - Participants: `Aditya-Rawat01` acts as Maya (Org Admin, console approver, host); the team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Blocker issue #1 is closed.
@@ -34,12 +34,12 @@ not resolved silently.
 
 | Phase | Focus | Tasks | Main owner(s) | README |
 |---|---|---|---|---|
-| 1 — Security and ArmorIQ | Org setup, gateway, identity, `_ctx`, policy, E1–E5 gates | 10 | `samarth-chawla` | [Phase-1](Phase-1-Security-ArmorIQ/README.md) |
+| 1 — Security and ArmorIQ | Org setup, gateway, identity, `_ctx`, policy, E1–E5 gates | 11 | `samarth-chawla` | [Phase-1](Phase-1-Security-ArmorIQ/README.md) |
 | 2 — MCP and Knowledge | Schema/roles, seed, retrieval, 14 tools, ledger | 10 | `Aditya-Rawat01` | [Phase-2](Phase-2-MCP-Knowledge/README.md) |
 | 3 — Agent and Slack | Audit store, planner, responder, orchestrator, Slack, delivery, hijack mode, E17 | 9 | `VTCodeCraft`, `parthgoyal26-03-2005` | [Phase-3](Phase-3-Agent-Slack/README.md) |
 | 4 — Frontend | Web request API, sign-in, playground, manager console, access tests | 5 | `parthgoyal26-03-2005` | [Phase-4](Phase-4-Frontend/README.md) |
 | 5 — Integration and Release | Live integration, security regression, deploy, demo, submission | 4 | all | [Phase-5](Phase-5-Integration-Release/README.md) |
-| **Total** | | **38** | | |
+| **Total** | | **39** | | |
 
 Phases are **workstreams with gates, not strict sequences**. E1 (Phase 1)
 needs the first product tool (Phase 2), and the UI (Phase 4) waits for the
@@ -76,6 +76,7 @@ depend on unverified ArmorIQ behavior may be built against fakes before then.
 | [P1-08](Phase-1-Security-ArmorIQ/P1-08-policy-and-e5-setup-conformance.md) | ArmorIQ policy and E5 setup/policy conformance | `samarth-chawla` | 1 |
 | [P1-09](Phase-1-Security-ArmorIQ/P1-09-e3-per-member-outcomes.md) | E3: different outcomes for different members on the same tool | `samarth-chawla` | 1 |
 | [P1-10](Phase-1-Security-ArmorIQ/P1-10-e4-hold-approval-resume.md) | E4: HOLD → console approval → resume (and every failure path) | `samarth-chawla` | 1 |
+| [P1-11](Phase-1-Security-ArmorIQ/P1-11-docker-dev-environment-and-images.md) | Docker dev environment and deployable images | `parthgoyal26-03-2005` | 1 |
 | [P2-01](Phase-2-MCP-Knowledge/P2-01-database-schema-migrations-and-roles.md) | Neon schema, migrations, database roles, and grant verification | `Aditya-Rawat01` | 2 |
 | [P2-02](Phase-2-MCP-Knowledge/P2-02-tool-argument-and-result-contracts.md) | Tool argument and result contracts | `Aditya-Rawat01` | 2 |
 | [P2-03](Phase-2-MCP-Knowledge/P2-03-seed-corpus-ingestion-and-embeddings.md) | Synthetic seed corpus, ingestion, and local embeddings | `Aditya-Rawat01` | 2 |
@@ -131,6 +132,7 @@ flowchart LR
     P1_08["P1-08 (G2)<br/>Policy + E5"]:::sec
     P1_09["P1-09 (G3)<br/>E3 per-member"]:::sec
     P1_10["P1-10 (G4)<br/>E4 HOLD/approval"]:::sec
+    P1_11["P1-11<br/>Docker dev env"]:::web
   end
   subgraph P2["Phase 2 — MCP and Knowledge"]
     P2_01["P2-01<br/>Schema, roles, grants"]:::mcp
@@ -180,6 +182,7 @@ flowchart LR
   P2_10 --> P1_08
   P1_08 --> P1_09
   P1_09 --> P1_10
+  P1_05 --> P1_11
   P2_01 --> P2_03
   P2_01 --> P2_04
   P2_03 --> P2_04
@@ -324,7 +327,7 @@ merges first.
 
 | Wave | Merge order | Needs (same wave) | Notes |
 |---|---|---|---|
-| 1 — Phase 1 setup | P1-01 (#2) → P1-04 (#5) → P1-03 (#4) → P1-02 (#3) → P1-05 (#6) | — | All independent. P1-04 first: the gateway and every tool depend on it. P1-03 is the first contract-changing PR. P1-02 rebases onto the real `sign_ctx`. P1-05 deploys the scaffold only |
+| 1 — Phase 1 setup | P1-01 (#2) → P1-04 (#5) → P1-03 (#4) → P1-02 (#3) → P1-05 (#6) → P1-11 (#48) | P1-11 needs P1-05 | P1-01..P1-05 are independent; P1-11 (Docker) reuses P1-05's Dockerfile. P1-04 first: the gateway and every tool depend on it. P1-03 is the first contract-changing PR. P1-02 rebases onto the real `sign_ctx`. P1-05 deploys the scaffold only |
 | 2 — Data and contracts | P2-02 (#12) → P2-01 (#13) | — | The P1-08 policy YAML may be drafted now; its PR merges in Wave 6 |
 | 3 — Data layer | P2-07 (#14) → P2-03 (#15) → P3-01 (#16) → P3-03 (#17) | — | P2-03 ships the E1 seed record first |
 | 4 — First tool | P2-04 (#18) → P2-06 (#19) → P3-02 (#20) → P2-05 (#21) | P2-06 and P2-05 need P2-04 | After P2-06 merges, redeploy the tool server (P1-05 procedure). P1-04 must already be merged (G0) |
@@ -336,7 +339,7 @@ merges first.
 **Testing checkpoint after every wave:** when a wave is fully merged, run its checkpoint on the integrated `main` (Wave 1 → CP-1 #40, Wave 2 → CP-2 #41, … Wave 8 → CP-8 #47). The next wave's PRs are not merged until it passes. Commands, live checks and pass criteria are in [CHECKPOINTS.md](CHECKPOINTS.md); each checkpoint issue is closed only when it passes.
 
 This order was validated against every task's hard dependencies, the G1/G3
-gates, and same-file sequences: 38 tasks, no violations.
+gates, and same-file sequences: 39 tasks, no violations.
 
 ### Per-PR merge procedure
 
@@ -362,7 +365,7 @@ gates, and same-file sequences: 38 tasks, no violations.
 | `samarth-chawla` | P1-01, P1-02, P1-04, P1-06, P1-07, P1-08, P1-09, P1-10, P2-10, P5-02 (10) | ~34 h | ArmorIQ, gates, `_ctx`, honeypot, security regression |
 | `Aditya-Rawat01` | P2-01 … P2-09, P3-08 (10) | ~32 h | Database, retrieval, tools, ledger, E17 |
 | `VTCodeCraft` | P1-03, P3-02, P3-03, P3-04, P3-05, P3-07, P3-09, P4-01, P5-01 (9) | ~36 h | Identity, agent pipeline, Slack, web request API, integration |
-| `parthgoyal26-03-2005` | P1-05, P3-01, P3-06, P4-02, P4-03, P4-04, P4-05, P5-03, P5-04 (9) | ~32 h | Deployment, audit store, delivery, web UI, demo |
+| `parthgoyal26-03-2005` | P1-05, P1-11, P3-01, P3-06, P4-02, P4-03, P4-04, P4-05, P5-03, P5-04 (10) | ~34.5 h | Deployment, Docker, audit store, delivery, web UI, demo |
 
 \* Agent-assisted estimates: S ≈ 1.5 h, S–M ≈ 2.5 h, M ≈ 3.5 h, M–L ≈ 5 h, L ≈ 6.5 h. The total (~134 h) is close
 to the team's remaining capacity. **Schedule risk is high.** Under pressure, cut

@@ -21,6 +21,7 @@ Sources: PRD §0, §4.1, §5.3, §7, §9, §11, §13; Arch §0, §5, §6.3, §12
 | [P1-08](P1-08-policy-and-e5-setup-conformance.md) | Policy + E5 setup conformance | `samarth-chawla` | M | P1-01, P1-06, P2-08, P2-10 | **G2** |
 | [P1-09](P1-09-e3-per-member-outcomes.md) | E3: per-member outcomes | `samarth-chawla` | M | P1-08 | **G3** |
 | [P1-10](P1-10-e4-hold-approval-resume.md) | E4: HOLD → console approval → resume | `samarth-chawla` | M | P1-09 | **G4** |
+| [P1-11](P1-11-docker-dev-environment-and-images.md) | Docker dev environment + API image (ADR-029) | `parthgoyal26-03-2005` | M | P1-05 | — |
 
 ## Entry criteria
 
@@ -64,6 +65,7 @@ ArmorIQ behavior may be built against fakes earlier. UI starts after G1 + G3.
 ## Parallelization inside the phase
 
 - Immediately and in parallel: P1-01, P1-02, P1-03, P1-04, P1-05 (Render, ADR-016). The P1-08 YAML draft can also start now.
+- P1-11 (Docker dev environment) as soon as P1-05's tool-server Dockerfile is merged; it merges right after P1-05.
 - Sequential (live): P1-06 → P1-07 ‖ P1-08 → P1-09 → P1-10. All live runs are by one owner; schedule a Maya approver for P1-10.
 
 ## Issue tracking and readiness
@@ -82,6 +84,7 @@ GitHub issue numbers are recorded in [../GITHUB_ISSUES.md](../GITHUB_ISSUES.md) 
 | P1-08 (E5) | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | YAML draft now (placeholders, ADR-022); console work after P1-01, P1-06, P2-08, P2-10 merge | Live E5 record (D-12, D-17, D-26 resolved: ADR-023, ADR-024, ADR-022) |
 | P1-09 (E3) | [#10](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/10) | After P1-08 merges | Live E3 record meeting the ArmorIQ evidence rule |
 | P1-10 (E4) | [#11](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/11) | After P1-09 merges and a Maya approver is scheduled | Live E4 record (PASS or documented fallback) |
+| P1-11 | [#48](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/48) | After P1-05 merges (it reuses `deploy/toolserver/Dockerfile`) | Compose + API image verified on a clean clone (ADR-029) |
 
 **Plan note.** Phase 1 cannot be completed before Phase 2. E1, E5, and E3 need these Phase 2 PRs merged and deployed first: P2-01, P2-02, P2-03 (seed record), P2-04, P2-07, P2-06, P2-08, P2-10 (P2-09 is a soft input to E5). The root [PR merge order](../README.md#pr-merge-order) interleaves them: Phase 1 setup is Wave 1, E1/E2 are Wave 5, and E5/E3/E4 are Wave 6.
 

@@ -41,11 +41,12 @@ components is P5-03.
 - Hard: none for the scaffold build.
 - Decisions: D-07 resolved: **Render** (ADR-016). Verify the ADR-016 requirements (RAM, no idle sleep, HTTPS, secrets in Render settings) when provisioning.
 - Soft: P2-06 (redeploy with the first product tool before E1); P2-01 (`DATABASE_URL_TOOLSERVER`); P2-05 (FastEmbed memory).
-- Blocks: P1-06, P5-03 (reuses the procedure).
+- Blocks: P1-06, P1-11 (compose reuses the tool-server Dockerfile), P5-03 (reuses the procedure).
 
 ## 6. Exact files/modules this task owns
 
-- `deploy/toolserver/` (new, PROPOSED path, supporting infrastructure): platform build/run configuration, for example a container file or platform manifest chosen under D-07, plus `deploy/toolserver/README.md` with the deploy and redeploy procedure. No secrets.
+- `deploy/toolserver/Dockerfile` (new; ADR-029): `python:3.12-slim`, `pip install ".[toolserver]"` only, non-root user, FastEmbed model downloaded at build time once P2-05 needs it, `CMD uvicorn services.toolserver.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8100}`. Render runs it as a Docker web service, and P1-11's compose reuses it. No secrets in the image.
+- `deploy/toolserver/README.md` (new): the Render deploy and redeploy procedure.
 
 ## 7. Existing files it may need to modify
 
@@ -117,7 +118,7 @@ curl -sN -X POST https://<host>/memory/mcp \
 - **Title:** `[P1-05] Deploy the MCP tool server to public HTTPS for ArmorIQ experiments`
 - **Body outline:** platform (D-07); env names; smoke checks; acceptance criteria; evidence = smoke output (no secrets) + URL in Setup record.
 - **Labels:** `phase-1-security`, `deployment`, `mcp`
-- **Depends on:** D-07  **Blocks:** P1-06, P5-03
+- **Depends on:** D-07  **Blocks:** P1-06, P1-11, P5-03
 
 ## 17. Definition of done
 

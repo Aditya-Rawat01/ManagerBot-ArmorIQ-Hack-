@@ -1,13 +1,14 @@
 # GitHub issue drafts
 
-Copy-ready drafts for all 38 implementation tasks. Each draft links to its task
+Copy-ready drafts for all 39 implementation tasks. Each draft links to its task
 file, which remains the source of truth for scope and acceptance criteria.
 
-## Issue status: **all 38 tasks created (#2–#39); blocker #1 closed**
+## Issue status: **all 39 tasks created (#2–#39, #48); blocker #1 closed**
 
 - 14 Oct 2026, created by `VTCodeCraft`:
   - Phase 1: #2–#11, plus blocker/decision tracker #1 (closed 14 Oct 2026; its access item moved to #2);
   - Phases 2–5: #12–#39, created in PR merge-wave order, so issue numbers roughly follow the work order.
+  - P1-11 (Docker dev environment, ADR-029): #48, added after the checkpoints.
   - Testing checkpoints CP-1 to CP-8: #40–#47, one per merge wave (see CHECKPOINTS.md), labeled `testing`, `gate`.
 - Labels: `phase-1-security`, `phase-2-mcp-knowledge`, `phase-3-agent-slack`, `phase-4-frontend`, `phase-5-release`, `security`, `armoriq`, `experiment`, `gate`, `backend`, `mcp`, `database`, `knowledge`, `agent`, `slack`, `frontend`, `testing`, `deployment` (plus the existing `documentation`).
 - Issue bodies are generated from the task files. They add a Ready/Blocked status, merge position, and `#` references for every dependency.
@@ -73,6 +74,7 @@ gh issue create -R Aditya-Rawat01/ManagerBot-ArmorIQ-Hack- --title "<title>" --l
 | [P1-08](Phase-1-Security-ArmorIQ/P1-08-policy-and-e5-setup-conformance.md) | [P1-08] Author and apply the ArmorIQ policy; E5 setup and policy conformance | `samarth-chawla` | phase-1-security, armoriq, experiment, gate, security | P1-01, P1-06, P2-08, P2-10 (soft: P2-09); D-26, D-17, D-02 |
 | [P1-09](Phase-1-Security-ArmorIQ/P1-09-e3-per-member-outcomes.md) | [P1-09] E3: verify per-member ALLOW/HOLD/BLOCK outcomes and identity isolation | `samarth-chawla` | phase-1-security, armoriq, experiment, gate, security | P1-08; D-02, D-18 |
 | [P1-10](Phase-1-Security-ArmorIQ/P1-10-e4-hold-approval-resume.md) | [P1-10] E4: verify HOLD, ArmorIQ console approval/rejection, resume and expiry | `samarth-chawla` | phase-1-security, armoriq, experiment, gate, security | P1-09; D-02, D-18 |
+| [P1-11](Phase-1-Security-ArmorIQ/P1-11-docker-dev-environment-and-images.md) | [P1-11] Add Docker Compose dev environment and API image (ADR-029) | `parthgoyal26-03-2005` | phase-1-security, deployment | P1-05 |
 | [P2-01](Phase-2-MCP-Knowledge/P2-01-database-schema-migrations-and-roles.md) | [P2-01] Create Neon schema, migrations, DB roles, and grant verification | `Aditya-Rawat01` | phase-2-mcp-knowledge, database, security, gate | D-08 |
 | [P2-02](Phase-2-MCP-Knowledge/P2-02-tool-argument-and-result-contracts.md) | [P2-02] Define strict argument and result contracts for all 14 tools | `Aditya-Rawat01` | phase-2-mcp-knowledge, mcp, security, backend | — (D-11, D-29 revised later by ICR) |
 | [P2-03](Phase-2-MCP-Knowledge/P2-03-seed-corpus-ingestion-and-embeddings.md) | [P2-03] Build synthetic multi-tier seed corpus and FastEmbed ingestion | `Aditya-Rawat01` | phase-2-mcp-knowledge, knowledge, database | P2-01 |
@@ -338,7 +340,7 @@ Read before starting: `docs/Todos/context/` (project context, architecture rules
 - **Labels:** `phase-1-security`, `deployment`, `mcp`
 - **Proposed owner:** `parthgoyal26-03-2005`
 - **Depends on:** D-07
-- **Blocks:** P1-06, P5-03
+- **Blocks:** P1-06, P1-11, P5-03
 
 Body:
 
@@ -362,7 +364,7 @@ components is P5-03.
 - Hard: none for the scaffold build.
 - Decisions: D-07 resolved: **Render** (ADR-016). Verify the ADR-016 requirements (RAM, no idle sleep, HTTPS, secrets in Render settings) when provisioning.
 - Soft: P2-06 (redeploy with the first product tool before E1); P2-01 (`DATABASE_URL_TOOLSERVER`); P2-05 (FastEmbed memory).
-- Blocks: P1-06, P5-03 (reuses the procedure).
+- Blocks: P1-06, P1-11 (compose reuses the tool-server Dockerfile), P5-03 (reuses the procedure).
 
 ### Acceptance criteria
 - [ ] `GET https://<host>/health` returns `200` with `status=ok`.
@@ -657,6 +659,65 @@ git diff -- docs/EXPERIMENTS.md
 
 ### Definition of done
 E4 record merged with every scenario evidenced; G4 announced (PASS, or fallback in force); token and timeout ICRs filed if needed.
+
+Read before starting: `docs/Todos/context/` (project context, architecture rules, shared interfaces, handoff protocol, decisions).
+````
+
+### [P1-11] Add Docker Compose dev environment and API image (ADR-029)
+
+- **Labels:** `phase-1-security`, `deployment`
+- **Proposed owner:** `parthgoyal26-03-2005`
+- **Depends on:** P1-05
+- **Blocks:** — (soft: P2-01, P5-03)
+
+Body:
+
+````markdown
+**Task file:** [Phase-1-Security-ArmorIQ/P1-11-docker-dev-environment-and-images.md](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/blob/main/docs/Todos/Phase-1-Security-ArmorIQ/P1-11-docker-dev-environment-and-images.md)
+**Proposed owner:** `parthgoyal26-03-2005` · **Size:** M (2–3 h) · **Target:** 14–15 Oct (merges right after P1-05)
+**Gate role:** Supporting infrastructure; CP-1 checks it
+
+### Deliverable
+Teammates should not need exact local Python/Node versions or a shared Neon account to build and test. Outcome:
+
+- `docker compose up --build` starts the API (8000), tool server (8100), web dev server (5173) and a local Postgres with `pgvector` (5432);
+- `docker compose run --rm dev bash scripts/check.sh` runs the same checks as CI with Python 3.12 and Node 22;
+- `docker compose run --rm migrate` gives the migration step its own container, the only one with the migration DSN (it becomes useful once P2-01 adds `scripts/migrate.py`);
+- `deploy/api/Dockerfile` is the image Render runs for the API (ADR-029).
+
+The tool server image itself comes from P1-05 (`deploy/toolserver/Dockerfile`); this task reuses it.
+
+### Prerequisites
+- Hard: P1-05 (`deploy/toolserver/Dockerfile` exists and is used by compose).
+- Decisions: D-07 resolved (Render, ADR-016); containerization decided (ADR-029).
+- Blocks: none hard. Every later task can use the local database for DSN-based tests (P2-01, P2-03, P2-07, P3-01).
+
+### Acceptance criteria
+- [ ] On a clean clone with `cp .env.example .env`, `docker compose up --build` starts all four services. `GET http://localhost:8000/health` and `GET http://localhost:8100/health` return 200, and `http://localhost:5173` shows the web app with the API health indicator.
+- [ ] `docker compose run --rm dev bash scripts/check.sh` ends with "all checks passed".
+- [ ] `docker compose config` shows `DATABASE_URL_MIGRATE` only on `migrate`, and no backend/toolserver DSN cross-over.
+- [ ] `docker run --rm <api image> pip show mcp` fails (not installed), and the tool-server image has no `armoriq-sdk`.
+- [ ] `docker history` / `docker inspect` of each image shows no secret values, and the images run as a non-root user.
+- [ ] `.dockerignore` keeps `.env`, `.venv`, `node_modules` and `research/` out of the build context (check with a test build).
+- [ ] `docs/DOCKER.md` exists and is linked from `README.md`.
+
+### Evidence required for completion
+- [ ] Handoff report posted (`docs/Todos/context/AGENT_HANDOFF_PROTOCOL.md` §7) with the commands run and their results.
+- [ ] Verification commands (task file §12) pass:
+
+```bash
+cp .env.example .env
+docker compose config                                  # inspect env per service
+docker compose up --build -d
+curl -fsS http://localhost:8000/health && curl -fsS http://localhost:8100/health
+docker compose run --rm dev bash scripts/check.sh
+docker compose run --rm api pip show mcp || echo "mcp not in api image (expected)"
+docker compose run --rm toolserver pip show armoriq-sdk || echo "armoriq-sdk not in toolserver image (expected)"
+docker compose down
+```
+
+### Definition of done
+Compose environment and API image merged; the §12 commands verified on a clean clone and recorded in the PR; `docs/DOCKER.md` linked from the README; CP-1's Docker check passes.
 
 Read before starting: `docs/Todos/context/` (project context, architecture rules, shared interfaces, handoff protocol, decisions).
 ````
@@ -2044,6 +2105,7 @@ Read before starting: `docs/Todos/context/` (project context, architecture rules
 | P1-08 | [#9](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/9) | `VTCodeCraft` | 2026-10-14 |
 | P1-09 | [#10](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/10) | `VTCodeCraft` | 2026-10-14 |
 | P1-10 | [#11](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/11) | `VTCodeCraft` | 2026-10-14 |
+| P1-11 | [#48](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/48) | `VTCodeCraft` | 2026-10-14 |
 | P2-01 | [#13](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/13) | `VTCodeCraft` | 2026-10-14 |
 | P2-02 | [#12](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/12) | `VTCodeCraft` | 2026-10-14 |
 | P2-03 | [#15](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/15) | `VTCodeCraft` | 2026-10-14 |
