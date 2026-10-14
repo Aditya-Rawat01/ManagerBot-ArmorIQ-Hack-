@@ -9,7 +9,7 @@ People may keep developing on their branches meanwhile. The last checkpoint, CP-
 the final delivery check.
 
 Each checkpoint has a GitHub issue (`[CP-n] …`). It closes only when the checkpoint
-passes, and `docs/Todos/STATUS.md` shows its state.
+passes.
 
 | Checkpoint | Issue | Runs after | Unlocks |
 |---|---|---|---|
@@ -24,7 +24,7 @@ passes, and `docs/Todos/STATUS.md` shows its state.
 
 ## How to run any checkpoint
 
-1. **Entry:** every issue of the wave is closed by a merged PR (see STATUS.md). Then:
+1. **Entry:** every issue of the wave is closed by a merged PR (check the issues on GitHub). Then:
 
    ```bash
    git checkout main && git pull origin main
@@ -61,7 +61,7 @@ passes, and `docs/Todos/STATUS.md` shows its state.
    - links to any `docs/EXPERIMENTS.md` records;
    - an overall **PASS** or **FAIL**.
 
-   Close the issue only on PASS. Then run `python scripts/update_status.py`.
+   Close the issue only on PASS.
 
 **On failure:**
 - Fix it in a PR that says `Refs #<CP issue>`, or open a new issue.

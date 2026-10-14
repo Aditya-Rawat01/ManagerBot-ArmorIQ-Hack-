@@ -19,8 +19,7 @@ not resolved silently.
 3. Before starting, check its hard dependencies (merged?) and the decisions it is blocked by.
 4. Work on one branch with one PR per task. Post the handoff report (protocol §7). Do not merge your own PR; the merger follows the [PR merge order](#pr-merge-order).
 5. Testing: after each merge wave, run its checkpoint from [CHECKPOINTS.md](CHECKPOINTS.md) (issues #40–#47) before merging the next wave.
-6. Live progress: [STATUS.md](STATUS.md), generated from GitHub by `python scripts/update_status.py`. It shows what is done, in review, in progress, ready or waiting, the next PR to merge, and the gate results. Never edit it by hand. After merging PRs, the merger re-runs the script and commits it on its own (`docs: update status`), never inside a feature PR. Anyone can view the current state without changing files: `python scripts/update_status.py --stdout`.
-7. GitHub issue drafts: [GITHUB_ISSUES.md](GITHUB_ISSUES.md). **No issues have been created yet**; see that file for why.
+6. GitHub issues: every task is an issue (#2–#39) and every checkpoint too (#40–#47). Progress = issue assignees, PRs and closed issues. Mapping: [GITHUB_ISSUES.md](GITHUB_ISSUES.md).
 
 ## Status snapshot (14 Oct 2026)
 
@@ -334,7 +333,7 @@ merges first.
 | 7 — UI and offline suites | P4-02 (#31) → P4-03 (#32) → P4-04 (#33) → P4-05 (#34) → P3-09 (#35) | P4-03 and P4-04 need P4-02; P4-05 needs both | Starts only after G1 (P1-06) and G3 (P1-09) passed or fallbacks are recorded |
 | 8 — Release | P5-01 (#36) → P5-03 (#37) → P5-02 (#38) → P5-04 (#39) | P5-02 and P5-03 need P5-01; P5-04 needs both | P5-02 core items by 16 Oct 12:00 (freeze) |
 
-**Testing checkpoint after every wave:** when a wave is fully merged, run its checkpoint on the integrated `main` (Wave 1 → CP-1 #40, Wave 2 → CP-2 #41, … Wave 8 → CP-8 #47). The next wave's PRs are not merged until it passes. Commands, live checks and pass criteria are in [CHECKPOINTS.md](CHECKPOINTS.md); STATUS.md shows each checkpoint's state.
+**Testing checkpoint after every wave:** when a wave is fully merged, run its checkpoint on the integrated `main` (Wave 1 → CP-1 #40, Wave 2 → CP-2 #41, … Wave 8 → CP-8 #47). The next wave's PRs are not merged until it passes. Commands, live checks and pass criteria are in [CHECKPOINTS.md](CHECKPOINTS.md); each checkpoint issue is closed only when it passes.
 
 This order was validated against every task's hard dependencies, the G1/G3
 gates, and same-file sequences: 38 tasks, no violations.
