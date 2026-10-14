@@ -1,0 +1,37 @@
+# Shared Ruff configuration for every Python project in this repository
+# (backend/, mcp-server/, contracts/python/). Run from the repo root or a
+# sub-project; Ruff discovers this file by walking up the tree.
+
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "node_modules", "frontend"]
+
+[lint]
+select = [
+  "E",     # pycodestyle errors
+  "W",     # pycodestyle warnings
+  "F",     # pyflakes
+  "I",     # isort
+  "UP",    # pyupgrade
+  "B",     # flake8-bugbear
+  "SIM",   # flake8-simplify
+  "S",     # flake8-bandit (security)
+  "ASYNC", # flake8-async
+  "RUF",   # ruff-specific
+]
+ignore = [
+  "S105",  # hard-coded-password-string: false positives on env var *names*
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = [
+  "S101",  # assert is the point of a test
+  "S106",  # dummy secrets in tests
+]
+
+[lint.isort]
+known-first-party = ["app", "proxylead_contracts"]
+
+[format]
+quote-style = "double"
+line-ending = "lf"

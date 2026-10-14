@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Secrets and local configuration — never commit real credentials
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials.json
+.armoriq/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Node / frontend
+# ---------------------------------------------------------------------------
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
+.eslintcache
+coverage/
+
+# ---------------------------------------------------------------------------
+# Logs, local data, caches
+# ---------------------------------------------------------------------------
+*.log
+logs/
+*.sqlite
+*.sqlite3
+*.db
+.fastembed_cache/
+.cache/
+
+# ---------------------------------------------------------------------------
+# Editors / OS / local agent settings
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+.claude/settings.local.json
