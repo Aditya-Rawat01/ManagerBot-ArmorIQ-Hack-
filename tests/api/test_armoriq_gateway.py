@@ -6,6 +6,7 @@ confirmed or corrected only by E1-E4.
 """
 
 import asyncio
+import base64
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -16,6 +17,7 @@ from armoriq_sdk.models import HoldInfo, MCPInvocationResult
 
 from apps.api.core.config import Settings
 from services.authorization.armoriq_gateway import ArmorIQGateway
+from services.authorization.ctx_envelope import verify_ctx
 from services.contracts import (
     AppRole,
     ApprovalState,
@@ -569,12 +571,34 @@ def test_failed_handle_short_circuits_without_sdk__offline_fake_sdk() -> None:
     assert fake.policy_calls == []
 
 
-def test_missing_signer_is_unverified__offline_fake_sdk() -> None:
-    # P1-04 has not merged: with no signer injected the gateway fails closed
-    # before touching the SDK.
+def test_default_signer_produces_verifiable_ctx__offline_fake_sdk() -> None:
+    # No injected signer: the gateway signs with P1-04's sign_ctx, and the
+    # tool-server side (verify_ctx) accepts the token for this endpoint and tool.
     fake = FakeClient("allow")
     gateway = ArmorIQGateway(_settings(), client_factory=lambda member_id: fake)
-    assert gateway._ctx_signer is None
+    ctx = _ctx(_user(PersonaKey.MAYA, "m-maya"))
+    plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
+
+    async def run() -> Any:
+        handle = await gateway.start_plan(ctx, plan)
+        return await gateway.invoke_step(handle, 0, ctx, plan)
+
+    asyncio.run(run())
+    token = fake.policy_calls[0]["params"]["_ctx"]
+    step = plan.steps[0]
+    envelope = verify_ctx(
+        token, "ctx-secret-for-tests", expected_aud=step.mcp.value, expected_tool=step.tool.value
+    )
+    assert envelope.requester_member_id == "m-maya"
+    assert envelope.armoriq_member_email_ref == "PERSONA_MAYA_EMAIL"
+    payload = base64.urlsafe_b64decode(token.split(".")[0] + "==")
+    assert b"maya@example.com" not in payload  # ADR-020: env-key reference only
+
+
+def test_missing_ctx_secret_is_unverified__offline_fake_sdk() -> None:
+    # No CTX_SECRET: the gateway fails closed before touching the SDK.
+    fake = FakeClient("allow")
+    gateway = ArmorIQGateway(_settings(ctx_secret=None), client_factory=lambda member_id: fake)
     ctx = _ctx(_user(PersonaKey.MAYA, "m-maya"))
     plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
 

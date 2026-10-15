@@ -31,6 +31,7 @@ from armoriq_sdk import ArmorIQClient, InvokeOptions
 from armoriq_sdk import exceptions as sdk_exceptions
 from armoriq_sdk.session import SessionOptions
 
+from services.authorization.ctx_envelope import CtxEnvelope, sign_ctx
 from services.contracts import (
     TOOL_CATALOG,
     ApprovalState,
@@ -95,12 +96,19 @@ class StepOutcome:
     invocation: ToolInvocationResult | None = None
 
 
-# P1-04 owns the real signer. Until it merges there is no default: the gateway
-# fails closed when no signer is injected, and tests inject a fake behind this
-# narrow protocol. On rebase onto merged P1-04 this default is bound to the
-# real `sign_ctx` (adapter lives in that rebase commit, not here), so this
-# module never redefines the `_ctx` contract.
+# P1-04 owns the `_ctx` contract. The default signer below adapts the gateway's
+# fields to `CtxEnvelope` and calls the real `sign_ctx`; tests may inject a fake
+# behind this narrow protocol. This module never redefines the envelope.
 CtxSigner = Callable[[Mapping[str, Any], str], str]
+
+
+def sign_ctx_fields(fields: Mapping[str, Any], secret: str) -> str:
+    """Default signer: P1-04 ``sign_ctx`` (``iat``/``exp`` as epoch seconds)."""
+    values = dict(fields)
+    for key in ("iat", "exp"):
+        if isinstance(values[key], datetime):
+            values[key] = values[key].timestamp()
+    return sign_ctx(CtxEnvelope(**values), secret)
 
 
 def _secret_value(secret: Any) -> str | None:
@@ -137,7 +145,7 @@ class ArmorIQGateway:
 
     ``settings`` is the API ``Settings`` object (or anything exposing the same
     attribute names). ``client_factory`` and ``ctx_signer`` are seams for
-    offline tests and for P1-04's signer until it merges.
+    offline tests; ``ctx_signer`` defaults to P1-04's ``sign_ctx``.
     """
 
     def __init__(
@@ -148,8 +156,7 @@ class ArmorIQGateway:
         ctx_signer: CtxSigner | None = None,
     ) -> None:
         self._settings = settings
-        # None until P1-04 merges (fail closed) or a test injects a fake.
-        self._ctx_signer = ctx_signer
+        self._ctx_signer: CtxSigner = ctx_signer or sign_ctx_fields
         self._token_validity_s = int(getattr(settings, "token_validity_s", 1200))
         self._approval_timeout_ms = int(getattr(settings, "approval_timeout_ms", 900_000))
         self._agent_id = str(getattr(settings, "armoriq_agent_id", "proxylead"))
@@ -903,9 +910,6 @@ class ArmorIQGateway:
     def _sign_step_ctx(
         self, handle: PlanHandle, ctx: RequestContext, plan: PlanProposal, step: Any, jti: str
     ) -> str | None:
-        if self._ctx_signer is None:
-            logger.warning("gateway ctx unavailable request_id=%s", ctx.request_id)
-            return None
         secret = _secret_value(getattr(self._settings, "ctx_secret", None))
         if not secret:
             logger.warning("gateway ctx unavailable request_id=%s", ctx.request_id)
