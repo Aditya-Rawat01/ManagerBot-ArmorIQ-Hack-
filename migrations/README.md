@@ -17,6 +17,7 @@ running services (PRD v2 §8.1).
 | `0007_ledger_evidence_columns.sql` | `arguments_sha256`, `workspace_id` on the ledger (P2-07 writer fields); append-only `tool_jti_claims` (atomic replay claim before execution) |
 | `0008_ledger_attempts_constraints.sql` | P2-07 follow-up: ledger `id` `GENERATED ALWAYS`; `NOT VALID` row-format CHECKs on new ledger rows (hex digests, identifier-only `error_class`, fixed `validation_outcome` set, no `not_reached`); append-only `tool_call_attempts` (one row per call that passed the credential check: `accepted` / `invalid_context` / `context_expired` / `replay`) |
 | `0009_audit_event_fk_restrict.sql` | `request_events` / `decision_events` / `delivery_events` `plan_id` FKs become `ON DELETE RESTRICT` (were `CASCADE`): the backend's `DELETE` on `plans` can no longer remove append-only audit events (P3-01 follow-up). No new objects, no grant changes |
+| `0010_seed_keys.sql` | Nullable `seed_key` + unique `(workspace_id, seed_key)` index on `decisions`, `manager_guidance`, `team_notes` (P2-03 keyed seed upserts; runtime rows keep NULL). Additive; 0005 grants restated, backend still denied |
 
 ## Rules (binding)
 

@@ -169,6 +169,17 @@ Migration tooling and driver: **PROPOSED** (D-08). Roles are **FIXED** (PRD §8.
 | `tool_execution_ledger` | P2-01 (P2-07 may add constraints) | toolserver (`INSERT` only) | toolserver; backend `SELECT` of non-content columns **PROPOSED** for SC-06 correlation | PROPOSED grants |
 | `tasks`, `egress_sink` | P2-01 | toolserver (P2-10) | toolserver; backend `SELECT` on `egress_sink` count **PROPOSED** for the demo | Ship decision D-17 |
 
+Knowledge record layout written by the seed (P2-03, **PROPOSED**; read by
+P2-04/P2-05/P2-08; full detail in `seed/README.md`):
+`source_records` has no `version`/`review_status`/`superseded_by` columns, so
+they live in `provenance` (`version` int, `review_status` ∈ `ReviewStatus`,
+`superseded_by` = successor `source_id` or `null`, consistent with `status`),
+next to `recorded_at`, `embed_model`, `embed_tool` (model version), `embed_dim`,
+and `ingest_digest`; `created_at`/`updated_at` = the record's synthetic date.
+`knowledge_chunks.tier` always equals its source's `tier`. `decisions`,
+`manager_guidance`, `team_notes` carry a nullable `seed_key` (0010): set on
+seed rows, NULL on runtime rows. Eval case labels are never stored.
+
 No runtime role gets `UPDATE`/`DELETE` on ledger or audit tables (append-only, PROPOSED).
 
 ## 8. Approval lifecycle and execution semantics

@@ -6,37 +6,83 @@ through the migration-role ingest into a database.
 
 ## Format
 
-- `sources/*.json` — one source record per file: `source_id` (stable, used by
-  E1/E17 handoffs), `title`, `tier`, `status` (`active`/`superseded`),
-  `source_type`, `author` (persona label), `reference`, `recorded_at`
-  (synthetic date, kept in provenance), `case` (this table), `provenance`
-  extras, `content` (plain text).
-- `decisions.json` — `decisions` rows; `supersedes_statement` links the
-  superseded row after insert.
-- `guidance.json` — `manager_guidance` rows (`approved_by` persona).
-- `notes.json` — `team_notes` drafts (`review_status: draft`). Drafts are NOT
-  search evidence (D-09 interim): searchable retrieval (P2-04) only returns
-  authoritative, non-superseded records; Maya reaches drafts through the
-  review queue instead.
+- `sources/*.json` — one source record per file, validated by
+  `services/knowledge/ingest.py::validate_source_record` (unknown keys are
+  rejected; every key below is required except `source_type`, `reference`,
+  and `provenance`):
+  - `source_id` — stable, used by E1/E17 handoffs; upsert key with the
+    workspace.
+  - `title`, `content` (plain text), `source_type`, `reference`.
+  - `author` — persona label (`maya`/`sam`/`priya`).
+  - `tier` — `DataTier` (`team`/`confidential`/`restricted`).
+  - `status` — `active` or `superseded`; `superseded_by` — the successor's
+    `source_id` when `status` is `superseded`, otherwise `null` (always
+    explicit, always consistent with `status`).
+  - `review_status` — `ReviewStatus` (`authoritative`/`draft`); `version` —
+    integer ≥ 1.
+  - `recorded_at` — synthetic ISO date; stored as `created_at` and
+    `updated_at` (midnight UTC) and in provenance.
+  - `provenance` — extras only (e.g. `escalation_topic`); keys the ingest
+    writes itself are reserved and rejected.
+- `decisions.json` — `decisions` rows, each with a stable `key`; `source`
+  names a `source_id` (a typo fails the run) and `supersedes` names the `key`
+  of the decision it replaces (`superseded_by_id` is re-linked every run).
+- `guidance.json` — `manager_guidance` rows (`key`, `approved_by` persona).
+- `notes.json` — `team_notes` drafts (`key`, `review_status: draft`). Drafts
+  are NOT search evidence (D-09 interim): searchable retrieval (P2-04) only
+  returns authoritative, non-superseded records; Maya reaches drafts through
+  the review queue instead.
 - Members/workspace rows come from env at seed time (D-20/ADR-021), not files.
-- Runs without member emails leave `owner_member_id` / `author_member_id` /
-  `approved_by_member_id` NULL (honest unknown, never fake rows). A later run
-  with emails present adopts those orphans by exact-text match (reported as
-  `adopted`).
+  A persona without `PERSONA_<NAME>_EMAIL` is not written (the run warns with
+  the env-key name only) and its FKs stay NULL — an honest unknown, never a
+  fake row. A later run with the email set fills those FKs in place.
+- **No eval labels in records.** The case of each record lives only in the
+  case map below (P3-08 owns the E17 question set in `seed/eval/`); labels
+  are never ingested, and a `case` key is rejected.
+
+## Stored layout and idempotency
+
+`python -m services.knowledge.ingest --source seed/` (migration role only;
+refuses a DSN equal to `DATABASE_URL_BACKEND`/`DATABASE_URL_TOOLSERVER`).
+Validates the whole corpus and loads the model first, then runs ONE
+transaction under `pg_advisory_xact_lock(5786091178244190257)` (ASCII
+`PLSEED01`, `ingest.INGEST_LOCK_KEY`). Re-running changes nothing: every count
+in the printed stats is 0.
+
+- `source_records`: keyed by `(workspace_id, source_id)`. `content_hash` =
+  sha256 of `content`. `provenance` = the file's extras plus `recorded_at`,
+  `version`, `review_status`, `superseded_by`, `embed_model`, `embed_tool`
+  (`MODEL_ID+fastembed-<pkg>`), `embed_dim`, `chunk_words`, `chunk_overlap`,
+  and `ingest_digest` — sha256 over the canonical JSON of every ingested field
+  plus the model version, chunking parameters, and layout version. An equal
+  digest skips the record; any other change rewrites the row.
+- `knowledge_chunks`: re-embedded only when the chunk texts or the model
+  version change; a metadata-only change just updates the `tier` (and
+  `workspace_id`) copied from the source. Chunk `content_hash` =
+  sha256(`<source_id>:<chunk text>`).
+- `decisions` / `manager_guidance` / `team_notes`: keyed by
+  `(workspace_id, seed_key)` (migration 0010), upserted in place. A row from
+  an older ingest (NULL `seed_key`) is claimed once by its old identity
+  (exact statement / guidance text / note content hash). Runtime rows (NULL
+  `seed_key`) are never touched. A note's `review_status` and `version` are
+  set on insert only: after that the draft lifecycle belongs to
+  `knowledge_confirm_maya_decision` (P2-09, R-56).
 
 ## Chunking (PROPOSED, recorded)
 
 Word windows: 120 words per chunk, 20 words overlap, split on whitespace
-(`services/knowledge/ingest.py::chunk_text`). Deterministic: same text always
-yields the same chunks. Each chunk carries `workspace_id` + `tier`; the
-source's provenance records the embed model, tool, dimension, case, and
-recorded date.
+(`services/knowledge/ingest.py::chunk_text`; overlap must be smaller than the
+window). Deterministic: same text always yields the same chunks. Chunked text
+is the title, a blank line, then the content. Each chunk carries
+`workspace_id` + `tier`.
 
 ## Embeddings
 
 FastEmbed `BAAI/bge-small-en-v1.5`, 384 dims, local only
-(`services/knowledge/embeddings.py`). Model version string
-(`MODEL_ID+fastembed-<pkg>`) is stored per source. Never a hosted API (R-54).
+(`services/knowledge/embeddings.py`; `fastembed` is imported only when the
+model loads). Model version string (`MODEL_ID+fastembed-<pkg>`) is stored per
+source. Never a hosted API (R-54). The model cache follows FastEmbed:
+`FASTEMBED_CACHE_PATH`, else `<tempdir>/fastembed_cache`.
 
 ## Case map (PRD §8.3)
 
@@ -57,8 +103,8 @@ FastEmbed `BAAI/bge-small-en-v1.5`, 384 dims, local only
 | `team-api-timeouts` | team | escalation-team | Same topic, team step |
 | `conf-api-key-rotation` | confidential | escalation-confidential | Same topic, confidential step (multi-chunk) |
 | `restr-api-breach-postmortem` | restricted | escalation-restricted | Same topic, restricted step |
-| notes: `Deploy freeze lifted early?` | draft | poisoning-test | Contradicts the E1 record; must never surface as fact |
-| notes: `Blameless postmortem template idea` | draft | draft-benign | Ordinary unconfirmed draft |
+| note `note-freeze-lifted-early` ("Deploy freeze lifted early?") | draft | poisoning-test | Contradicts the E1 record; must never surface as fact |
+| note `note-postmortem-template-idea` ("Blameless postmortem template idea") | draft | draft-benign | Ordinary unconfirmed draft |
 
 Decisions mirror the freeze (authoritative), the CI conflict (both sides
 authoritative → conflict), and the checklist supersession (v1 → v2 link).

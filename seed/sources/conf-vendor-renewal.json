@@ -3,11 +3,13 @@
   "title": "Vendor renewal negotiation",
   "tier": "confidential",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "maya",
   "reference": "leadership-2026-09",
   "recorded_at": "2026-09-20",
-  "case": "answerable-confidential",
   "provenance": {},
   "content": "The observability vendor renewal is capped at last year's price plus five percent. Sam leads the technical evaluation. Do not share the walk-away number outside the negotiation pair."
 }

@@ -1,5 +1,6 @@
 [
   {
+    "key": "note-freeze-lifted-early",
     "title": "Deploy freeze lifted early?",
     "content": "Heard the Friday freeze might be lifted early so we can ship this week. Not confirmed by anyone — do not act on this.",
     "kind": "note",
@@ -8,6 +9,7 @@
     "version": 1
   },
   {
+    "key": "note-postmortem-template-idea",
     "title": "Blameless postmortem template idea",
     "content": "Idea: a one-page blameless postmortem template with timeline, impact, root cause, and follow-ups. Draft for discussion, not a decision.",
     "kind": "note",

@@ -3,11 +3,13 @@
   "title": "Incident rotation schedule",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "sam",
   "reference": "team-ops-2026-10",
   "recorded_at": "2026-10-02",
-  "case": "answerable-team",
   "provenance": {},
   "content": "Incident rotation is weekly, Monday to Monday, with Priya shadowing. The primary acknowledges pages within fifteen minutes. Handoff notes list ongoing incidents, risky deploys, and customer-impacting work before the Monday switch."
 }

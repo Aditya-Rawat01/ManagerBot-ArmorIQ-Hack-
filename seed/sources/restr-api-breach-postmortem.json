@@ -3,11 +3,13 @@
   "title": "API credential exposure postmortem",
   "tier": "restricted",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "maya",
   "reference": "restricted-2026-09",
   "recorded_at": "2026-09-28",
-  "case": "escalation-restricted",
   "provenance": {"escalation_topic": "api-latency"},
   "content": "A staging credential was once pasted into a shared document and reached the gateway logs before anyone noticed. Access was revoked within the hour and no customer data was touched. Only Maya holds the full timeline. The lesson became policy: credentials never leave the secret store, and exposure means instant revocation."
 }

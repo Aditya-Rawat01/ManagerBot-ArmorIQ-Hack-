@@ -3,11 +3,13 @@
   "title": "Friday deploy freeze protocol",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "decision-note",
   "author": "maya",
   "reference": "team-decisions-2026-09",
   "recorded_at": "2026-09-05",
-  "case": "answerable-team; E1 probe record",
   "provenance": {},
   "content": "The team agreed on a Friday deploy freeze: no production deploys after 15:00 on Fridays unless Maya approves an exception. Quokka Friday deploy freeze is the codeword the team uses in chat to confirm everyone has stopped merging. Hotfixes during the freeze need a second reviewer and a rollback plan posted in the team channel before merging."
 }

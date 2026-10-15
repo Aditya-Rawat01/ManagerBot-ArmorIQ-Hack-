@@ -1,11 +1,13 @@
 [
   {
+    "key": "guidance-boring-ci-release-tooling",
     "guidance_text": "Prefer boring technology for CI and release tooling; novelty needs Maya's sign-off.",
     "scope": "developer-experience",
     "authoritative": true,
     "approved_by": "maya"
   },
   {
+    "key": "guidance-timeout-budget-review",
     "guidance_text": "Timeout and retry budgets are reviewed in the monthly operations meeting.",
     "scope": "operations",
     "authoritative": true,
