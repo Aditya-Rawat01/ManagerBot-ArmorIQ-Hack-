@@ -9,7 +9,13 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # All Python source of the API and every shared service (apps/web is not Python).
-PYTHON_SOURCE_DIRS = (REPO_ROOT / "apps" / "api", REPO_ROOT / "services")
+# ADR-018: probes and setup scripts must call ArmorIQGateway, never armoriq_sdk,
+# so scripts/ is scanned too.
+PYTHON_SOURCE_DIRS = (
+    REPO_ROOT / "apps" / "api",
+    REPO_ROOT / "services",
+    REPO_ROOT / "scripts",
+)
 ARMORIQ_GATEWAY = REPO_ROOT / "services" / "authorization" / "armoriq_gateway.py"
 
 
@@ -52,6 +58,19 @@ def test_installed_versions_match_pins(package: str, pinned: str) -> None:
 
 def test_armoriq_sdk_pin_is_the_required_version() -> None:
     assert _pinned_dependencies()["armoriq-sdk"] == "0.6.10"
+
+
+def test_offline_fakes_never_reach_production_code() -> None:
+    # FakeArmorIQGateway labels its decisions with ArmorIQ sources, so production
+    # code must not be able to construct one and record fake "ArmorIQ" evidence.
+    # It lives in tests/fakes/, which is neither installed nor copied into images.
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (p for d in PYTHON_SOURCE_DIRS for p in d.rglob("*.py"))
+        if "tests" in _imported_top_level_modules(path)
+        or "FakeArmorIQGateway" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"test doubles referenced from production code: {offenders}"
 
 
 def test_armoriq_email_for_is_called_only_by_the_gateway() -> None:
