@@ -35,8 +35,10 @@ python -m venv .venv
 ```
 
 Configuration comes from environment variables and an optional `.env` at the
-repository root (copy `.env.example`). No secret is required to start the app
-or run the tests.
+repository root (copy `.env.example`). For API-only settings, copy
+`apps/api/.env.example` to `apps/api/.env`; it overrides the root `.env`, and
+real environment variables override both. No secret is required to start the
+app or run the tests.
 
 ## Run
 
