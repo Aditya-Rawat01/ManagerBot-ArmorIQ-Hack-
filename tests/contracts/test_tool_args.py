@@ -295,6 +295,14 @@ def test_get_source_result_envelope() -> None:
             source=_citation(DataTier.TEAM),
             excerpt="snippet",
         )
+    # A confidential record inside a team result envelope is rejected.
+    with pytest.raises(ValidationError, match="source tier"):
+        model(
+            tool=ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+            tier=DataTier.TEAM,
+            source=_citation(DataTier.CONFIDENTIAL),
+            excerpt="snippet",
+        )
 
 
 def test_read_source_row_count_rule() -> None:

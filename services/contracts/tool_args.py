@@ -119,6 +119,14 @@ class _GetSourceResultBase(ContractModel):
     source: SourceCitation
     excerpt: str = Field(max_length=MAX_EXCERPT_CHARS)
 
+    @model_validator(mode="after")
+    def _check_source_tier(self) -> Self:
+        # Same rule as KnowledgeSearchResult hits: a record from another tier
+        # must never travel inside this tool's result envelope.
+        if self.source.tier is not self.tier:
+            raise ValueError("source tier must equal the result tier")
+        return self
+
 
 class KnowledgeGetSourceTeamResult(_GetSourceResultBase):
     """Result of ``knowledge_get_source_team``."""
