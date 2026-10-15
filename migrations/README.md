@@ -51,7 +51,13 @@ the Neon console, and deployment secret stores — never in this repo.
    CREATE USER proxylead_toolserver_login WITH PASSWORD '<private>';
    GRANT proxylead_backend TO proxylead_backend_login;
    GRANT proxylead_toolserver TO proxylead_toolserver_login;
+   ALTER ROLE proxylead_backend_login SET statement_timeout = '10s';
+   ALTER ROLE proxylead_toolserver_login SET statement_timeout = '30s';
    ```
+   The `ALTER ROLE` lines are required: role settings on the group roles are
+   not inherited by their members (verified: a login user shows
+   `statement_timeout = 0` without them). They also work through Neon's
+   pooled (`-pooler`) endpoint, where session-level `SET` is not supported.
    Group roles themselves are `NOLOGIN` by design (least privilege; a
    compromised DSN cannot alter roles or grants).
 5. Share `DATABASE_URL_BACKEND` / `DATABASE_URL_TOOLSERVER` (pointing at the
@@ -78,9 +84,10 @@ still verify numbering, grants, and enum parity.
 | `tasks` | — (denied) | full CRUD |
 | `egress_sink` | — (denied; PROPOSED count unconfirmed) | SELECT + INSERT |
 | `draft_review_queue` view | SELECT | — (denied) |
-| sequences | USAGE + SELECT | USAGE + SELECT |
+| sequences | — (denied; IDENTITY inserts need no sequence grant) | — (denied) |
 
-`statement_timeout`: backend `10s`, toolserver `30s` (cold starts time out;
+`statement_timeout`: backend `10s`, toolserver `30s`, set on the LOGIN users
+(operator step 4) and per connection by `services/toolserver/db.py` (cold starts time out;
 authorization is never bypassed because a query is slow — Arch §7.1).
 Vector index: HNSW (`m=16, ef_construction=64`, cosine) — no training pass,
 serves a growing seed corpus from row one.

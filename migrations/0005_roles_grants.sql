@@ -92,14 +92,20 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO proxylead_toolserver;
 GRANT SELECT, INSERT ON public.egress_sink TO proxylead_toolserver;
 REVOKE UPDATE, DELETE ON public.egress_sink FROM proxylead_toolserver;
 
--- --- sequences (identity inserts carry no content) --------------------------
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO proxylead_backend;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO proxylead_toolserver;
+-- --- sequences: none needed --------------------------------------------------
+-- Every id is an IDENTITY column, so INSERT on the table is enough. Granting
+-- the sequences would let the backend read `last_value` of protected tables'
+-- sequences (row counts of team_notes, source_records, ...).
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM proxylead_backend, proxylead_toolserver;
 
 -- --- trigger function (lexical column maintenance runs on toolserver writes)
 GRANT EXECUTE ON FUNCTION public.knowledge_chunks_tsv_trigger() TO proxylead_toolserver;
 
 -- --- per-role statement timeout (Arch §7.5; cold starts must time out, never
 -- --- bypass authorization: PRD v2 §8.2, Arch §7.1) ---------------------------
+-- Role settings are NOT inherited through membership: these apply only to
+-- sessions that SET ROLE to the group. The LOGIN users get their own
+-- timeouts in the operator procedure (migrations/README.md step 4), and
+-- services/toolserver/db.py also sets one per connection.
 ALTER ROLE proxylead_backend SET statement_timeout = '10s';
 ALTER ROLE proxylead_toolserver SET statement_timeout = '30s';

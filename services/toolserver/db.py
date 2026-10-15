@@ -36,6 +36,7 @@ def create_pool(
         min_size=min_size,
         max_size=max_size,
         kwargs={"options": f"-c statement_timeout={statement_timeout_ms}"},
+        open=True,
     )
 
 

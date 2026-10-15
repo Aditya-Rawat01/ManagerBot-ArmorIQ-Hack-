@@ -388,9 +388,10 @@ exactly its writers' privileges — backend SELECT-denied on all protected
 content, approved views, the ledger, and task/egress tables (the PROPOSED
 backend SELECTs on non-content ledger columns and the egress count are NOT
 granted); ledger and event tables are append-only for every runtime role;
-`draft_review_queue` (ADR-023) is backend-SELECT only. `statement_timeout`:
-backend `10s`, toolserver `30s` — slow queries fail, authorization is never
-bypassed (Arch §7.1). Vector index: HNSW (`m=16, ef_construction=64`,
+`draft_review_queue` (ADR-023) is backend-SELECT only; no sequence grants
+(IDENTITY inserts need none). `statement_timeout`: backend `10s`, toolserver
+`30s`, set on the LOGIN users by the operator (group-role settings are not
+inherited) — slow queries fail, authorization is never bypassed (Arch §7.1). Vector index: HNSW (`m=16, ef_construction=64`,
 cosine); lexical column maintained by trigger with a GIN index. Roles and
 grants are expressed in SQL and applied by the migration (owner) role; any
 console-only Neon step is recorded in `migrations/README.md` after the first
