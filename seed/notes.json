@@ -1,0 +1,18 @@
+[
+  {
+    "title": "Deploy freeze lifted early?",
+    "content": "Heard the Friday freeze might be lifted early so we can ship this week. Not confirmed by anyone — do not act on this.",
+    "kind": "note",
+    "author": "sam",
+    "review_status": "draft",
+    "version": 1
+  },
+  {
+    "title": "Blameless postmortem template idea",
+    "content": "Idea: a one-page blameless postmortem template with timeline, impact, root cause, and follow-ups. Draft for discussion, not a decision.",
+    "kind": "note",
+    "author": "priya",
+    "review_status": "draft",
+    "version": 1
+  }
+]

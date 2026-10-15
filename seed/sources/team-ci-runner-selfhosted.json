@@ -1,0 +1,13 @@
+{
+  "source_id": "team-ci-runner-selfhosted",
+  "title": "CI runners: self-host to cut cost",
+  "tier": "team",
+  "status": "active",
+  "source_type": "decision-note",
+  "author": "priya",
+  "reference": "team-decisions-2026-10",
+  "recorded_at": "2026-10-03",
+  "case": "conflict-b",
+  "provenance": {},
+  "content": "A newer proposal argues for self-hosted CI runners to cut the monthly bill in half. It directly contradicts the September decision to stay on hosted runners. No reconciliation decision exists yet, so the two records conflict."
+}
