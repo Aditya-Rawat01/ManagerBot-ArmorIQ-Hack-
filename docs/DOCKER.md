@@ -107,17 +107,34 @@ back needs a security decision with reviewer `samarth-chawla`.
   `pgdata` across `down`.
 - Only `migrate` defaults to it, as the local owner account:
   `postgresql://proxylead:proxylead-local-only@db:5432/proxylead`.
-- `api` and `toolserver` get **no** database DSN by default. P2-01 creates the
-  separate backend and toolserver roles in its migrations (ADR-028); then set
-  `DATABASE_URL_BACKEND` / `DATABASE_URL_TOOLSERVER` in `.env` to those roles.
-  Never give them the owner account: the backend's denial on protected tables
-  (PRD §8.1) would no longer be exercised locally.
+- `api` and `toolserver` get **no** database DSN by default. Never give them
+  the owner account: the backend's denial on protected tables (PRD §8.1)
+  would no longer be exercised locally.
 - `migrate` is the only `DATABASE_URL_MIGRATE` holder. It mounts `./scripts`
-  read-only (the tool-server image does not contain `scripts/`). Until P2-01
-  adds `scripts/migrate.py`, `docker compose run --rm migrate` exits 1 with
-  "scripts/migrate.py not found ... No migrations ran." That is the pending
-  integration, not a success. P2-01 also adds its `migrations/` mount and the
-  driver pin in the `toolserver` extra (ADR-028).
+  and `./migrations` read-only (the tool-server image contains neither).
+
+Set up the local database (once per fresh `pgdata` volume; the passwords
+are local-only placeholders, never reuse them on Neon):
+
+```bash
+docker compose up -d db
+docker compose run --rm migrate      # "6 applied"; re-running applies nothing
+docker compose exec db psql -U proxylead -d proxylead -c "CREATE USER proxylead_backend_login WITH PASSWORD 'backend-local-only'; CREATE USER proxylead_toolserver_login WITH PASSWORD 'toolserver-local-only'; GRANT proxylead_backend TO proxylead_backend_login; GRANT proxylead_toolserver TO proxylead_toolserver_login; ALTER ROLE proxylead_backend_login SET statement_timeout = '10s'; ALTER ROLE proxylead_toolserver_login SET statement_timeout = '30s';"
+```
+
+Then set `DATABASE_URL_BACKEND` and `DATABASE_URL_TOOLSERVER` in `.env` to the
+local values shown in the "Local Docker Compose" block of `.env.example` (fill
+the existing empty lines, or uncomment the block and delete the empty ones, so
+each key appears once). Restart with `docker compose up -d`, then check the grant
+boundary (expect exit 0 and `permission denied` lines):
+
+```bash
+docker compose run --rm -e DATABASE_URL_BACKEND=postgresql://proxylead_backend_login:backend-local-only@db:5432/proxylead -e DATABASE_URL_TOOLSERVER=postgresql://proxylead_toolserver_login:toolserver-local-only@db:5432/proxylead dev python scripts/verify_db_grants.py
+```
+
+The same two `-e` flags run the live grant tests:
+`... dev python -m pytest tests/toolserver/test_db_grants.py`. CP-2 still needs
+this proof on Neon (`migrations/README.md`, operator procedure).
 
 Safe reset (destroys local dev data — never run against shared infrastructure):
 
