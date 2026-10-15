@@ -77,7 +77,7 @@ every container:
 | `ANTHROPIC_API_KEY`, `LLM_MODEL`, `TOOLSERVER_BASE_URL` | ✔ only | — | — | — | — | — |
 | `TOOLSERVER_BEARER_MEMORY` / `_WORKSPACE` | — | ✔ | — | — | — | — |
 | `MCP_ALLOWED_HOSTS` (fixed in compose: `toolserver:8100`, `localhost:8100`, `127.0.0.1:8100`) | — | ✔ | — | — | — | — |
-| `MCP_ENABLE_DIAGNOSTIC_TOOLS` (default `true` locally) | — | ✔ | — | — | — | — |
+| `MCP_ENABLE_DIAGNOSTIC_TOOLS` (compose opts in with `true`; the image default is `false`) | — | ✔ | — | — | — | — |
 | `DATABASE_URL_BACKEND` (empty until P2-01) | ✔ only | — | — | — | — | — |
 | `DATABASE_URL_TOOLSERVER` (empty until P2-01) | — | ✔ only | — | — | — | — |
 | `DATABASE_URL_MIGRATE` (defaults to the local owner account) | — | — | — | — | ✔ only | — |
@@ -178,7 +178,7 @@ All run as non-root (`appuser` / `node` / `devuser`; verify with
 | Purpose | daily development + checks | ArmorIQ experiments (E1–E5) + demo |
 | Network | `localhost` ports | public HTTPS, `PORT`-assigned |
 | `MCP_ALLOWED_HOSTS` | `toolserver:8100,localhost:8100,...` | public hostname only |
-| Diagnostics | `true` locally (exercise the MCP path) | `false` (only product tools listed) |
+| Diagnostics | `true` locally, set explicitly by compose (exercise the MCP path) | `false` (image default; only product tools listed) |
 | Database | local `db` service | Neon (separate roles) |
 | Secrets | root `.env` (untracked) | Render secret store |
 

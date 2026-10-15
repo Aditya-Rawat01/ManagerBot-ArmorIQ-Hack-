@@ -28,9 +28,11 @@ WORKDIR /app
 # Dependency pins live in pyproject.toml (`pip install ".[api]"`).
 # Source trees are copied explicitly so the build never depends on what
 # .dockerignore lets through. `services/` is included because the API imports
-# the shared contracts (and later the authorization helpers).
+# the shared contracts and the authorization gateway. Only apps/api is copied:
+# the web source (apps/web) never belongs in the API image (Vercel builds it).
 COPY pyproject.toml ./
-COPY apps ./apps
+COPY apps/__init__.py ./apps/__init__.py
+COPY apps/api ./apps/api
 COPY services ./services
 RUN pip install --no-cache-dir ".[api]"
 
