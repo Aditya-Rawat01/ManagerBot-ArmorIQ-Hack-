@@ -53,7 +53,8 @@ def create_session(
     if not passcode or not secret:
         raise ApiError(503, "sign_in_unavailable", _SIGN_IN_UNAVAILABLE)
     record = build_member_table(settings).get(body.persona)
-    if record is None or not hmac.compare_digest(body.passcode, passcode):
+    # Compare bytes: str compare_digest raises TypeError on non-ASCII input (500).
+    if record is None or not hmac.compare_digest(body.passcode.encode(), passcode.encode()):
         # One generic 401: never reveal whether the persona exists or which
         # half of the credential was wrong.
         raise ApiError(401, "unauthenticated", "Invalid persona or passcode.")

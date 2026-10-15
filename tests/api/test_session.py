@@ -66,6 +66,12 @@ def test_wrong_passcode_rejected_without_oracle() -> None:
     assert EMAIL not in bad_secret.text
 
 
+def test_non_ascii_passcode_is_a_plain_401() -> None:
+    response = sign_in(make_client(), passcode="päss")
+    assert response.status_code == 401
+    assert ErrorResponse.model_validate(response.json()).error.code == "unauthenticated"
+
+
 def test_sign_in_disabled_without_secrets() -> None:
     for kwargs in ({"demo_passcode": None}, {"session_secret": None}):
         response = sign_in(make_client(**kwargs))
