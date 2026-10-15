@@ -142,6 +142,12 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
             _expect_denied(
                 report,
                 conn,
+                "backend SELECT tool_jti_claims",
+                "SELECT 1 FROM public.tool_jti_claims LIMIT 1",
+            )
+            _expect_denied(
+                report,
+                conn,
                 "backend UPDATE tool_execution_ledger",
                 "UPDATE public.tool_execution_ledger SET execution_status = 'error' WHERE id = -1",
             )
@@ -182,6 +188,12 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 ts_conn,
                 "toolserver DELETE tool_execution_ledger",
                 "DELETE FROM public.tool_execution_ledger WHERE id = -1",
+            )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver DELETE tool_jti_claims",
+                "DELETE FROM public.tool_jti_claims WHERE jti = ''",
             )
     except Exception as exc:
         report.bad(f"verify ({type(exc).__name__})")

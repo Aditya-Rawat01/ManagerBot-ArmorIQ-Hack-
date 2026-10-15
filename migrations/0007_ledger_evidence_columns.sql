@@ -11,3 +11,18 @@ ALTER TABLE public.tool_execution_ledger
     ADD COLUMN IF NOT EXISTS workspace_id TEXT;
 
 GRANT SELECT, INSERT ON public.tool_execution_ledger TO proxylead_toolserver;
+
+-- Atomic jti claims (replay protection BEFORE execution). The ledger row can
+-- only be written after the tool ran (it carries the outcome), so a read-only
+-- "seen?" check against the ledger lets two concurrent calls with the same
+-- jti both execute. The tool server claims the jti here first with
+-- INSERT ... ON CONFLICT DO NOTHING; exactly one caller wins. Append-only.
+CREATE TABLE IF NOT EXISTS public.tool_jti_claims (
+    jti         TEXT PRIMARY KEY,
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+REVOKE ALL ON public.tool_jti_claims FROM PUBLIC;
+REVOKE ALL ON public.tool_jti_claims FROM proxylead_backend;
+GRANT SELECT, INSERT ON public.tool_jti_claims TO proxylead_toolserver;
+REVOKE UPDATE, DELETE ON public.tool_jti_claims FROM proxylead_toolserver;

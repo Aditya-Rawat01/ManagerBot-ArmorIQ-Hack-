@@ -6,6 +6,7 @@ the conftest scrubs the environment during test runs; they are never logged.
 
 import os
 import threading
+import uuid
 
 import pytest
 
@@ -21,11 +22,22 @@ from services.toolserver.ledger import (
 )
 
 TOOLSERVER_DSN = os.environ.get("DATABASE_URL_TOOLSERVER")
+# The ledger and the claims table are append-only (no DELETE for any runtime
+# role), so these tests write PERMANENT rows. Run them only against a local
+# or throwaway database, never the shared Neon evidence ledger.
+WRITE_TESTS = os.environ.get("PROXYLEAD_LEDGER_WRITE_TESTS") == "1"
 
 NEEDS_DB = pytest.mark.skipif(
-    not TOOLSERVER_DSN,
-    reason="needs DATABASE_URL_TOOLSERVER (live database)",
+    not (TOOLSERVER_DSN and WRITE_TESTS),
+    reason="needs DATABASE_URL_TOOLSERVER and PROXYLEAD_LEDGER_WRITE_TESTS=1 "
+    "(writes permanent ledger rows: local database only)",
 )
+
+
+def uid(prefix: str) -> str:
+    """Unique per run, so re-runs never collide with earlier permanent rows."""
+    return f"test-{prefix}-{uuid.uuid4().hex[:12]}"
+
 
 BASE_FIELDS = {
     "request_id": "req-1",
@@ -58,7 +70,7 @@ def make_rows(count: int) -> list[dict]:
 
 def make_entry(jti: str, **overrides: object) -> LedgerEntry:
     values: dict[str, object] = {
-        "request_id": "req-1",
+        "request_id": uid("req"),
         "trace_id": "trace-1",
         "tool_name": "knowledge_search_team",
         "jti": jti,
@@ -120,8 +132,8 @@ def test_tail_truncation_is_undetectable() -> None:
 
 @NEEDS_DB
 def test_append_and_verify_chain(ledger: Ledger) -> None:
-    first = ledger.append(make_entry("chain-jti-1"))
-    second = ledger.append(make_entry("chain-jti-2"))
+    first = ledger.append(make_entry(uid("chain")))
+    second = ledger.append(make_entry(uid("chain")))
     assert second.value > first.value
     report = ledger.verify_chain()
     assert report.ok and report.checked >= 2
@@ -134,7 +146,7 @@ def test_concurrent_appends_single_chain(ledger: Ledger) -> None:
 
     def worker(index: int) -> None:
         try:
-            entry_id = ledger.append(make_entry(f"concurrent-jti-{index}"))
+            entry_id = ledger.append(make_entry(uid(f"concurrent-{index}")))
             ids.append(entry_id.value)
         except Exception as exc:  # collected and asserted below
             errors.append(exc)

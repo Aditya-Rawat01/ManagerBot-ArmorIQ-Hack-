@@ -7,8 +7,10 @@ never proof of execution (PRD §10.1) — only a ledger row is.
 Guarantees: `verify_chain` recomputes every hash in id order and reports the
 first broken position, so it detects edited fields, swapped row order, and
 deleted interior rows (any of those breaks a `prev_hash` link). `jti` is
-unique: a duplicate never executes twice; the caller gets `DuplicateJti`
-carrying the original entry id for the deduplicated rejection.
+claimed atomically BEFORE execution (`seen_jti`, backed by the append-only
+`tool_jti_claims` table), so a replayed or concurrent duplicate never executes
+twice; a duplicate `append` additionally raises `DuplicateJti` carrying the
+original entry id for the deduplicated rejection.
 
 Limitations (read before relying on this): the chain detects changes by
 anyone who cannot recompute it, but NOT by a database superuser who rewrites
@@ -142,7 +144,9 @@ def verify_rows(rows: list[dict[str, Any]]) -> VerificationReport:
 
 class Ledger:
     """Toolserver-role ledger access. `seen_jti` implements P1-04's
-    `ReplayGuard` protocol (structural: same name, signature, and semantics)."""
+    `ReplayGuard` protocol with the same check-and-record semantics as
+    `InMemoryReplayGuard`: the first call claims the jti and returns False,
+    every later (or concurrent) call returns True."""
 
     def __init__(self, dsn: str) -> None:
         self._pool = db.create_pool(dsn, max_size=10)
@@ -212,16 +216,32 @@ class Ledger:
                 return LedgerEntryId(row[0])
             except _pg_errors.UniqueViolation:
                 conn.rollback()
-                original = self.get_by_jti(entry.jti)
+                # Same connection: taking a second pooled connection while this
+                # one is held can exhaust the pool under concurrent duplicates.
+                cur.execute(f"SELECT id FROM {_LEDGER_TABLE} WHERE jti = %s", (entry.jti,))  # noqa: S608
+                original = cur.fetchone()
                 if original is None:  # unreachable: the violation names this jti
                     raise RuntimeError("duplicate jti has no original entry") from None
-                raise DuplicateJti(LedgerEntryId(original["id"])) from None
+                raise DuplicateJti(LedgerEntryId(original[0])) from None
 
     def seen_jti(self, jti: str) -> bool:
-        """True when `jti` was already recorded (caller must reject: replay)."""
+        """Atomically claim `jti`. False = first use (claimed now; the caller may
+        execute). True = replay or concurrent duplicate (caller must reject).
+
+        Called by `verify_tool_call` BEFORE any handler logic, so at most one
+        execution per jti. A claim without a ledger row means the outcome is
+        unknown (crash between claim and append); the jti stays used.
+        """
         with self._pool.connection() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT 1 FROM {_LEDGER_TABLE} WHERE jti = %s", (jti,))  # noqa: S608
-            return cur.fetchone() is not None
+            if cur.fetchone() is not None:
+                return True
+            cur.execute(
+                "INSERT INTO public.tool_jti_claims (jti) VALUES (%s) "
+                "ON CONFLICT (jti) DO NOTHING RETURNING jti",
+                (jti,),
+            )
+            return cur.fetchone() is None
 
     def get_by_jti(self, jti: str) -> dict[str, Any] | None:
         """Fetch one entry by `jti` (P1-06 evidence query; dedupe reference)."""

@@ -14,7 +14,7 @@ running services (PRD v2 §8.1).
 | `0004_runtime_tables.sql` | `plans`, `plan_steps`, `approval_requests`, events, `tool_execution_ledger`, `delivery_events`, `unanswered_questions`, `tasks`, `egress_sink` |
 | `0005_roles_grants.sql` | `proxylead_backend` / `proxylead_toolserver` group roles, full grant matrix, revokes, statement timeouts |
 | `0006_metadata_view.sql` | `draft_review_queue` metadata-only view for the manager console (ADR-023) |
-| `0007_ledger_evidence_columns.sql` | `arguments_sha256`, `workspace_id` on the ledger (P2-07 writer fields) |
+| `0007_ledger_evidence_columns.sql` | `arguments_sha256`, `workspace_id` on the ledger (P2-07 writer fields); append-only `tool_jti_claims` (atomic replay claim before execution) |
 
 ## Rules (binding)
 
@@ -82,6 +82,7 @@ still verify numbering, grants, and enum parity.
 | `request_events`, `decision_events`, `delivery_events` | SELECT + INSERT (append-only) | — (denied) |
 | `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | — (denied) | full CRUD |
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
+| `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |
 | `tasks` | — (denied) | full CRUD |
 | `egress_sink` | — (denied; PROPOSED count unconfirmed) | SELECT + INSERT |
 | `draft_review_queue` view | SELECT | — (denied) |
