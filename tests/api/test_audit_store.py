@@ -1,22 +1,22 @@
 """Backend audit store and read API (P3-01).
 
-Offline by default via test-local fakes (defined here, never production
-code): no DSN, network, ArmorIQ, or Slack needed. The live class at the end
-runs only when `DATABASE_URL_BACKEND` is set privately, and then proves only
-connectivity plus the backend role's denial on protected tables — never any
-secret or protected content. Sample secrets are obviously-fake constants.
+Offline by default via test-local fakes (`tests/api/audit_fakes.py`, never
+production code): no DSN, network, ArmorIQ, or Slack needed. The live tests
+at the end run only when `DATABASE_URL_BACKEND` is set privately, and then
+prove connectivity plus the backend role's denial on every protected table —
+never any secret or protected content. Follow-up coverage (P3-01 review
+findings) lives in `test_audit_followups.py`. Sample secrets are
+obviously-fake constants.
 """
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from apps.api.core.db import AuditCursor, BackendDatabase, BackendDbNotConfiguredError
+from apps.api.core.db import BackendDatabase, BackendDbNotConfiguredError
 from services.audit import (
     AuditNotAuthorizedError,
     AuditNotFoundError,
@@ -42,214 +42,35 @@ from services.audit.store import (
     record_step_decision,
 )
 from services.contracts import (
-    AppRole,
     ApprovalState,
     ApprovalStatus,
-    ArmorIQDecision,
     AuditEvent,
     AuditEventType,
-    AuthenticatedUser,
     DataTier,
-    DecisionOutcome,
     DecisionSource,
     DeliveryChannel,
-    EntryPoint,
-    McpEndpoint,
-    PersonaKey,
-    PlannedToolCall,
-    PlanProposal,
-    RequestContext,
-    ReviewStatus,
-    SourceCitation,
     ToolExecutionStatus,
     ToolInvocationResult,
     ToolName,
 )
-
-NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)
-_FAKE_SECRET = "sk-fake-test-secret-0000"
-
-
-# --- fakes ------------------------------------------------------------------
-
-
-class FakeCursor:
-    """Records statements; replays scripted reads. Never touches a database."""
-
-    def __init__(
-        self,
-        fetchone: list[object] | None = None,
-        fetchall: list[object] | None = None,
-        rowcount: int = 1,
-    ) -> None:
-        self.statements: list[tuple[str, object]] = []
-        self._one = list(fetchone or [])
-        self._all = list(fetchall or [])
-        self.rowcount = rowcount
-
-    def execute(self, query: str, params: object = None) -> None:
-        self.statements.append((query, params))
-
-    def fetchone(self) -> object:
-        return self._one.pop(0) if self._one else None
-
-    def fetchall(self) -> list[object]:
-        if self._all:
-            return self._all.pop(0)  # type: ignore[return-value]
-        return []
-
-
-class FakeDatabase:
-    """One shared script across cursors; commits statements per transaction."""
-
-    def __init__(
-        self,
-        fetchone: list[object] | None = None,
-        fetchall: list[object] | None = None,
-        rowcount: int = 1,
-    ) -> None:
-        self._one = list(fetchone or [])
-        self._all = list(fetchall or [])
-        self._rowcount = rowcount
-        self.transactions: list[list[tuple[str, object]]] = []
-        self.committed: list[tuple[str, object]] = []
-        self.rolled_back = 0
-
-    @contextmanager
-    def tx(self) -> Iterator[AuditCursor]:
-        cursor = FakeCursor(fetchone=self._one, fetchall=self._all, rowcount=self._rowcount)
-        # Share the queues so multi-statement flows script in order.
-        cursor._one, cursor._all = self._one, self._all
-        try:
-            yield cursor  # type: ignore[misc]
-        except Exception:
-            self.rolled_back += 1
-            raise
-        self.transactions.append(list(cursor.statements))
-        self.committed.extend(cursor.statements)
-
-
-class ExplodingCursor(FakeCursor):
-    def execute(self, query: str, params: object = None) -> None:
-        super().execute(query, params)
-        if len(self.statements) >= 2:
-            raise AuditStoreError("fake connection lost")
-
-
-class ExplodingDatabase(FakeDatabase):
-    @contextmanager
-    def tx(self) -> Iterator[AuditCursor]:
-        cursor = ExplodingCursor()
-        try:
-            yield cursor  # type: ignore[misc]
-        except Exception:
-            self.rolled_back += 1
-            raise
-        self.committed.extend(cursor.statements)
-
-
-def _all_sql(db: FakeDatabase) -> str:
-    return "\n".join(sql for sql, _ in db.committed)
-
-
-def _all_text(db: FakeDatabase) -> str:
-    return _all_sql(db) + "\n" + str([params for _, params in db.committed])
-
-
-# --- fixtures ---------------------------------------------------------------
-
-
-def _maya() -> AuthenticatedUser:
-    return AuthenticatedUser(
-        member_id="m-maya",
-        persona=PersonaKey.MAYA,
-        display_name="Maya",
-        app_role=AppRole.MANAGER,
-        masked_email="m***@example.com",
-    )
-
-
-def _sam() -> AuthenticatedUser:
-    return AuthenticatedUser(
-        member_id="m-sam",
-        persona=PersonaKey.SAM,
-        display_name="Sam",
-        app_role=AppRole.SENIOR,
-        masked_email="s***@example.com",
-    )
-
-
-def _ctx() -> RequestContext:
-    return RequestContext(
-        request_id="req-1",
-        trace_id="trace-1",
-        workspace_id="ws-1",
-        requester=_sam(),
-        entry_point=EntryPoint.SLACK_MENTION,
-        received_at=NOW,
-        slack_team_id="T1",
-        slack_channel_id="C1",
-        slack_event_id="E1",
-    )
-
-
-def _plan() -> PlanProposal:
-    return PlanProposal(
-        summary="budget question",
-        steps=[
-            PlannedToolCall(
-                step_index=0,
-                mcp=McpEndpoint.MEMORY,
-                tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
-                arguments={"query": "atlas budget", "limit": 5},
-                purpose="search",
-            )
-        ],
-    )
-
-
-def _decision() -> ArmorIQDecision:
-    return ArmorIQDecision(
-        outcome=DecisionOutcome.ALLOW,
-        source=DecisionSource.ARMORIQ_POLICY_DECISION,
-        armoriq_plan_id="aplan-1",
-        decided_at=NOW,
-    )
-
-
-def _approval(state: ApprovalState = ApprovalState.PENDING) -> ApprovalStatus:
-    return ApprovalStatus(
-        request_id="req-1",
-        plan_id="plan-1",
-        step_index=0,
-        tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL,
-        state=state,
-        delegation_id="dlg-1",
-        requested_at=NOW,
-        resolved_at=NOW if state is not ApprovalState.PENDING else None,
-    )
-
-
-def _citation() -> SourceCitation:
-    return SourceCitation(
-        source_id="src-001",
-        title="Atlas budget",
-        tier=DataTier.TEAM,
-        author="Maya",
-        created_at=NOW,
-        version=1,
-        review_status=ReviewStatus.DRAFT,
-    )
-
-
-class _Outcome:
-    """Structural stand-in for the gateway StepOutcome (no SDK import)."""
-
-    def __init__(self, decision, approval=None, invocation=None) -> None:
-        self.decision = decision
-        self.approval = approval
-        self.invocation = invocation
-
+from tests.api.audit_fakes import FAKE_SECRET as _FAKE_SECRET
+from tests.api.audit_fakes import (
+    NOW,
+    ExplodingDatabase,
+    FakeDatabase,
+    origin_payload,
+    protected_name_offenders,
+)
+from tests.api.audit_fakes import Outcome as _Outcome
+from tests.api.audit_fakes import all_sql as _all_sql
+from tests.api.audit_fakes import all_text as _all_text
+from tests.api.audit_fakes import make_approval as _approval
+from tests.api.audit_fakes import make_citation as _citation
+from tests.api.audit_fakes import make_ctx as _ctx
+from tests.api.audit_fakes import make_decision as _decision
+from tests.api.audit_fakes import make_plan as _plan
+from tests.api.audit_fakes import maya as _maya
+from tests.api.audit_fakes import sam as _sam
 
 # --- create_request ---------------------------------------------------------
 
@@ -263,7 +84,7 @@ def test_create_request_round_trip() -> None:
 
 
 def test_create_request_replay_is_idempotent() -> None:
-    db = FakeDatabase(fetchone=[({"trace_id": "trace-1"},)])
+    db = FakeDatabase(fetchone=[(origin_payload(),)])
     assert create_request(db, _ctx()) == "req-1"
     assert not any("INSERT" in sql for sql, _ in db.committed)
 
@@ -371,7 +192,7 @@ def test_approval_insert_then_resolve_forward_only() -> None:
     approval_id = record_approval(db, request_id="req-1", trace_id="trace-1", approval=_approval())
     assert approval_id == 11
     assert "hold_created" in _all_text(db)
-    db2 = FakeDatabase(fetchone=[(11, "pending")])
+    db2 = FakeDatabase(fetchone=[(11, "pending", "dlg-1", "plan-1", 0)])
     assert (
         record_approval(
             db2,
@@ -385,7 +206,7 @@ def test_approval_insert_then_resolve_forward_only() -> None:
 
 
 def test_approval_replay_returns_same_row_without_duplicate_event() -> None:
-    db = FakeDatabase(fetchone=[(11, "approved")])
+    db = FakeDatabase(fetchone=[(11, "approved", "dlg-1", "plan-1", 0)])
     assert (
         record_approval(
             db,
@@ -395,11 +216,12 @@ def test_approval_replay_returns_same_row_without_duplicate_event() -> None:
         )
         == 11
     )
-    assert len(db.committed) == 1  # the lookup only; no duplicate event
+    # Lock + lookup only: no UPDATE and no duplicate event.
+    assert not any(sql.startswith(("INSERT", "UPDATE")) for sql, _ in db.committed)
 
 
 def test_approval_backward_transition_rejected() -> None:
-    db = FakeDatabase(fetchone=[(11, "approved")])
+    db = FakeDatabase(fetchone=[(11, "approved", "dlg-1", "plan-1", 0)])
     with pytest.raises(AuditTransitionError):
         record_approval(db, request_id="req-1", trace_id="trace-1", approval=_approval())
 
@@ -490,7 +312,7 @@ def test_delivery_rejects_unknown_status() -> None:
 
 
 def test_unanswered_redacts_question_and_bounds_refs() -> None:
-    db = FakeDatabase(fetchone=[(9,)])
+    db = FakeDatabase(fetchone=[(origin_payload(),), (9,)])
     question_id = add_unanswered(
         db,
         request_id="req-1",
@@ -541,7 +363,7 @@ def test_append_event_routes_by_type_and_redacts() -> None:
         event=AuditEvent(
             event_id="ev-2",
             occurred_at=NOW,
-            event_type=AuditEventType.REQUEST_RECEIVED,
+            event_type=AuditEventType.PLAN_REJECTED,
             request_id="req-1",
             trace_id="trace-1",
             payload={},
@@ -567,14 +389,7 @@ def test_append_event_rejects_naive_timestamps() -> None:
 
 
 def _origin_payload(member_id: str = "m-sam") -> dict[str, object]:
-    return {
-        "trace_id": "trace-1",
-        "payload": {
-            "workspace_id": "ws-1",
-            "requester_member_id": member_id,
-            "entry_point": "slack_mention",
-        },
-    }
+    return {"trace_id": "trace-1", "payload": origin_payload(member_id)}
 
 
 def test_request_status_owner_only() -> None:
@@ -611,16 +426,13 @@ def test_manager_queries_deny_non_managers() -> None:
 def test_recent_requests_timeline_holds_unanswered() -> None:
     maya = _maya()
     origin = _origin_payload()
-    db = FakeDatabase(
-        fetchone=[(origin["trace_id"], origin["payload"])],
-        fetchall=[[("req-1", "trace-1", NOW)]],
-    )
+    db = FakeDatabase(fetchall=[[("req-1", "trace-1", origin["payload"], NOW)]])
     summaries = recent_requests(db, maya)
     assert [summary.request_id for summary in summaries] == ["req-1"]
     db2 = FakeDatabase(
         fetchall=[
-            [(NOW, "request_received", None, None, None, {})],
-            [(NOW, "authorization_decided", "plan-1", 0, "application_rule", {})],
+            [(NOW, "request_received", None, None, None, {}, None)],
+            [(NOW, "authorization_decided", "plan-1", 0, "application_rule", {}, None)],
             [(NOW, "slack_dm", "m-sam", "delivered", "plan-1")],
         ]
     )
@@ -644,7 +456,9 @@ def test_recent_requests_timeline_holds_unanswered() -> None:
     )
     holds = pending_holds(db3, maya)
     assert holds[0].delegation_id == "dlg-1"
-    db4 = FakeDatabase(fetchall=[[(9, "req-1", "why?", "open", NOW)], [("req-1", "no_evidence")]])
+    db4 = FakeDatabase(
+        fetchall=[[(9, "req-1", "why?", "open", NOW)], [("req-1", "9", "no_evidence")]]
+    )
     items = unanswered(db4, maya)
     assert items[0].reason == "no_evidence"
 
@@ -713,26 +527,10 @@ def test_audit_source_names_no_protected_tables_or_foreign_dsns() -> None:
         repo_root / "apps" / "api" / "core" / "db.py",
         *(repo_root / "services" / "audit").glob("*.py"),
     ]
-    banned = (
-        "DATABASE_URL_TOOLSERVER",
-        "DATABASE_URL_MIGRATE",
-        "armoriq_sdk",
-        "source_records",
-        "knowledge_chunks",
-        "team_notes",
-        "manager_guidance",
-        "tool_execution_ledger",
-        "egress_sink",
-        "FROM tasks",
-        "JOIN tasks",
-    )
     offenders = [
-        f"{path}:{number}:{line.strip()}"
+        f"{path}:{offender}"
         for path in roots
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-        if "no-protected-tables" not in line
-        for token in banned
-        if token in line
+        for offender in protected_name_offenders(path.read_text(encoding="utf-8").splitlines())
     ]
     assert offenders == []
 
@@ -740,6 +538,18 @@ def test_audit_source_names_no_protected_tables_or_foreign_dsns() -> None:
 # --- live backend role (skipped without a private DSN) ------------------------
 
 LIVE_DSN = os.environ.get("DATABASE_URL_BACKEND")
+# Everything the backend role must never read (0005 revokes, 0007 claims).
+PROTECTED_TABLES = (
+    "source_records",
+    "knowledge_chunks",
+    "decisions",
+    "manager_guidance",
+    "team_notes",
+    "tool_execution_ledger",
+    "tool_jti_claims",
+    "tasks",
+    "egress_sink",
+)
 needs_live = pytest.mark.skipif(
     not LIVE_DSN, reason="no private DATABASE_URL_BACKEND; fakes cover behavior"
 )
@@ -747,10 +557,12 @@ needs_live = pytest.mark.skipif(
 
 @needs_live
 def test_live_backend_role_connectivity_and_denial() -> None:
-    """Proves connectivity and the backend denial on protected tables ONLY.
+    """Proves connectivity and the backend denial on EVERY protected table.
 
-    Full round trips need seeded workspaces/members (P2-03); the backend role
-    cannot insert those itself. Never prints the DSN.
+    Knowledge tables, the execution ledger, jti claims, and the task/egress
+    tables (0005/0007) must all be denied; denial surfaces as
+    ``AuditStoreError`` caused by ``InsufficientPrivilege``. Never prints the
+    DSN.
     """
     from psycopg.errors import InsufficientPrivilege
 
@@ -759,8 +571,10 @@ def test_live_backend_role_connectivity_and_denial() -> None:
         with db.tx() as cursor:
             cursor.execute("SELECT 1")
             assert cursor.fetchone()[0] == 1
-        with pytest.raises(InsufficientPrivilege), db.tx() as cursor:
-            cursor.execute("SELECT * FROM team_notes LIMIT 1")
+        for table in PROTECTED_TABLES:
+            with pytest.raises(AuditStoreError) as denied, db.tx() as cursor:
+                cursor.execute(f"SELECT 1 FROM public.{table} LIMIT 1")  # noqa: S608 - constant
+            assert isinstance(denied.value.__cause__, InsufficientPrivilege), table
     finally:
         db.close()
 

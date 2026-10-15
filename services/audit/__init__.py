@@ -6,8 +6,10 @@ never proof that a tool executed. The backend stores execution *references*
 it cannot read the ledger, and no audit query joins protected tables.
 
 Write API: :mod:`services.audit.store`. Read API: :mod:`services.audit.queries`.
-Redaction: :mod:`services.audit.redaction`. Connection pool:
-:mod:`apps.api.core.db` (``DATABASE_URL_BACKEND`` only).
+Redaction: :mod:`services.audit.redaction`. Database protocols:
+:mod:`services.audit.protocols` (this package never imports ``apps``); the
+pool-backed implementation is :mod:`apps.api.core.db` (``DATABASE_URL_BACKEND``
+only). Every call raises an :class:`AuditError` subclass on failure.
 """
 
 from services.audit.errors import (
@@ -17,6 +19,7 @@ from services.audit.errors import (
     AuditStoreError,
     AuditTransitionError,
 )
+from services.audit.protocols import AuditCursor, AuditDatabase
 from services.audit.queries import (
     PendingHold,
     RequestStatusView,
@@ -47,6 +50,8 @@ from services.audit.store import (
 
 __all__ = [
     "REDACTED",
+    "AuditCursor",
+    "AuditDatabase",
     "AuditError",
     "AuditNotAuthorizedError",
     "AuditNotFoundError",

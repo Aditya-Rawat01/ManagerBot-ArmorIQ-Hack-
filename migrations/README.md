@@ -16,6 +16,7 @@ running services (PRD v2 §8.1).
 | `0006_metadata_view.sql` | `draft_review_queue` metadata-only view for the manager console (ADR-023) |
 | `0007_ledger_evidence_columns.sql` | `arguments_sha256`, `workspace_id` on the ledger (P2-07 writer fields); append-only `tool_jti_claims` (atomic replay claim before execution) |
 | `0008_ledger_attempts_constraints.sql` | P2-07 follow-up: ledger `id` `GENERATED ALWAYS`; `NOT VALID` row-format CHECKs on new ledger rows (hex digests, identifier-only `error_class`, fixed `validation_outcome` set, no `not_reached`); append-only `tool_call_attempts` (one row per call that passed the credential check: `accepted` / `invalid_context` / `context_expired` / `replay`) |
+| `0009_audit_event_fk_restrict.sql` | `request_events` / `decision_events` / `delivery_events` `plan_id` FKs become `ON DELETE RESTRICT` (were `CASCADE`): the backend's `DELETE` on `plans` can no longer remove append-only audit events (P3-01 follow-up). No new objects, no grant changes |
 
 ## Rules (binding)
 
@@ -65,7 +66,12 @@ the Neon console, and deployment secret stores — never in this repo.
 5. Share `DATABASE_URL_BACKEND` / `DATABASE_URL_TOOLSERVER` (pointing at the
    login users) privately with whoever runs E1–E5.
 6. `python scripts/verify_db_grants.py` — expect exit 0 with
-   *permission denied* on every protected table under the backend role.
+   *permission denied* on every protected table under the backend role, and
+   (0009) the event tables' `plan_id` FKs reported as `ON DELETE RESTRICT`.
+   When a seeded member exists, it also proves as the backend that deleting
+   a plan with an audit event fails with a foreign-key violation (inside a
+   transaction that is always rolled back — nothing is persisted); before
+   seeding that probe prints `SKIP` and the catalog check still applies.
 
 ## Local verification (compose `db`, no secrets needed for the shape)
 
@@ -80,7 +86,7 @@ still verify numbering, grants, and enum parity.
 |---|---|---|
 | `workspaces`, `members` | SELECT | — (denied) |
 | `slack_events`, `topic_access_rules`, `plans`, `plan_steps`, `approval_requests`, `unanswered_questions` | full CRUD (UPDATE on approvals required for resolution) | — (denied) |
-| `request_events`, `decision_events`, `delivery_events` | SELECT + INSERT (append-only) | — (denied) |
+| `request_events`, `decision_events`, `delivery_events` | SELECT + INSERT (append-only; `plan_id` FKs are `ON DELETE RESTRICT` since 0009, so deleting a plan cannot cascade into them) | — (denied) |
 | `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | — (denied) | full CRUD |
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
 | `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |

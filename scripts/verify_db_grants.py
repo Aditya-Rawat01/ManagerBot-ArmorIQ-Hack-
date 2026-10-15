@@ -4,15 +4,18 @@ Usage (operator only, repository root):
     DATABASE_URL_BACKEND='<backend DSN>' DATABASE_URL_TOOLSERVER='<toolserver DSN>' \\
         python scripts/verify_db_grants.py
 
-Connects as each runtime login user and checks the 0005/0007/0008 grant
+Connects as each runtime login user and checks the 0005/0007/0008/0009 grant
 matrix: backend SELECT on every protected table/view must fail with permission
 denied; allowed tables must work; neither runtime role may UPDATE or DELETE
 the ledger; the toolserver may not DELETE jti claims nor UPDATE or DELETE
 attempts; the backend cannot SELECT the ledger, jti claims, or attempts, nor
 INSERT attempts; the toolserver role must reach the knowledge tables and
-SELECT attempts. Each check runs in its own transaction with the toolserver
-db helper's ``SET LOCAL statement_timeout``. Prints table names and results
-only — DSNs are never printed or logged.
+SELECT attempts; append-only audit events must not be deletable through
+their plan (0009: the event tables' plan FKs are ON DELETE RESTRICT, checked
+in the catalog and, when a seeded member exists, by a backend DELETE inside
+a rolled-back transaction). Each check runs in its own transaction with the
+toolserver db helper's ``SET LOCAL statement_timeout``. Prints table names
+and results only — DSNs are never printed or logged.
 
 Exit 0 when every check matches, 1 on any mismatch, 2 on configuration or
 connection errors.
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,6 +72,10 @@ class Report:
         self.lines.append(f"FAIL {message}")
         print(f"FAIL {message}")
 
+    def skip(self, message: str) -> None:
+        self.lines.append(f"SKIP {message}")
+        print(f"SKIP {message}")
+
 
 def _denied(exc: BaseException) -> bool:
     from psycopg import errors
@@ -106,6 +114,73 @@ def _expect_allowed(report: Report, conn: object, label: str, sql: str) -> None:
     else:
         report.ok(f"ALLOW {label}")
     finally:
+        conn.rollback()
+
+
+def _check_event_fks_restrict(report: Report, conn: object) -> None:
+    """Catalog check (no data needed): event-table plan FKs never cascade."""
+    from services.toolserver import db
+
+    try:
+        rows = db.fetch_all(
+            conn,
+            "SELECT t.relname, c.confdeltype::text FROM pg_catalog.pg_constraint c "
+            "JOIN pg_catalog.pg_class t ON t.oid = c.conrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace "
+            "WHERE n.nspname = 'public' AND c.contype = 'f' "
+            "AND c.confrelid = 'public.plans'::regclass AND t.relname = ANY(%s)",
+            (list(EVENT_TABLES),),
+        )
+    except Exception as exc:
+        report.bad(f"FK {', '.join(EVENT_TABLES)} -> plans (unexpected {type(exc).__name__})")
+        return
+    finally:
+        conn.rollback()
+    for table in EVENT_TABLES:
+        actions = sorted(action for name, action in rows if name == table)
+        if actions == ["r"]:
+            report.ok(f"FK {table}.plan_id -> plans is ON DELETE RESTRICT")
+        else:
+            report.bad(f"FK {table}.plan_id -> plans delete actions {actions} (expected ['r'])")
+
+
+def _check_plan_delete_keeps_events(report: Report, conn: object) -> None:
+    """As backend: a plan with an audit event cannot be deleted (rolled back)."""
+    from psycopg import errors
+
+    from services.toolserver import db
+
+    label = "backend DELETE plan with audit events"
+    try:
+        member = db.fetch_one(conn, "SELECT workspace_id, id FROM public.members LIMIT 1")
+        if member is None:
+            report.skip(f"{label} (needs a seeded workspace + member; catalog check covers it)")
+            return
+        suffix = uuid.uuid4().hex[:12]
+        plan_id = f"verify-plan-{suffix}"
+        request_id = f"verify-req-{suffix}"
+        db.execute(
+            conn,
+            "INSERT INTO public.plans (id, request_id, trace_id, workspace_id, "
+            "requester_member_id, entry_point, status) "
+            "VALUES (%s, %s, %s, %s, %s, 'web', 'planned')",
+            (plan_id, request_id, request_id, member[0], member[1]),
+        )
+        db.execute(
+            conn,
+            "INSERT INTO public.request_events (request_id, trace_id, plan_id, event_type) "
+            "VALUES (%s, %s, %s, 'plan_proposed')",
+            (request_id, request_id, plan_id),
+        )
+        db.execute(conn, "DELETE FROM public.plans WHERE id = %s", (plan_id,))
+    except errors.ForeignKeyViolation:
+        report.ok(f"DENY {label} (foreign key violation; events kept)")
+    except Exception as exc:
+        report.bad(f"DENY {label} (unexpected {type(exc).__name__})")
+    else:
+        report.bad(f"DENY {label} (delete succeeded — events would cascade!)")
+    finally:
+        # Never persist the probe rows, whatever happened.
         conn.rollback()
 
 
@@ -190,6 +265,14 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                     f"backend UPDATE {table}",
                     f"UPDATE public.{table} SET id = id WHERE id = -1",  # noqa: S608 -- table from module allowlist, never user input,
                 )
+                _expect_denied(
+                    report,
+                    conn,
+                    f"backend DELETE {table}",
+                    f"DELETE FROM public.{table} WHERE id = -1",  # noqa: S608 -- table from module allowlist, never user input,
+                )
+            _check_event_fks_restrict(report, conn)
+            _check_plan_delete_keeps_events(report, conn)
             for table in KNOWLEDGE_TABLES:
                 _expect_allowed(
                     report,

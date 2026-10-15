@@ -14,24 +14,29 @@ No query touches protected knowledge tables or the execution ledger — only
 ``plans``, ``plan_steps``, ``approval_requests``, ``unanswered_questions``
 and the three event tables. Returned rows are bounded (explicit limits) and
 payloads are re-redacted defensively, so even pre-redaction rows cannot leak
-through a new reader.
+through a new reader. Every function raises an ``AuditError`` subclass on
+failure (driver errors are wrapped as ``AuditStoreError``).
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from apps.api.core.db import AuditCursor, AuditDatabase
 from services.audit.errors import (
     AuditNotAuthorizedError,
     AuditNotFoundError,
     AuditStoreError,
+    fail_closed,
 )
+from services.audit.protocols import AuditCursor, AuditDatabase
 from services.audit.redaction import redact_payload
-from services.contracts import AppRole, AuthenticatedUser
+from services.contracts import ARMORIQ_POLICY_SOURCES, AppRole, AuthenticatedUser
 
 _DEFAULT_LIMIT = 50
 _MAX_LIMIT = 200
 _TIMELINE_LIMIT = 500
+
+_ARMORIQ_POLICY_SOURCE_VALUES = frozenset(source.value for source in ARMORIQ_POLICY_SOURCES)
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,19 @@ class TimelineEntry:
     step_index: int | None
     decision_source: str | None
     payload: dict[str, object]
+    # Planned tool for (plan_id, step_index), joined from plan_steps; for
+    # off-plan decisions, the payload's tool_name when one was recorded.
+    tool_name: str | None = None
+
+    @property
+    def is_armoriq_policy(self) -> bool:
+        """True only for decisions an ArmorIQ policy layer made (ADR-026).
+
+        ``ARMORIQ_POLICY_SOURCES`` only: the client-side SDK plan check,
+        tool-server rules, application rules and ``unknown`` decisions are
+        never shown as ArmorIQ policy outcomes.
+        """
+        return self.kind == "decision" and self.decision_source in _ARMORIQ_POLICY_SOURCE_VALUES
 
 
 @dataclass(frozen=True)
@@ -99,6 +117,10 @@ def _clamp_limit(limit: int) -> int:
     return max(1, min(_MAX_LIMIT, limit))
 
 
+def _rows(cursor: AuditCursor) -> list[Sequence[object]]:
+    return [row for row in cursor.fetchall() if isinstance(row, Sequence)]
+
+
 def _request_origin(cursor: AuditCursor, request_id: str) -> dict[str, object]:
     cursor.execute(
         "SELECT trace_id, payload FROM request_events "
@@ -115,6 +137,7 @@ def _request_origin(cursor: AuditCursor, request_id: str) -> dict[str, object]:
     return {"trace_id": row[0], "payload": payload}
 
 
+@fail_closed
 def request_status(db: AuditDatabase, request_id: str, member_id: str) -> RequestStatusView:
     """Owner-only request status for P4-01.
 
@@ -132,7 +155,7 @@ def request_status(db: AuditDatabase, request_id: str, member_id: str) -> Reques
             "SELECT id FROM plans WHERE request_id = %s ORDER BY created_at",
             [request_id],
         )
-        plan_ids = tuple(row[0] for row in cursor.fetchall())  # type: ignore[union-attr]
+        plan_ids = tuple(str(row[0]) for row in _rows(cursor))
         cursor.execute(
             "SELECT COUNT(*) FROM approval_requests ar JOIN plans p ON p.id = ar.plan_id "
             "WHERE p.request_id = %s AND ar.state = 'pending'",
@@ -163,48 +186,75 @@ def request_status(db: AuditDatabase, request_id: str, member_id: str) -> Reques
         )
 
 
+@fail_closed
 def recent_requests(
     db: AuditDatabase, actor: AuthenticatedUser, limit: int = _DEFAULT_LIMIT
 ) -> list[RequestSummary]:
-    """Newest requests first (Maya-only, for P4-04)."""
+    """Newest requests first (Maya-only, for P4-04).
+
+    One bounded query (no per-request round trips). A request whose
+    ``request_received`` event is missing or unreadable is still listed, with
+    empty identity fields, rather than failing the whole console page.
+    """
     _require_manager(actor)
     summaries: list[RequestSummary] = []
     with db.tx() as cursor:
         cursor.execute(
+            "WITH latest AS ("
             "SELECT request_id, MAX(trace_id) AS trace_id, MAX(occurred_at) AS last_at "
-            "FROM request_events GROUP BY request_id ORDER BY last_at DESC LIMIT %s",
+            "FROM request_events GROUP BY request_id ORDER BY last_at DESC LIMIT %s) "
+            "SELECT l.request_id, COALESCE(o.trace_id, l.trace_id), o.payload, l.last_at "
+            "FROM latest l LEFT JOIN LATERAL ("
+            "SELECT r.trace_id, r.payload FROM request_events r "
+            "WHERE r.request_id = l.request_id AND r.event_type = 'request_received' "
+            "ORDER BY r.id LIMIT 1) o ON TRUE "
+            "ORDER BY l.last_at DESC",
             [_clamp_limit(limit)],
         )
-        for request_id, trace_id, last_at in cursor.fetchall():
-            origin = _request_origin(cursor, str(request_id))
-            payload = origin["payload"]
-            if not isinstance(payload, dict):
-                raise AuditStoreError(f"request {request_id!r} has a corrupt origin event")
+        for request_id, trace_id, payload, last_at in _rows(cursor):
+            origin = payload if isinstance(payload, dict) else {}
             summaries.append(
                 RequestSummary(
                     request_id=str(request_id),
-                    trace_id=str(trace_id),
-                    workspace_id=str(payload.get("workspace_id", "")),
-                    entry_point=str(payload.get("entry_point", "")),
-                    requester_member_id=str(payload.get("requester_member_id", "")),
+                    trace_id=str(trace_id or ""),
+                    workspace_id=str(origin.get("workspace_id") or ""),
+                    entry_point=str(origin.get("entry_point") or ""),
+                    requester_member_id=str(origin.get("requester_member_id") or ""),
                     last_event_at=last_at,
                 )
             )
         return summaries
 
 
+def _tool_name(joined: object, payload: object) -> str | None:
+    if isinstance(joined, str) and joined:
+        return joined
+    if isinstance(payload, dict):
+        recorded = payload.get("tool_name")
+        if isinstance(recorded, str) and recorded:
+            return recorded
+    return None
+
+
+@fail_closed
 def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> list[TimelineEntry]:
-    """Merged request/decision/delivery events, oldest first (Maya-only)."""
+    """Merged request/decision/delivery events, oldest first (Maya-only).
+
+    Request and decision events carry the planned ``tool_name`` for their
+    plan step (``plan_steps`` join), so the console shows which tool each
+    decision was for.
+    """
     _require_manager(actor)
     entries: list[TimelineEntry] = []
     with db.tx() as cursor:
         cursor.execute(
-            "SELECT occurred_at, event_type, plan_id, step_index, jti, payload "
-            "FROM request_events WHERE request_id = %s ORDER BY occurred_at "
-            "LIMIT %s",
+            "SELECT e.occurred_at, e.event_type, e.plan_id, e.step_index, e.jti, e.payload, "
+            "ps.tool_name FROM request_events e LEFT JOIN plan_steps ps "
+            "ON ps.plan_id = e.plan_id AND ps.step_index = e.step_index "
+            "WHERE e.request_id = %s ORDER BY e.occurred_at, e.id LIMIT %s",
             [request_id, _TIMELINE_LIMIT],
         )
-        for occurred_at, event_type, plan_id, step, _jti, payload in cursor.fetchall():
+        for occurred_at, event_type, plan_id, step, _jti, payload, tool in _rows(cursor):
             entries.append(
                 TimelineEntry(
                     occurred_at=occurred_at,
@@ -214,15 +264,17 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
                     step_index=step,
                     decision_source=None,
                     payload=redact_payload(payload if isinstance(payload, dict) else {}),
+                    tool_name=_tool_name(tool, payload),
                 )
             )
         cursor.execute(
-            "SELECT occurred_at, event_type, plan_id, step_index, decision_source, "
-            "payload FROM decision_events WHERE request_id = %s ORDER BY "
-            "occurred_at LIMIT %s",
+            "SELECT d.occurred_at, d.event_type, d.plan_id, d.step_index, d.decision_source, "
+            "d.payload, ps.tool_name FROM decision_events d LEFT JOIN plan_steps ps "
+            "ON ps.plan_id = d.plan_id AND ps.step_index = d.step_index "
+            "WHERE d.request_id = %s ORDER BY d.occurred_at, d.id LIMIT %s",
             [request_id, _TIMELINE_LIMIT],
         )
-        for occurred_at, event_type, plan_id, step, source, payload in cursor.fetchall():
+        for occurred_at, event_type, plan_id, step, source, payload, tool in _rows(cursor):
             entries.append(
                 TimelineEntry(
                     occurred_at=occurred_at,
@@ -232,15 +284,16 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
                     step_index=step,
                     decision_source=str(source) if source else None,
                     payload=redact_payload(payload if isinstance(payload, dict) else {}),
+                    tool_name=_tool_name(tool, payload),
                 )
             )
         cursor.execute(
             "SELECT occurred_at, delivery_channel, delivered_to_member_id, "
             "delivery_status, plan_id FROM delivery_events WHERE request_id = %s "
-            "ORDER BY occurred_at LIMIT %s",
+            "ORDER BY occurred_at, id LIMIT %s",
             [request_id, _TIMELINE_LIMIT],
         )
-        for occurred_at, channel, delivered_to, status, plan_id in cursor.fetchall():
+        for occurred_at, channel, delivered_to, status, plan_id in _rows(cursor):
             entries.append(
                 TimelineEntry(
                     occurred_at=occurred_at,
@@ -258,6 +311,7 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
         return entries
 
 
+@fail_closed
 def pending_holds(db: AuditDatabase, actor: AuthenticatedUser) -> list[PendingHold]:
     """Unresolved HOLDs with console correlation IDs (Maya-only)."""
     _require_manager(actor)
@@ -271,15 +325,22 @@ def pending_holds(db: AuditDatabase, actor: AuthenticatedUser) -> list[PendingHo
             "ORDER BY ar.requested_at LIMIT %s",
             [_MAX_LIMIT],
         )
-        for row in cursor.fetchall():
+        for row in _rows(cursor):
             holds.append(PendingHold(*row))
         return holds
 
 
+@fail_closed
 def unanswered(
     db: AuditDatabase, actor: AuthenticatedUser, only_open: bool = True
 ) -> list[UnansweredItem]:
-    """Abstention queue with reasons rejoined from events (Maya-only)."""
+    """Abstention queue with reasons rejoined from events (Maya-only).
+
+    The reason comes from the companion ``answer_abstained`` event whose
+    ``unanswered_question_id`` names the row; when ``add_unanswered`` did
+    not append one (it would have duplicated ``record_answer``'s abstention),
+    the request's latest abstention reason is used.
+    """
     _require_manager(actor)
     items: list[UnansweredItem] = []
     with db.tx() as cursor:
@@ -289,29 +350,31 @@ def unanswered(
             "ORDER BY created_at LIMIT %s",
             [not only_open, _MAX_LIMIT],
         )
-        rows = cursor.fetchall()
-        request_ids = sorted({row[1] for row in rows})
-        reasons: dict[str, str | None] = {}
+        rows = _rows(cursor)
+        request_ids = sorted({str(row[1]) for row in rows})
+        by_question: dict[str, str | None] = {}
+        by_request: dict[str, str | None] = {}
         if request_ids:
-            placeholders = ", ".join(["%s"] * len(request_ids))
-            # Placeholders are generated; IDs travel as bound params.
             cursor.execute(
-                "SELECT DISTINCT ON (request_id) request_id, "  # noqa: S608
-                "payload->>'reason' FROM request_events "
-                "WHERE event_type = 'answer_abstained' AND request_id IN "
-                f"({placeholders}) ORDER BY request_id, id DESC",
-                request_ids,
+                "SELECT request_id, payload->>'unanswered_question_id', payload->>'reason' "
+                "FROM request_events WHERE event_type = 'answer_abstained' "
+                "AND request_id = ANY(%s) ORDER BY id",
+                [request_ids],
             )
-            reasons = {row[0]: row[1] for row in cursor.fetchall()}
+            for event_request, question_ref, reason in _rows(cursor):
+                if question_ref is not None:
+                    by_question[str(question_ref)] = reason
+                else:
+                    by_request[str(event_request)] = reason
         for question_id, request_id, question, status, created_at in rows:
             items.append(
                 UnansweredItem(
                     question_id=question_id,
-                    request_id=request_id,
+                    request_id=str(request_id),
                     # Stored redacted at write time; passed through unchanged.
                     question=question,
-                    reason=reasons.get(request_id),
-                    status=status,
+                    reason=by_question.get(str(question_id), by_request.get(str(request_id))),
+                    status=str(status),
                     created_at=created_at,
                 )
             )
