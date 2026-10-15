@@ -7,6 +7,7 @@ the conftest scrubs the environment during test runs; they are never logged.
 import os
 import threading
 import uuid
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -57,11 +58,14 @@ BASE_FIELDS = {
 }
 
 
+T0 = datetime(2026, 10, 16, 9, 30, 0, 123456, tzinfo=UTC)
+
+
 def make_rows(count: int) -> list[dict]:
     rows = []
     prev = GENESIS_PREV_HASH
     for index in range(count):
-        fields = dict(BASE_FIELDS, jti=f"jti-{index}")
+        fields = dict(BASE_FIELDS, jti=f"jti-{index}", created_at=T0 + timedelta(seconds=index))
         entry_hash = compute_entry_hash(fields, prev)
         rows.append({"id": index + 1, **fields, "prev_hash": prev, "entry_hash": entry_hash})
         prev = entry_hash
@@ -127,6 +131,30 @@ def test_tail_truncation_is_undetectable() -> None:
     assert verify_rows(make_rows(3)[:2]).ok
 
 
+def test_detects_created_at_modification() -> None:
+    """The execution timestamp is hashed: moving it by 1 µs breaks the row."""
+    rows = make_rows(3)
+    rows[1]["created_at"] = rows[1]["created_at"] + timedelta(microseconds=1)
+    report = verify_rows(rows)
+    assert not report.ok and report.broken_at == 2
+
+
+def test_created_at_is_normalized_to_utc() -> None:
+    """The same instant in another session time zone verifies identically."""
+    rows = make_rows(2)
+    ist = timezone(timedelta(hours=5, minutes=30))
+    for row in rows:
+        row["created_at"] = row["created_at"].astimezone(ist)
+    assert verify_rows(rows).ok
+
+
+def test_naive_created_at_fails_verification_instead_of_crashing() -> None:
+    rows = make_rows(2)
+    rows[0]["created_at"] = rows[0]["created_at"].replace(tzinfo=None)
+    report = verify_rows(rows)
+    assert not report.ok and report.broken_at == 1
+
+
 # --- live database ----------------------------------------------------------
 
 
@@ -137,6 +165,19 @@ def test_append_and_verify_chain(ledger: Ledger) -> None:
     assert second.value > first.value
     report = ledger.verify_chain()
     assert report.ok and report.checked >= 2
+
+
+@NEEDS_DB
+def test_created_at_round_trips_into_the_hash(ledger: Ledger) -> None:
+    """The stored created_at is exactly the hashed one (µs precision, tz-aware)."""
+    jti = uid("created")
+    ledger.append(make_entry(jti))
+    stored = ledger.get_by_jti(jti)
+    assert stored is not None
+    assert stored["created_at"].tzinfo is not None
+    assert compute_entry_hash(stored, stored["prev_hash"]) == stored["entry_hash"]
+    edited = dict(stored, created_at=stored["created_at"] - timedelta(seconds=1))
+    assert compute_entry_hash(edited, stored["prev_hash"]) != stored["entry_hash"]
 
 
 @NEEDS_DB
@@ -159,3 +200,54 @@ def test_concurrent_appends_single_chain(ledger: Ledger) -> None:
     assert errors == []
     assert len(set(ids)) == 20
     assert ledger.verify_chain().ok
+
+
+@NEEDS_DB
+def test_concurrent_appends_single_chain_under_repeatable_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pool whose connections default to REPEATABLE READ must not fork the
+    chain: append forces READ COMMITTED as its first statement. (Under
+    REPEATABLE READ the snapshot predates the lock wait, so the tip read
+    after the lock would be stale.) The pool is swapped in through
+    `db.create_pool`, so this also runs against the pre-fix writer."""
+    from psycopg import IsolationLevel
+    from psycopg_pool import ConnectionPool
+
+    from services.toolserver import db
+
+    def repeatable_read(conn) -> None:
+        conn.isolation_level = IsolationLevel.REPEATABLE_READ
+
+    pools: list[ConnectionPool] = []
+
+    def rr_pool(dsn: str, **kwargs: object) -> ConnectionPool:
+        pool = ConnectionPool(dsn, min_size=1, max_size=10, configure=repeatable_read, open=True)
+        pools.append(pool)
+        return pool
+
+    monkeypatch.setattr(db, "create_pool", rr_pool)
+    assert TOOLSERVER_DSN is not None
+    handle = Ledger(TOOLSERVER_DSN)
+    errors: list[Exception] = []
+    barrier = threading.Barrier(20)
+
+    def worker(index: int) -> None:
+        barrier.wait()
+        try:
+            handle.append(make_entry(uid(f"rr-{index}")))
+        except Exception as exc:  # collected and asserted below
+            errors.append(exc)
+
+    try:
+        threads = [threading.Thread(target=worker, args=(index,)) for index in range(20)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        assert handle.verify_chain().ok
+    finally:
+        handle.close()
+        for pool in pools:
+            pool.close()

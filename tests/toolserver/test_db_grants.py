@@ -105,6 +105,33 @@ def test_runtime_roles_cannot_rewrite_ledger(request, role: str) -> None:
 
 
 @NEEDS_DB
+def test_backend_cannot_read_or_write_attempts(backend_conn) -> None:
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(backend_conn, "SELECT 1 FROM public.tool_call_attempts LIMIT 1")
+    backend_conn.rollback()
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(
+            backend_conn,
+            "INSERT INTO public.tool_call_attempts (credential_id, mcp_endpoint, tool_name, "
+            "outcome) VALUES ('grant_check', 'memory-mcp', 'grant_check', 'invalid_context') "
+            "RETURNING id",
+        )
+
+
+@NEEDS_DB
+def test_toolserver_cannot_rewrite_attempts(toolserver_conn) -> None:
+    db.fetch_all(toolserver_conn, "SELECT 1 FROM public.tool_call_attempts LIMIT 1")
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(
+            toolserver_conn,
+            "UPDATE public.tool_call_attempts SET outcome = outcome WHERE id = -1",
+        )
+    toolserver_conn.rollback()
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(toolserver_conn, "DELETE FROM public.tool_call_attempts WHERE id = -1")
+
+
+@NEEDS_DB
 def test_backend_cannot_read_protected_sequences(backend_conn) -> None:
     # IDENTITY inserts need no sequence grant; reading last_value would leak row counts.
     with pytest.raises(errors.InsufficientPrivilege):

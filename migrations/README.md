@@ -15,6 +15,7 @@ running services (PRD v2 §8.1).
 | `0005_roles_grants.sql` | `proxylead_backend` / `proxylead_toolserver` group roles, full grant matrix, revokes, statement timeouts |
 | `0006_metadata_view.sql` | `draft_review_queue` metadata-only view for the manager console (ADR-023) |
 | `0007_ledger_evidence_columns.sql` | `arguments_sha256`, `workspace_id` on the ledger (P2-07 writer fields); append-only `tool_jti_claims` (atomic replay claim before execution) |
+| `0008_ledger_attempts_constraints.sql` | P2-07 follow-up: ledger `id` `GENERATED ALWAYS`; `NOT VALID` row-format CHECKs on new ledger rows (hex digests, identifier-only `error_class`, fixed `validation_outcome` set, no `not_reached`); append-only `tool_call_attempts` (one row per call that passed the credential check: `accepted` / `invalid_context` / `context_expired` / `replay`) |
 
 ## Rules (binding)
 
@@ -83,13 +84,33 @@ still verify numbering, grants, and enum parity.
 | `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | — (denied) | full CRUD |
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
 | `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |
+| `tool_call_attempts` (0008) | — (denied, incl. INSERT) | SELECT + INSERT (append-only) |
 | `tasks` | — (denied) | full CRUD |
 | `egress_sink` | — (denied; PROPOSED count unconfirmed) | SELECT + INSERT |
 | `draft_review_queue` view | SELECT | — (denied) |
 | sequences | — (denied; IDENTITY inserts need no sequence grant) | — (denied) |
 
 `statement_timeout`: backend `10s`, toolserver `30s`, set on the LOGIN users
-(operator step 4) and per connection by `services/toolserver/db.py` (cold starts time out;
-authorization is never bypassed because a query is slow — Arch §7.1).
+(operator step 4) and per transaction with `SET LOCAL` by
+`apps/api/core/db.py` and `services/toolserver/db.py` (`transaction()` /
+`apply_statement_timeout()`; the libpq `options` startup parameter is not used
+because Neon's pooled endpoint rejects it). Cold starts time out;
+authorization is never bypassed because a query is slow — Arch §7.1.
 Vector index: HNSW (`m=16, ef_construction=64`, cosine) — no training pass,
 serves a growing seed corpus from row one.
+
+Ledger notes (P2-07, 0007/0008):
+
+- `arguments_sha256` is an **unsalted** SHA-256 of the canonical business
+  arguments. For low-entropy arguments (a short query, an enum) it is
+  guessable by hashing candidates, so it is evidence for the tool server
+  only. Any future backend grant on the ledger (the PROPOSED SC-06
+  column-level `SELECT`) MUST exclude `arguments_sha256` — or the writer must
+  first switch to an HMAC with a tool-server-only key.
+- The 0008 CHECKs are `NOT VALID`: enforced for every new row, existing rows
+  not scanned. A later migration may `VALIDATE CONSTRAINT` them once the
+  operator has confirmed the existing rows comply.
+- The hashed payload gained `created_at` (normalized UTC ISO-8601 with
+  microseconds) in the 0008 follow-up. Rows written by the earlier writer do
+  not verify under the new code; the shared Neon ledger held zero rows
+  when this changed. Do not mix writer versions on one ledger.

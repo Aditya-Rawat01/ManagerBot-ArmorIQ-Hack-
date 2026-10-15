@@ -5,6 +5,11 @@ without a database. Live behavior is proven by scripts/verify_db_grants.py
 and tests/toolserver/test_db_grants.py against a migrated database.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import pytest
+
 from services.toolserver import db
 
 
@@ -34,9 +39,33 @@ class FakeConnection:
     def __init__(self) -> None:
         self.cursor_obj = FakeCursor()
         self.read_only = False
+        self.log: list[str] = []
 
     def cursor(self) -> FakeCursor:
         return self.cursor_obj
+
+    def execute(self, query: object, params: tuple = ()) -> None:
+        text = query if isinstance(query, str) else query.as_string()  # type: ignore[attr-defined]
+        self.log.append(text)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.log.append("BEGIN")
+        try:
+            yield
+        except BaseException:
+            self.log.append("ROLLBACK")
+            raise
+        self.log.append("COMMIT")
+
+
+class FakePool:
+    def __init__(self) -> None:
+        self.conn = FakeConnection()
+
+    @contextmanager
+    def connection(self, timeout: float | None = None) -> Iterator[FakeConnection]:
+        yield self.conn
 
 
 def test_fetch_all_passes_parameters() -> None:
@@ -73,3 +102,55 @@ def test_no_query_string_is_built_from_inputs() -> None:
     query, params = conn.cursor_obj.statements[0]
     assert query == "SELECT 1 FROM t WHERE a = %s"
     assert params == (hostile,)
+
+
+def test_create_pool_is_compatible_with_a_transaction_pooler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neon's pooled endpoint rejects the `options` startup parameter and
+    cannot keep server-side prepared statements bound to one connection."""
+    captured: dict[str, object] = {}
+
+    def fake_pool(dsn: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(db, "ConnectionPool", fake_pool)
+    db.create_pool("postgresql://fake")
+    connect_kwargs = dict(captured.get("kwargs") or {})  # type: ignore[call-overload]
+    assert "options" not in captured
+    assert "options" not in connect_kwargs
+    assert "prepare_threshold" in connect_kwargs
+    assert connect_kwargs["prepare_threshold"] is None
+
+
+def test_transaction_sets_local_statement_timeout_and_commits() -> None:
+    pool = FakePool()
+    with db.transaction(pool) as conn:
+        conn.execute("SELECT 1")
+    assert pool.conn.log == [
+        "BEGIN",
+        f"SET LOCAL statement_timeout = {db.DEFAULT_STATEMENT_TIMEOUT_MS}",
+        "SELECT 1",
+        "COMMIT",
+    ]
+
+
+def test_transaction_read_committed_comes_first_and_rolls_back_on_error() -> None:
+    pool = FakePool()
+    with pytest.raises(RuntimeError), db.transaction(pool, read_committed=True) as conn:
+        conn.execute("SELECT 1")
+        raise RuntimeError("boom")
+    assert pool.conn.log == [
+        "BEGIN",
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+        "SET LOCAL statement_timeout = 30000",
+        "SELECT 1",
+        "ROLLBACK",
+    ]
+
+
+@pytest.mark.parametrize("bad", [0, -5, True, "30s; DROP TABLE t", 1.5])
+def test_apply_statement_timeout_accepts_positive_ints_only(bad: object) -> None:
+    with pytest.raises(ValueError):
+        db.apply_statement_timeout(FakeConnection(), bad)  # type: ignore[arg-type]

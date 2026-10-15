@@ -6,6 +6,7 @@ scripts/verify_db_grants.py and tests/toolserver/test_db_grants.py against a
 migrated database.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ PROTECTED_TABLES = (
 )
 APPEND_ONLY_TABLES = (
     "tool_execution_ledger",
+    "tool_call_attempts",
     "request_events",
     "decision_events",
     "delivery_events",
@@ -76,8 +78,33 @@ def test_ledger_and_event_tables_are_append_only() -> None:
 def test_backend_has_no_ledger_or_egress_access() -> None:
     text = _sql_text()
     assert "REVOKE ALL ON public.tool_execution_ledger FROM proxylead_backend" in text
+    assert "REVOKE ALL ON public.tool_jti_claims FROM proxylead_backend" in text
+    assert "REVOKE ALL ON public.tool_call_attempts FROM proxylead_backend" in text
+    assert "REVOKE ALL ON public.tool_call_attempts FROM PUBLIC" in text
     assert "REVOKE ALL ON public.tasks FROM proxylead_backend" in text
     assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
+
+
+def test_ledger_followup_constraints() -> None:
+    """0008: no explicit ledger ids; new rows carry a hex digest and no free text."""
+    text = _sql_text()
+    assert "ALTER TABLE public.tool_execution_ledger ALTER COLUMN id SET GENERATED ALWAYS" in text
+    assert "arguments_sha256 ~ '^[0-9a-f]{64}$'" in text
+    assert "error_class ~ '^[A-Za-z_][A-Za-z0-9_.]{0,127}$'" in text
+    assert "CHECK (execution_status <> 'not_reached')" in text
+    assert "GRANT SELECT, INSERT ON public.tool_call_attempts TO proxylead_toolserver" in text
+
+
+def test_attempt_outcomes_match_writer() -> None:
+    """The SQL outcome sets equal the writer's (security.py codes + accepted)."""
+    from services.toolserver.ledger import ATTEMPT_OUTCOMES, LEDGER_VALIDATION_OUTCOMES
+
+    text = _sql_text()
+    attempts_sql = text[text.index("CREATE TABLE IF NOT EXISTS public.tool_call_attempts") :]
+    outcome_check = attempts_sql[attempts_sql.index("CHECK (outcome IN (") :].split(")", 1)[0]
+    assert set(re.findall(r"'([a-z_]+)'", outcome_check)) == set(ATTEMPT_OUTCOMES)
+    ledger_check = text[text.index("CHECK (validation_outcome IN (") :].split(")", 1)[0]
+    assert set(re.findall(r"'([a-z_]+)'", ledger_check)) == set(LEDGER_VALIDATION_OUTCOMES)
 
 
 def test_enum_values_match_contracts() -> None:
