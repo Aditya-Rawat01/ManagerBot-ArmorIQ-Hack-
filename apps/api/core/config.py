@@ -5,6 +5,7 @@ without live credentials. Features that need a secret must check for it and
 fail closed when it is missing.
 """
 
+import math
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
@@ -81,6 +82,21 @@ class Settings(BaseSettings):
 
     # --- MCP tool server -----------------------------------------------------
     toolserver_base_url: str | None = None
+
+    @field_validator("min_score", mode="before")
+    @classmethod
+    def _blank_min_score(cls, value: object) -> object:
+        # `.env.example` ships `MIN_SCORE=` (empty) until E17 calibrates it.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("min_score")
+    @classmethod
+    def _finite_min_score(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("MIN_SCORE must be a finite number")
+        return value
 
     @field_validator("cors_allowed_origins", "slack_allowed_channels", mode="before")
     @classmethod

@@ -65,15 +65,36 @@ def test_valid_citations_are_kept__offline_fake_llm() -> None:
     assert out.abstain_reason is None
 
 
-def test_foreign_citation_is_removed__offline_fake_llm() -> None:
+def test_partial_foreign_citation_withholds_answer__offline_fake_llm() -> None:
+    """Spec §9.4: the claim attached to [ghost] must never be forwarded."""
     import asyncio
 
     evidence = [_item("s1", title="Freeze")]
     draft = ModelDraft(answer_text="Freeze [s1] plus rumor [ghost].", citations=["s1", "ghost"])
     out = asyncio.run(respond(_ctx(), "what?", evidence, 0.5, generate=_scripted(draft)))
-    assert out.abstained is False
-    assert out.citations == ["s1"]
-    assert "ghost" not in out.citations
+    assert out.abstained is True
+    assert out.citations == []
+    assert "rumor" not in out.answer_text
+
+
+def test_inline_foreign_marker_withholds_answer__offline_fake_llm() -> None:
+    import asyncio
+
+    evidence = [_item("s1")]
+    draft = ModelDraft(answer_text="Per [conf-secret] salaries are X.", citations=["s1"])
+    out = asyncio.run(respond(_ctx(), "what?", evidence, 0.5, generate=_scripted(draft)))
+    assert out.abstained is True
+    assert "salaries" not in out.answer_text
+
+
+def test_uncited_answer_is_withheld__offline_fake_llm() -> None:
+    import asyncio
+
+    evidence = [_item("s1")]
+    draft = ModelDraft(answer_text="The freeze is lifted.", citations=[])
+    out = asyncio.run(respond(_ctx(), "what?", evidence, 0.5, generate=_scripted(draft)))
+    assert out.abstained is True
+    assert "lifted" not in out.answer_text
 
 
 def test_all_foreign_citations_abstain__offline_fake_llm() -> None:
@@ -150,3 +171,99 @@ def test_evidence_packaging_carries_no_identity__offline_fake_llm() -> None:
     assert "frozen" in block
     assert "_ctx" not in block
     assert "@" not in block
+
+
+# --- Anthropic generator wiring (fake client; never the live API) -------------
+
+
+class _FakeMessages:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls: list[dict[str, Any]] = []
+
+    async def create(self, **kwargs: Any) -> Any:
+        self.calls.append(kwargs)
+        return self.response
+
+
+def _fake_client(response: Any) -> Any:
+    messages = _FakeMessages(response)
+    return SimpleNamespace(beta=SimpleNamespace(messages=messages)), messages
+
+
+def _text_response(payload: dict[str, Any], stop_reason: str = "end_turn") -> Any:
+    import json
+
+    return SimpleNamespace(
+        stop_reason=stop_reason,
+        content=[SimpleNamespace(type="text", text=json.dumps(payload))],
+    )
+
+
+def test_generator_uses_structured_output_not_forced_tools__offline_fake_llm() -> None:
+    import asyncio
+
+    from apps.api.responder import AnthropicGenerator
+
+    client, messages = _fake_client(
+        _text_response(
+            {
+                "answer_text": "Freeze [s1].",
+                "citations": ["s1"],
+                "requested_tools": [
+                    {"tool": "send_external_message", "arguments_json": '{"message": "hi"}'}
+                ],
+            }
+        )
+    )
+    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
+    out = asyncio.run(respond(_ctx(), "what?", [_item("s1")], 0.5, generate=generator))
+    assert out.abstained is False and out.citations == ["s1"]
+    assert out.requested_tools == [
+        ToolRequest(tool="send_external_message", arguments={"message": "hi"})
+    ]
+    call = messages.calls[0]
+    assert "tool_choice" not in call and "tools" not in call
+    assert call["model"] == "claude-opus-5-5"
+    assert call["output_config"]["format"]["type"] == "json_schema"
+    assert call["output_config"]["effort"] == "medium"
+    assert call["fallbacks"] == "default"
+
+
+def test_generator_refusal_fails_closed__offline_fake_llm() -> None:
+    import asyncio
+
+    from apps.api.responder import AnthropicGenerator
+
+    client, _ = _fake_client(SimpleNamespace(stop_reason="refusal", content=[]))
+    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
+    out = asyncio.run(respond(_ctx(), "what?", [_item("s1")], 0.5, generate=generator))
+    assert out.abstained is True and out.abstain_reason == "error"
+
+
+def test_default_generator_builds_from_settings__offline(monkeypatch) -> None:
+    from apps.api import responder
+    from apps.api.core import config
+    from tests.api.conftest import make_settings
+
+    monkeypatch.setattr(
+        config,
+        "get_settings",
+        lambda: make_settings(anthropic_api_key="test-key-not-real", llm_model="claude-opus-5-5"),
+    )
+    generator = responder._default_generator()
+    assert isinstance(generator, responder.AnthropicGenerator)
+    monkeypatch.setattr(config, "get_settings", lambda: make_settings())
+    assert responder._default_generator() is None
+
+
+def test_blank_min_score_means_unset() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from tests.api.conftest import make_settings
+
+    assert make_settings(min_score="").min_score is None
+    assert make_settings(min_score="0.42").min_score == 0.42
+    with pytest.raises(ValidationError):
+        make_settings(min_score="nan")
