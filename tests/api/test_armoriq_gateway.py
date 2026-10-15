@@ -674,7 +674,7 @@ def test_member_locks_are_isolated__offline_fake_sdk() -> None:
     assert len(gateway._member_clients) == 2
 
 
-def test_fake_gateway_is_scripted_and_test_only() -> None:
+def test_fake_gateway_is_scripted_and_test_only__offline_fake_sdk() -> None:
     # The offline double for P3-04/P3-07 lives in tests/fakes (see guardrails).
     from tests.fakes.armoriq_gateway import FakeArmorIQGateway
 
