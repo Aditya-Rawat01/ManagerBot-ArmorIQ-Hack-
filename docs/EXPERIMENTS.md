@@ -53,6 +53,61 @@ or deployed MCP endpoint has been used from this repository.
   above are the account holder's observations; quotas could not be observed.
   No MCP endpoints registered yet (needs the P1-05 public URL; happens in P1-06).
 
+## Tool-server deployment record (P1-05, Render)
+
+- Tested at (UTC): 2026-10-15 06:34–06:43, by `VTCodeCraft` from a local machine over
+  the public internet. Deployed by `Aditya-Rawat01`.
+- Public URL: `https://managerbot-armoriq-hack.onrender.com` (Render Docker web
+  service built from `deploy/toolserver/Dockerfile`).
+- Deployed commit: `0e25b79` (owner-reported from Render → Events), equal to `main` at
+  test time. The only change since `069fb72` is `.gitignore`, which is never part of the
+  Docker build context.
+- Instance (owner-reported): Render **Free**, 512 MB RAM, 0.1 CPU, $0/month. An external
+  cron calls `/health` to keep the service awake (30 minutes at test time; being changed
+  to 10–12 minutes, see Availability).
+- Configuration (names only): `APP_ENV=staging`, `TOOLSERVER_BEARER_MEMORY`,
+  `TOOLSERVER_BEARER_WORKSPACE` (64 characters each, different), `CTX_SECRET`,
+  `MCP_ENABLE_DIAGNOSTIC_TOOLS=false`, `MCP_ALLOWED_HOSTS`. Values live in Render only.
+
+| Check (public HTTPS) | Result |
+|---|---|
+| `GET /health` | **200** `{"status":"ok","service":"proxylead-mcp-server","version":"0.1.0","environment":"staging"}`; TLS certificate valid; `http://` → 301 to `https://` |
+| `POST /memory/mcp`, `/workspace/mcp` with no bearer | **401** `unauthorized` + `WWW-Authenticate: Bearer` on both |
+| Wrong bearer; non-Bearer scheme | **401** on both endpoints |
+| Other endpoint's token (workspace → memory, memory → workspace) | **401** both ways |
+| Authenticated `initialize` | **200**, SSE `event: message`, `protocolVersion 2024-11-05`, `serverInfo.name` `memory-mcp` / `workspace-mcp` |
+| Authenticated `tools/list` | **200**, `"tools":[]` on both endpoints: no diagnostic tools, no product tools (correct before G0 and P2-06) |
+| `MCP_ALLOWED_HOSTS` matches the public hostname | Yes: `initialize` through the public hostname returns 200. A mismatch returns 421 (checked locally, including an `https://` prefix) |
+| Browser `Origin` + valid bearer | **403** |
+| Spoofed `Host` + valid bearer | 403 at Render's edge (the request does not reach the app); the app's 421 path was verified locally |
+| `/docs`, `/openapi.json` | **404** (disabled) |
+
+Availability (Render Free):
+- With the 30-minute ping, the first request at 06:34:33Z returned 200 after **22.4 s**
+  (cold start); following requests took 0.13–0.32 s. The service had spun down.
+- Render's Free-tier documentation (checked 15 Oct 2026): a Free web service spins down
+  after **15 minutes** without inbound traffic; spin-up takes about a minute; each
+  workspace gets 750 Free instance hours per month (all Free services are suspended when
+  they run out); Render may restart a Free service at any time.
+- A 30-minute interval cannot prevent sleep, so ADR-016's "no idle sleep" was **not met**
+  at test time. The owner is changing the ping to every 10–12 minutes (under the 15-minute
+  limit). One service pinged around the clock fits in 750 hours/month; a second always-on
+  Free service (e.g. the API) would not. Before E1–E5 runs, call `/health` and wait for
+  200, because a restart can still leave the service cold.
+
+Resources:
+- 512 MB RAM is enough for the scaffold (no product tools, no embedding model). It does
+  **not** meet ADR-016's ~1 GB reservation for FastEmbed (PRD §3, §8.2). Before P2-05
+  deploys FastEmbed, move this service to an instance with at least 1 GB RAM or record a
+  decision; never switch silently to a hosted embedder (PRD §8.2).
+
+Outcome: **PASS** for the P1-05 public smoke tests (task file §10/§12). Recorded
+limitations: the ping interval (fix in progress) and RAM (blocks P2-05, not Wave 1).
+Handoff to P1-06 (`samarth-chawla`): this URL, commit `0e25b79`, and the bearer tokens via
+a private channel only. The ArmorIQ agent registry still holds the placeholder URL until
+P1-06 attaches this endpoint. E1–E5 and E17 remain **NOT RUN**: nothing here is ArmorIQ
+evidence.
+
 ## Result record template
 
 ```text
