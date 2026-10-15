@@ -222,7 +222,7 @@ def test_concurrent_appends_single_chain_under_repeatable_read(
     pools: list[ConnectionPool] = []
 
     def rr_pool(dsn: str, **kwargs: object) -> ConnectionPool:
-        pool = ConnectionPool(dsn, min_size=1, max_size=10, configure=repeatable_read)
+        pool = ConnectionPool(dsn, min_size=1, max_size=10, configure=repeatable_read, open=True)
         pools.append(pool)
         return pool
 
