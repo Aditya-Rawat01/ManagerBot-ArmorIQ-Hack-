@@ -3,11 +3,13 @@
   "title": "Client API key rotation runbook",
   "tier": "confidential",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "sam",
   "reference": "team-ops-2026-10",
   "recorded_at": "2026-10-04",
-  "case": "escalation-confidential",
   "provenance": {"escalation_topic": "api-latency"},
   "content": "Client API keys rotate every ninety days with a seven-day overlap window where both the old and the new key are accepted. The rotation schedule lists each integration owner and the cutover date. Sam coordinates rotations, but the live key values themselves are never written down: they live in the secret store, and any key that appears in a log, a chat message, or a document is revoked immediately and replaced. Rotation reminders go out two weeks before expiry, and a missed rotation pages the on-call engineer because expired keys cause customer-facing timeouts that look exactly like gateway latency. Last quarter one integration missed its window and caused a forty-minute partial outage during peak traffic, which is why this runbook now exists and why rotation compliance is reviewed in the monthly operations meeting alongside timeout budgets and retry policies."
 }

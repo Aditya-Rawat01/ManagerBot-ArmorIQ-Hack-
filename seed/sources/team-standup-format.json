@@ -3,11 +3,13 @@
   "title": "Async standup format",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "decision-note",
   "author": "sam",
   "reference": "team-decisions-2026-09",
   "recorded_at": "2026-09-08",
-  "case": "answerable-team",
   "provenance": {},
   "content": "Standups are async by default. Each member posts yesterday, today, and blockers in the team channel before 10:00. Live standup happens only on Mondays. Blockers older than one day move to a dedicated thread with an owner and a date."
 }

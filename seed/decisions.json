@@ -1,5 +1,6 @@
 [
   {
+    "key": "decision-friday-deploy-freeze",
     "statement": "Friday deploys freeze after 15:00 unless Maya approves an exception.",
     "rationale": "Late-Friday deploys caused two weekend incidents in a row.",
     "project": "release-process",
@@ -9,6 +10,7 @@
     "version": 1
   },
   {
+    "key": "decision-ci-hosted-runners",
     "statement": "Stay on hosted CI runners; self-hosting costs more engineer time than it saves.",
     "rationale": "September cost review of runner maintenance hours.",
     "project": "developer-experience",
@@ -18,6 +20,7 @@
     "version": 1
   },
   {
+    "key": "decision-ci-selfhosted-runners",
     "statement": "Move to self-hosted CI runners to cut the monthly bill in half.",
     "rationale": "October bill spike reopened the question; contradicts the September decision.",
     "project": "developer-experience",
@@ -27,6 +30,7 @@
     "version": 1
   },
   {
+    "key": "decision-release-checklist-v1",
     "statement": "Release checklist requires only a green build before tagging.",
     "rationale": "Original lightweight process from August.",
     "project": "release-process",
@@ -36,6 +40,7 @@
     "version": 1
   },
   {
+    "key": "decision-release-checklist-v2",
     "statement": "Release checklist requires a green build, migration review, and a rollback plan.",
     "rationale": "A schema change shipped without review caused a rollback in September.",
     "project": "release-process",
@@ -43,6 +48,6 @@
     "authoritative": true,
     "source": "team-release-checklist-v2",
     "version": 2,
-    "supersedes_statement": "Release checklist requires only a green build before tagging."
+    "supersedes": "decision-release-checklist-v1"
   }
 ]

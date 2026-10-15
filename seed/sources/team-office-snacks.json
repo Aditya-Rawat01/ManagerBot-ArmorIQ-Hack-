@@ -3,11 +3,13 @@
   "title": "Office snack preferences",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "priya",
   "reference": "team-misc-2026-09",
   "recorded_at": "2026-09-25",
-  "case": "unrelated",
   "provenance": {},
   "content": "Snack poll results: mixed nuts first, then dried mango. Sparkling water beats still by a wide margin. Restock happens on the first Monday of each month."
 }

@@ -3,11 +3,13 @@
   "title": "Unconfirmed billing anomaly chatter",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "note",
   "author": "priya",
   "reference": "team-ops-2026-10",
   "recorded_at": "2026-10-07",
-  "case": "weak-evidence",
   "provenance": {},
   "content": "Someone mentioned a possible billing anomaly in passing, with no numbers, no customer, and no date. Treat this as a rumor, not evidence. A real investigation would need the invoice ID and the affected period."
 }

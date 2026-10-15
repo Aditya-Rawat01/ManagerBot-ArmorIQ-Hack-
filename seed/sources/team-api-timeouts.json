@@ -3,11 +3,13 @@
   "title": "Public API timeout policy",
   "tier": "team",
   "status": "active",
+  "review_status": "authoritative",
+  "version": 1,
+  "superseded_by": null,
   "source_type": "decision-note",
   "author": "sam",
   "reference": "team-decisions-2026-09",
   "recorded_at": "2026-09-22",
-  "case": "escalation-team",
   "provenance": {"escalation_topic": "api-latency"},
   "content": "Public API timeouts are thirty seconds at the gateway with retries on idempotent reads only. Clients must show a friendly error when the gateway returns a timeout. Timeout budgets are public knowledge."
 }
