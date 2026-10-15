@@ -21,6 +21,7 @@ class FakeCursor:
     def __init__(self, store: dict):
         self.store = store
         self._one: tuple | None = None
+        self.rowcount = 0
 
     def __enter__(self) -> "FakeCursor":
         return self
@@ -129,7 +130,7 @@ def test_idempotent_upsert_logic_with_fake_db(monkeypatch: pytest.MonkeyPatch) -
     chunks_before = len(store.get("chunks", set()))
     # Second run sees identical content hashes: nothing new anywhere.
     second = ingest.run(str(SEED_DIR), "fake-dsn", {})
-    assert second == {"sources": 0, "decisions": 0, "guidance": 0, "notes": 0}
+    assert second == {"sources": 0, "decisions": 0, "guidance": 0, "notes": 0, "adopted": 0}
     assert len(store.get("sources", {})) == sources_before
     assert len(store.get("chunks", set())) == chunks_before
 

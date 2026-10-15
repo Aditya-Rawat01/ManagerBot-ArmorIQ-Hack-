@@ -303,8 +303,56 @@ def _upsert_guidance(
     return added
 
 
+def _adopt_orphans(
+    conn: Any,
+    member_ids: Mapping[str, str],
+    decisions_items: list[dict[str, Any]],
+    guidance_items: list[dict[str, Any]],
+    notes_items: list[dict[str, Any]],
+) -> int:
+    """Point orphan rows (NULL member FKs from email-less runs) at members that
+    appeared later. Matches by exact seed text, so only true orphans change."""
+    if not member_ids:
+        return 0
+    adopted = 0
+    with conn.cursor() as cur:
+        for item in decisions_items:
+            owner = member_ids.get(item["owner"]) if item.get("owner") else None
+            if not owner:
+                continue
+            cur.execute(
+                """UPDATE public.decisions SET owner_member_id = %s
+                   WHERE statement = %s AND owner_member_id IS NULL""",
+                (owner, item["statement"]),
+            )
+            adopted += cur.rowcount
+        for item in guidance_items:
+            approver = member_ids.get(item["approved_by"]) if item.get("approved_by") else None
+            if not approver:
+                continue
+            cur.execute(
+                """UPDATE public.manager_guidance SET approved_by_member_id = %s
+                   WHERE guidance_text = %s AND approved_by_member_id IS NULL""",
+                (approver, item["guidance_text"]),
+            )
+            adopted += cur.rowcount
+        for item in notes_items:
+            author = member_ids.get(item["author"]) if item.get("author") else None
+            if not author:
+                continue
+            cur.execute(
+                """UPDATE public.team_notes SET author_member_id = %s
+                   WHERE content_hash = %s AND author_member_id IS NULL""",
+                (author, content_hash(item["content"])),
+            )
+            adopted += cur.rowcount
+    return adopted
+
+
 def _upsert_notes(
-    conn, items: list[dict[str, Any]], member_ids: Mapping[str, str] | None = None
+    conn,
+    items: list[dict[str, Any]],
+    member_ids: Mapping[str, str] | None = None,
 ) -> int:
     members = member_ids or {}
     added = 0
@@ -343,7 +391,7 @@ def _upsert_notes(
 def run(source_dir: str, dsn: str, env: Mapping[str, str]) -> dict[str, int]:
     """Ingest one corpus. Returns counts of rows added/changed per area."""
     version = model_version()
-    stats = {"sources": 0, "decisions": 0, "guidance": 0, "notes": 0}
+    stats = {"sources": 0, "decisions": 0, "guidance": 0, "notes": 0, "adopted": 0}
     source_pks: dict[str, int] = {}
     with _connect(dsn) as conn:
         member_ids = _upsert_workspace_and_members(conn, env)
@@ -365,6 +413,18 @@ def run(source_dir: str, dsn: str, env: Mapping[str, str]) -> dict[str, int]:
             else:
                 key = "guidance" if name == "guidance.json" else "notes"
                 stats[key] += loader(conn, items, member_ids)
+        loaded: dict[str, list[dict[str, Any]]] = {}
+        for name in ("decisions.json", "guidance.json", "notes.json"):
+            path = os.path.join(source_dir, name)
+            if os.path.exists(path):
+                loaded[name] = _load_json(path)
+        stats["adopted"] = _adopt_orphans(
+            conn,
+            member_ids,
+            loaded.get("decisions.json", []),
+            loaded.get("guidance.json", []),
+            loaded.get("notes.json", []),
+        )
         conn.commit()
     return stats
 

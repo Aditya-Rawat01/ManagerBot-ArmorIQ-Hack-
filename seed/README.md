@@ -19,6 +19,10 @@ through the migration-role ingest into a database.
   authoritative, non-superseded records; Maya reaches drafts through the
   review queue instead.
 - Members/workspace rows come from env at seed time (D-20/ADR-021), not files.
+- Runs without member emails leave `owner_member_id` / `author_member_id` /
+  `approved_by_member_id` NULL (honest unknown, never fake rows). A later run
+  with emails present adopts those orphans by exact-text match (reported as
+  `adopted`).
 
 ## Chunking (PROPOSED, recorded)
 
