@@ -189,8 +189,36 @@ No runtime role gets `UPDATE`/`DELETE` on ledger or audit tables (append-only, P
 | Content | **FIXED** (PRD §10.1, Arch §7.2) | `request_id`, `trace_id`, `plan_id`/`armoriq_plan_id` (if available), `step_index`, `tool_name`, `jti`, requester member ID, validation outcome, execution status, result ID, error class, timestamps. **No raw arguments containing secrets; no protected content** |
 | Integrity | **FIXED** requirement / **PROPOSED** construction (P2-07) | Hash chain: `entry_hash = sha256(prev_hash ‖ canonical_json(entry_without_hash))`; appends serialized; verifier detects modification and reordering. Never called "tamper-proof" |
 | Idempotency | **PROPOSED** (P2-07) | `jti` unique. A duplicate `jti` never executes twice; returns a deduplicated rejection labeled `tool_server_rule` that references the original entry |
-| Ledger API | **PROPOSED** (P2-07) | `append(entry) -> LedgerEntryId`; `seen_jti(jti) -> bool` (used by P1-04 replay check); `verify_chain() -> VerificationReport` |
+| Ledger API | **PROPOSED** (P2-07) | `append(entry) -> LedgerEntryId`; `seen_jti(jti) -> bool` (used by P1-04 replay check); `verify_chain() -> VerificationReport`; `record_attempt(attempt) -> int`; `find_entry_id(jti)`; `get_by_jti(jti)` |
+| Hashed payload | **PROPOSED** (P2-07 follow-up) | All entry fields above plus `created_at` (taken with `clock_timestamp()` under the append lock; hashed as UTC ISO-8601 with microseconds). Changed when the shared Neon ledger had zero rows; rows from the earlier writer do not verify — never mix writer versions on one ledger |
+| Rejected attempts | **PROPOSED** (P2-07 follow-up, migration 0008) | Append-only `tool_call_attempts`: one row per call that passed the bearer check, `outcome` ∈ {`accepted`, `invalid_context`, `context_expired`, `replay`}; replays carry `original_entry_id`. Identity columns only from a verified `_ctx`; never raw arguments or `_ctx` tokens. Not hash-chained. `unauthenticated` (bearer failure) is not recorded (unauthenticated callers cannot write rows) |
+| Entry validation | **PROPOSED** (P2-07 follow-up) | `append` raises `ValueError` before touching the database for: `execution_status=not_reached`; `validation_outcome` ∉ {`accepted`, `invalid_arguments`, `out_of_scope`, `precondition_failed`} (non-`accepted` requires `rejected_by_tool_server`); `error_class` / `tool_name` not matching `^[A-Za-z_][A-Za-z0-9_.]{0,127}$` (a class name, never free text). 0008 mirrors these as `NOT VALID` CHECKs |
+| `arguments_sha256` | **PROPOSED** (P2-07) | Unsalted SHA-256 of the canonical business arguments: guessable for low-entropy arguments. Tool server only — any future backend column-level `SELECT` on the ledger (SC-06) MUST exclude it, or the writer must first switch to an HMAC with a tool-server-only key |
 | `ToolInvocationResult.status=executed` | **FIXED** (validator) | Requires `tool_server_reached=True` and `ledger_entry_id` |
+
+P2-06 wiring notes (`services/toolserver/ledger.py`; no handler calls
+`verify_tool_call` on `main` yet):
+
+1. One pool per process: create it once with `db.create_pool(DATABASE_URL_TOOLSERVER)`
+   and pass it in — `Ledger(pool=pool)`. The process owns and closes the pool.
+2. In `guarded(...)`, call `verify_and_record(ledger, endpoint, tool, raw_arguments,
+   credential_id=<bearer setting name>, ctx_secret=...)` **instead of**
+   `verify_tool_call`, after the bearer check and before any handler logic.
+   `credential_id` is the NAME of the setting that authenticated the call
+   (`toolserver_bearer_memory` / `toolserver_bearer_workspace`;
+   `SERVICE_CREDENTIAL_IDS`), never its value. It records the attempt and
+   returns the same `VerifiedCall`. Fail closed: a rejection is re-raised even
+   when recording it fails; an accepted call whose attempt row cannot be
+   written raises `CtxRejection("internal")` and must not execute. Any other
+   exception (database down during the jti claim) also means: do not execute.
+3. After the handler: `ledger.append(LedgerEntry(...))` with identity fields
+   from `verified.ctx` and `arguments=verified.business_arguments` (hashed,
+   never stored). A post-verification rejection (`invalid_arguments`,
+   `out_of_scope`, `precondition_failed`) is appended with that
+   `validation_outcome` and `execution_status=rejected_by_tool_server`;
+   handler failures use `execution_status=error` and `error_class=type(exc).__name__`.
+   `DuplicateJti` means "do not execute; reject as `replay` referencing
+   `exc.existing_id`".
 
 ## 10. Audit events (backend)
 

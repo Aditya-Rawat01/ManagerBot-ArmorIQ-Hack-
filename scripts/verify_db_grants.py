@@ -4,11 +4,14 @@ Usage (operator only, repository root):
     DATABASE_URL_BACKEND='<backend DSN>' DATABASE_URL_TOOLSERVER='<toolserver DSN>' \\
         python scripts/verify_db_grants.py
 
-Connects as each runtime login user and checks the 0005 grant matrix:
-backend SELECT on every protected table/view must fail with permission
+Connects as each runtime login user and checks the 0005/0007/0008 grant
+matrix: backend SELECT on every protected table/view must fail with permission
 denied; allowed tables must work; neither runtime role may UPDATE or DELETE
-the ledger; the toolserver role must reach the knowledge tables. Prints table
-names and results only — DSNs are never printed or logged.
+the ledger or the attempts table; the backend can neither read nor write the
+ledger, jti claims, or attempts; the toolserver role must reach the knowledge
+tables. Each check runs in its own transaction with the toolserver db helper's
+``SET LOCAL statement_timeout``. Prints table names and results only — DSNs
+are never printed or logged.
 
 Exit 0 when every check matches, 1 on any mismatch, 2 on configuration or
 connection errors.
@@ -75,6 +78,7 @@ def _expect_denied(report: Report, conn: object, label: str, sql: str) -> None:
     from services.toolserver import db
 
     try:
+        db.apply_statement_timeout(conn)
         db.fetch_all(conn, sql)
     except Exception as exc:
         if _denied(exc):
@@ -94,6 +98,7 @@ def _expect_allowed(report: Report, conn: object, label: str, sql: str) -> None:
     from services.toolserver import db
 
     try:
+        db.apply_statement_timeout(conn)
         db.fetch_all(conn, sql)
     except Exception as exc:
         report.bad(f"ALLOW {label} (unexpected {type(exc).__name__})")
@@ -148,6 +153,20 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
             _expect_denied(
                 report,
                 conn,
+                "backend SELECT tool_call_attempts",
+                "SELECT 1 FROM public.tool_call_attempts LIMIT 1",
+            )
+            _expect_denied(
+                report,
+                conn,
+                "backend INSERT tool_call_attempts",
+                "INSERT INTO public.tool_call_attempts (credential_id, mcp_endpoint, tool_name, "
+                "outcome) VALUES ('grant_check', 'memory-mcp', 'grant_check', 'invalid_context') "
+                "RETURNING id",
+            )
+            _expect_denied(
+                report,
+                conn,
                 "backend UPDATE tool_execution_ledger",
                 "UPDATE public.tool_execution_ledger SET execution_status = 'error' WHERE id = -1",
             )
@@ -194,6 +213,24 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 ts_conn,
                 "toolserver DELETE tool_jti_claims",
                 "DELETE FROM public.tool_jti_claims WHERE jti = ''",
+            )
+            _expect_allowed(
+                report,
+                ts_conn,
+                "toolserver SELECT tool_call_attempts",
+                "SELECT 1 FROM public.tool_call_attempts LIMIT 1",
+            )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver UPDATE tool_call_attempts",
+                "UPDATE public.tool_call_attempts SET outcome = outcome WHERE id = -1",
+            )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver DELETE tool_call_attempts",
+                "DELETE FROM public.tool_call_attempts WHERE id = -1",
             )
     except Exception as exc:
         report.bad(f"verify ({type(exc).__name__})")
