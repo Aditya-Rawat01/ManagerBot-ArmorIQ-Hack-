@@ -32,7 +32,8 @@ may read it (see migrations/README.md).
 
 Hash payload change (0008 follow-up): `created_at` joined the hashed fields.
 Rows written before that change do not verify under this code; the shared
-Neon ledger held no real rows when it changed.
+Neon ledger held zero rows when it changed, so no stored chain broke. Never
+mix writer versions on one ledger.
 
 Concurrency: `append` forces READ COMMITTED (so the chain tip read after the
 lock is the latest committed row, never an older snapshot) and holds a

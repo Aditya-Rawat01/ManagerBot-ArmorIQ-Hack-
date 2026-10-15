@@ -7,11 +7,12 @@ Usage (operator only, repository root):
 Connects as each runtime login user and checks the 0005/0007/0008 grant
 matrix: backend SELECT on every protected table/view must fail with permission
 denied; allowed tables must work; neither runtime role may UPDATE or DELETE
-the ledger or the attempts table; the backend can neither read nor write the
-ledger, jti claims, or attempts; the toolserver role must reach the knowledge
-tables. Each check runs in its own transaction with the toolserver db helper's
-``SET LOCAL statement_timeout``. Prints table names and results only — DSNs
-are never printed or logged.
+the ledger; the toolserver may not DELETE jti claims nor UPDATE or DELETE
+attempts; the backend cannot SELECT the ledger, jti claims, or attempts, nor
+INSERT attempts; the toolserver role must reach the knowledge tables and
+SELECT attempts. Each check runs in its own transaction with the toolserver
+db helper's ``SET LOCAL statement_timeout``. Prints table names and results
+only — DSNs are never printed or logged.
 
 Exit 0 when every check matches, 1 on any mismatch, 2 on configuration or
 connection errors.

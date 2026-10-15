@@ -112,5 +112,5 @@ Ledger notes (P2-07, 0007/0008):
   operator has confirmed the existing rows comply.
 - The hashed payload gained `created_at` (normalized UTC ISO-8601 with
   microseconds) in the 0008 follow-up. Rows written by the earlier writer do
-  not verify under the new code; the shared Neon ledger held no real rows
+  not verify under the new code; the shared Neon ledger held zero rows
   when this changed. Do not mix writer versions on one ledger.
