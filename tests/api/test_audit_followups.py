@@ -789,6 +789,9 @@ def test_add_unanswered_does_not_duplicate_record_answer_abstention() -> None:
     assert question_id == 9
     assert statements_with(db, "INSERT INTO unanswered_questions")
     assert not statements_with(db, "INSERT INTO request_events")
+    # Only record_answer's abstention counts, never another question's companion.
+    [(lookup, _)] = statements_with(db, "event_type = 'answer_abstained'")
+    assert "unanswered_question_id' IS NULL" in lookup
 
 
 @pytest.mark.parametrize(
@@ -1391,5 +1394,50 @@ def test_live_concurrent_holds_create_one_pending_row() -> None:
         assert failures == []
         count = "SELECT COUNT(*) FROM approval_requests WHERE plan_id = %s AND state = 'pending'"
         assert _scalar(db, count, [plan_id]) == 1
+    finally:
+        db.close()
+
+
+@needs_live_write
+def test_live_unanswered_questions_keep_their_own_reasons() -> None:
+    ctx = _live_ctx()
+    db = BackendDatabase(LIVE_DSN)
+    try:
+        create_request(db, ctx)
+        ids = {
+            reason: add_unanswered(
+                db,
+                request_id=ctx.request_id,
+                trace_id=ctx.trace_id,
+                workspace_id="workspace-primary",
+                requester_member_id="m-sam",
+                question=f"question for {reason}",
+                reason=reason,
+            )
+            for reason in ("conflict", "source_unavailable")
+        }
+        # A later request-level abstention must not overwrite either reason.
+        record_answer(
+            db,
+            request_id=ctx.request_id,
+            trace_id=ctx.trace_id,
+            citations=[],
+            highest_tier=DataTier.TEAM,
+            abstained=True,
+            reason="superseded",
+        )
+        reasons = {item.question_id: item.reason for item in unanswered(db, maya())}
+        assert reasons[ids["conflict"]] == "conflict"
+        assert reasons[ids["source_unavailable"]] == "source_unavailable"
+        with pytest.raises(AuditStoreError):
+            add_unanswered(
+                db,
+                request_id=ctx.request_id,
+                trace_id=ctx.trace_id,
+                workspace_id="workspace-primary",
+                requester_member_id="m-priya",  # not the trusted requester
+                question="spoofed",
+                reason="conflict",
+            )
     finally:
         db.close()

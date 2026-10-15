@@ -764,9 +764,10 @@ def add_unanswered(
     Workspace and requester are taken from the trusted ``request_received``
     event; the parameters must match it (``AuditStoreError`` otherwise). The
     companion ``answer_abstained`` event (``unanswered_question_id``,
-    ``reason``, ``safe_refs``) is appended unless it would duplicate an
-    abstention already recorded for the request (``record_answer``): same
-    reason and no source ID it does not already list.
+    ``reason``, ``safe_refs``) is appended unless it would duplicate the
+    abstention ``record_answer`` already wrote for the request: same reason
+    and no safe ref beyond that event's cited source IDs. The queue then
+    reads the reason from that event (:func:`queries.unanswered`).
     """
     if reason not in _UNANSWERED_REASONS:
         raise AuditStoreError(f"unknown unanswered reason {reason!r}")
@@ -792,20 +793,23 @@ def add_unanswered(
             [request_id, trusted_workspace, trusted_requester, redact_question(question)],
         )
         question_id = cursor.fetchone()[0]
+        # Only record_answer's abstention (no question ID) can make the
+        # companion redundant; another question's companion never does.
         cursor.execute(
             "SELECT payload FROM request_events "
             "WHERE request_id = %s AND event_type = 'answer_abstained' "
+            "AND payload->>'unanswered_question_id' IS NULL "
             "ORDER BY id DESC LIMIT 1",
             [request_id],
         )
         prior = _payload(cursor.fetchone())
         if prior is not None and prior.get("reason") == reason:
-            listed = {
+            cited = {
                 str(item.get("source_id"))
                 for item in prior.get("citations") or []
                 if isinstance(item, dict)
-            } | {str(item) for item in prior.get("safe_refs") or []}
-            if set(refs) <= listed:
+            }
+            if set(refs) <= cited:
                 return question_id
         cursor.execute(
             "INSERT INTO request_events (request_id, trace_id, event_type, payload, "
