@@ -58,3 +58,16 @@ def test_installed_versions_match_pins(package: str, pinned: str) -> None:
 
 def test_armoriq_sdk_pin_is_the_required_version() -> None:
     assert _pinned_dependencies()["armoriq-sdk"] == "0.6.10"
+
+
+def test_offline_fakes_never_reach_production_code() -> None:
+    # FakeArmorIQGateway labels its decisions with ArmorIQ sources, so production
+    # code must not be able to construct one and record fake "ArmorIQ" evidence.
+    # It lives in tests/fakes/, which is neither installed nor copied into images.
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (p for d in PYTHON_SOURCE_DIRS for p in d.rglob("*.py"))
+        if "tests" in _imported_top_level_modules(path)
+        or "FakeArmorIQGateway" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"test doubles referenced from production code: {offenders}"

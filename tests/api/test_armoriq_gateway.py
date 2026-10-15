@@ -648,3 +648,22 @@ def test_member_locks_are_isolated__offline_fake_sdk() -> None:
     # Same member reuses one client across concurrent requests (serialized by
     # that member's lock): two plans, one client, one mint each.
     assert len(gateway._member_clients) == 2
+
+
+def test_fake_gateway_is_scripted_and_test_only() -> None:
+    # The offline double for P3-04/P3-07 lives in tests/fakes (see guardrails).
+    from tests.fakes.armoriq_gateway import FakeArmorIQGateway
+
+    fake = FakeArmorIQGateway(default="allow")
+    fake.script_tool(ToolName.KNOWLEDGE_SEARCH_TEAM, "block")
+    ctx = _ctx(_user(PersonaKey.MAYA, "m-maya"))
+    plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
+
+    async def run() -> Any:
+        handle = await fake.start_plan(ctx, plan)
+        return await fake.invoke_step(handle, 0, ctx, plan)
+
+    outcome = asyncio.run(run())
+    assert outcome.decision.outcome is DecisionOutcome.BLOCK
+    assert outcome.decision.reason == "fake block"
+    assert [name for name, _ in fake.calls] == ["start_plan", "invoke_step"]
