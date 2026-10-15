@@ -111,6 +111,8 @@ format documentation, keeping the same endpoint paths and tool contracts.
 | armoriq-sdk | **0.6.10** (required pin) | apps/api (not yet called) |
 | slack-bolt | 1.30.0 | apps/api (not yet used) |
 | mcp | 2.3.0 | services/toolserver |
+| psycopg[binary,pool] | 3.3.6 | apps/api, services/toolserver (P2-01; driver + pool) |
+| pgvector | 0.5.1 | apps/api, services/toolserver (P2-01; vector column adapter) |
 | pytest | 9.1.1 | all Python |
 | httpx | 0.28.1 | tests |
 | ruff | 0.17.0 | all Python |
@@ -376,6 +378,25 @@ The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
   - Roles, grants and `REVOKE`s live in these SQL files, so the backend's denial on protected tables is explicit and testable (`scripts/verify_db_grants.py`).
 
 **Why.** Grants stay visible in SQL, there are few dependencies, and it matches ADR-002. No ORM or Alembic for the hackathon. Confirmed by the project owner on 14 Oct 2026.
+
+**Grant design (added in P2-01, #13).** `0005_roles_grants.sql` creates
+`proxylead_backend` / `proxylead_toolserver` as NOLOGIN group roles; the
+operator creates LOGIN users out-of-band and grants membership (passwords and
+DSNs never enter the repo; procedure in `migrations/README.md`). Deny-by
+default: every table is revoked from both roles first, then each role gets
+exactly its writers' privileges — backend SELECT-denied on all protected
+content, approved views, the ledger, and task/egress tables (the PROPOSED
+backend SELECTs on non-content ledger columns and the egress count are NOT
+granted); ledger and event tables are append-only for every runtime role;
+`draft_review_queue` (ADR-023) is backend-SELECT only; no sequence grants
+(IDENTITY inserts need none). `statement_timeout`: backend `10s`, toolserver
+`30s`, set on the LOGIN users by the operator (group-role settings are not
+inherited) — slow queries fail, authorization is never bypassed (Arch §7.1). Vector index: HNSW (`m=16, ef_construction=64`,
+cosine); lexical column maintained by trigger with a GIN index. Roles and
+grants are expressed in SQL and applied by the migration (owner) role; any
+console-only Neon step is recorded in `migrations/README.md` after the first
+live run. Every later migration that creates objects grants them in the same
+file (no inherited default privileges).
 
 
 ## ADR-029 — Containerization: Docker for local development and Render services

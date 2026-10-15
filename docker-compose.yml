@@ -6,7 +6,7 @@
 #
 # Services: api (:8000), toolserver (:8100), web (:5173), db (:5432, local
 # pgvector Postgres). `migrate` and `dev` are profile-gated one-shots:
-#   docker compose run --rm migrate   (pending P2-01's scripts/migrate.py)
+#   docker compose run --rm migrate   (applies migrations/ to the local db)
 #   docker compose run --rm dev bash scripts/check.sh
 #
 # SECURITY — least privilege (PRD §8.1, ARCHITECTURE_RULES.md R-50):
@@ -180,13 +180,14 @@ services:
       # The tool-server image does not contain scripts/; P2-01 also needs its
       # migrations directory here (ADR-028).
       - ./scripts:/app/scripts:ro
-    # Fails loudly (exit 1) until P2-01 (#13) adds scripts/migrate.py: never
-    # reports success when no migration ran.
+      - ./migrations:/app/migrations:ro
+    # Fails loudly (exit 1) if scripts/migrate.py is missing: never reports
+    # success when no migration ran.
     command:
       [
         "sh",
         "-c",
-        "test -f scripts/migrate.py || { echo 'migrate: scripts/migrate.py not found; P2-01 (#13) adds it. No migrations ran.' >&2; exit 1; }; exec python scripts/migrate.py",
+        "test -f scripts/migrate.py || { echo 'migrate: scripts/migrate.py not found. No migrations ran.' >&2; exit 1; }; exec python scripts/migrate.py",
       ]
     depends_on:
       db:
