@@ -149,3 +149,20 @@ HOLD is carried only with an ArmorIQ source (`ARMORIQ_DECISION_SOURCES`);
 `armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule`, and `unknown`
 are never reported as ArmorIQ policy BLOCK/HOLD (ADR-026, R-03). E1–E4 correct
 this table via ICR where the evidence differs.
+
+### Gateway `_ctx` signing and offline doubles (P1-02, integrated with P1-04)
+
+- The gateway signs every step's `_ctx` with P1-04's `sign_ctx` by default
+  (`sign_ctx_fields` in `services/authorization/armoriq_gateway.py`). It converts
+  the gateway's `iat`/`exp` datetimes to epoch seconds at that boundary;
+  `CtxEnvelope` validation is unchanged. The envelope carries
+  `armoriq_member_email_ref` (`PERSONA_*_EMAIL`), never the raw email (ADR-020).
+- A missing `CTX_SECRET` or a signing failure makes the step `UNVERIFIED` +
+  `unknown` before any SDK call (fail closed).
+- Offline round trip only: `tests/api/test_armoriq_gateway.py` shows the token
+  passes `verify_ctx` for the step's endpoint and tool. Whether `_ctx` survives
+  ArmorIQ's proxy is still decided by E1/E2 (**NOT RUN**).
+- `FakeArmorIQGateway` lives in `tests/fakes/armoriq_gateway.py`, not in production
+  code: its decisions carry ArmorIQ source labels for offline tests and are never
+  evidence. `tests/api/test_guardrails.py` fails if `apps/`, `services/` or
+  `scripts/` import `tests` or name the fake.
