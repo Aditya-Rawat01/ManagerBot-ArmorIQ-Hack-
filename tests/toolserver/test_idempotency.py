@@ -20,11 +20,11 @@ TOOLSERVER_DSN = os.environ.get("DATABASE_URL_TOOLSERVER")
 # The ledger and the claims table are append-only (no DELETE for any runtime
 # role), so these tests write PERMANENT rows. Run them only against a local
 # or throwaway database, never the shared Neon evidence ledger.
-WRITE_TESTS = os.environ.get("PROXYLEAD_LEDGER_WRITE_TESTS") == "1"
+WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
 
 NEEDS_DB = pytest.mark.skipif(
     not (TOOLSERVER_DSN and WRITE_TESTS),
-    reason="needs DATABASE_URL_TOOLSERVER and PROXYLEAD_LEDGER_WRITE_TESTS=1 "
+    reason="needs DATABASE_URL_TOOLSERVER and PROXYLEAD_DB_WRITE_TESTS=1 "
     "(writes permanent ledger rows: local database only)",
 )
 
