@@ -96,11 +96,19 @@ def test_runtime_roles_cannot_rewrite_ledger(request, role: str) -> None:
             conn,
             "UPDATE public.tool_execution_ledger SET execution_status = 'error' WHERE id = -1",
         )
+    conn.rollback()  # the denial aborted the transaction; start a fresh one
     with pytest.raises(errors.InsufficientPrivilege):
         db.execute(
             conn,
             "DELETE FROM public.tool_execution_ledger WHERE id = -1",
         )
+
+
+@NEEDS_DB
+def test_backend_cannot_read_protected_sequences(backend_conn) -> None:
+    # IDENTITY inserts need no sequence grant; reading last_value would leak row counts.
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(backend_conn, "SELECT last_value FROM public.team_notes_id_seq")
 
 
 @NEEDS_DB

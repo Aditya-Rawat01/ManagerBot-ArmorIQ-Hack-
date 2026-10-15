@@ -83,6 +83,11 @@ def _expect_denied(report: Report, conn: object, label: str, sql: str) -> None:
             report.bad(f"DENY {label} (unexpected {type(exc).__name__})")
     else:
         report.bad(f"DENY {label} (query succeeded — grant is too broad!)")
+    finally:
+        # One transaction per check: an expected denial aborts the transaction
+        # (later checks would fail with InFailedSqlTransaction), and a
+        # too-broad grant must never persist a change.
+        conn.rollback()
 
 
 def _expect_allowed(report: Report, conn: object, label: str, sql: str) -> None:
@@ -94,6 +99,8 @@ def _expect_allowed(report: Report, conn: object, label: str, sql: str) -> None:
         report.bad(f"ALLOW {label} (unexpected {type(exc).__name__})")
     else:
         report.ok(f"ALLOW {label}")
+    finally:
+        conn.rollback()
 
 
 def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
@@ -143,6 +150,12 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 conn,
                 "backend DELETE tool_execution_ledger",
                 "DELETE FROM public.tool_execution_ledger WHERE id = -1",
+            )
+            _expect_denied(
+                report,
+                conn,
+                "backend SELECT team_notes_id_seq (row-count leak)",
+                "SELECT last_value FROM public.team_notes_id_seq",
             )
             for table in EVENT_TABLES:
                 _expect_denied(
