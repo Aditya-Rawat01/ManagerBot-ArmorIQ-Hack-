@@ -1325,7 +1325,10 @@ def test_live_plan_delete_cannot_cascade_into_events() -> None:
         )
         with pytest.raises(AuditStoreError) as refused, db.tx() as cursor:
             cursor.execute("DELETE FROM plans WHERE id = %s", [plan_id])
-        assert isinstance(refused.value.__cause__, pg_errors.ForeignKeyViolation)
+        # 23503 on PostgreSQL 16, 23001 (restrict_violation) on PostgreSQL 18 / Neon.
+        assert isinstance(
+            refused.value.__cause__, (pg_errors.ForeignKeyViolation, pg_errors.RestrictViolation)
+        )
         count = "SELECT COUNT(*) FROM request_events WHERE plan_id = %s"
         assert _scalar(db, count, [plan_id]) == 1
     finally:

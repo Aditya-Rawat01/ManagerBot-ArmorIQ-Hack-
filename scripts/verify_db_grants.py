@@ -173,8 +173,10 @@ def _check_plan_delete_keeps_events(report: Report, conn: object) -> None:
             (request_id, request_id, plan_id),
         )
         db.execute(conn, "DELETE FROM public.plans WHERE id = %s", (plan_id,))
-    except errors.ForeignKeyViolation:
-        report.ok(f"DENY {label} (foreign key violation; events kept)")
+    except (errors.ForeignKeyViolation, errors.RestrictViolation):
+        # PostgreSQL 16 reports an ON DELETE RESTRICT refusal as 23503
+        # (foreign_key_violation); PostgreSQL 18 (Neon) as 23001 (restrict_violation).
+        report.ok(f"DENY {label} (restrict/foreign key violation; events kept)")
     except Exception as exc:
         report.bad(f"DENY {label} (unexpected {type(exc).__name__})")
     else:
