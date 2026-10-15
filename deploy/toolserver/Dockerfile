@@ -21,13 +21,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PORT=8100
 
+# Hosted default: diagnostic ping tools off (P1-05 §8, M-04). Local compose
+# opts in explicitly (docs/DOCKER.md); Render also sets it to false.
+ENV MCP_ENABLE_DIAGNOSTIC_TOOLS=false
+
 WORKDIR /app
 
 # Dependency pins live in pyproject.toml (`pip install ".[toolserver]"`).
-# Source trees are copied explicitly so the build never depends on what
-# .dockerignore lets through.
+# Only services/ is copied: the tool server never imports apps/, so API and
+# web source stay out of this image. .dockerignore still guards nested secrets.
 COPY pyproject.toml ./
-COPY apps ./apps
 COPY services ./services
 RUN pip install --no-cache-dir ".[toolserver]"
 
