@@ -1,0 +1,214 @@
+# ProxyLead local development environment (P1-11, ADR-029).
+#
+# One-command startup from the repository root:
+#   cp .env.example .env
+#   docker compose up --build -d
+#
+# Services: api (:8000), toolserver (:8100), web (:5173), db (:5432, local
+# pgvector Postgres). `migrate` and `dev` are profile-gated one-shots:
+#   docker compose run --rm migrate   (pending P2-01's scripts/migrate.py)
+#   docker compose run --rm dev bash scripts/check.sh
+#
+# SECURITY — least privilege (PRD §8.1, ARCHITECTURE_RULES.md R-50):
+# every service gets an EXPLICIT environment mapping below. A wholesale
+# `env_file: .env` would inject every variable (including other services'
+# database credentials) into every container, so it is deliberately NOT
+# used here even though the P1-11 task file §9 sketches it — the task's own
+# acceptance criteria (§10: MIGRATE visible only on `migrate`, no DSN
+# cross-over) and §9.6 require these explicit mappings. The deviation is
+# recorded in docs/DOCKER.md.
+#
+#   api        → its own settings (ArmorIQ, Slack, Anthropic, personas) and
+#                DATABASE_URL_BACKEND only (never TOOLSERVER / MIGRATE)
+#   toolserver → DATABASE_URL_TOOLSERVER only (never BACKEND / MIGRATE)
+#   migrate    → DATABASE_URL_MIGRATE only (nothing else)
+#
+# Database defaults: only `migrate` defaults to the local owner account.
+# The api/toolserver DSNs stay empty until P2-01 creates the separate
+# backend/toolserver roles; never point them at the owner account, which
+# would hide the PRD §8.1 grant boundary locally.
+#
+# Published ports bind to 127.0.0.1 only: the stack is for this machine,
+# not the local network (the MCP tool server in particular).
+#   web        → VITE_* only (public bundle values, never secrets)
+#   db / dev   → local-only credentials / APP_ENV=test (mirrors CI)
+#
+# No secret is baked into any image: everything arrives at runtime from the
+# (untracked) root .env. Never commit .env.
+
+name: proxylead
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-proxylead}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-proxylead-local-only}
+      POSTGRES_DB: ${POSTGRES_DB:-proxylead}
+    ports:
+      # Localhost-only: the database is a dev dependency, not a public service.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-proxylead} -d ${POSTGRES_DB:-proxylead}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  api:
+    build:
+      context: .
+      dockerfile: deploy/api/Dockerfile
+    image: proxylead-api:dev
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: 8000
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      CTX_SECRET: ${CTX_SECRET:-}
+      DEMO_PASSCODE: ${DEMO_PASSCODE:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      # ArmorIQ gateway settings: the API is the only service that gets them.
+      # Defaults mirror apps/api/core/config.py; an empty value would override them.
+      ARMORIQ_API_KEY: ${ARMORIQ_API_KEY:-}
+      ARMORIQ_AGENT_ID: ${ARMORIQ_AGENT_ID:-proxylead}
+      ARMORIQ_CONSOLE_URL: ${ARMORIQ_CONSOLE_URL:-https://platform.armoriq.ai}
+      ARMORIQ_MCP_MEMORY_NAME: ${ARMORIQ_MCP_MEMORY_NAME:-memory-mcp}
+      ARMORIQ_MCP_WORKSPACE_NAME: ${ARMORIQ_MCP_WORKSPACE_NAME:-workspace-mcp}
+      TOKEN_VALIDITY_S: ${TOKEN_VALIDITY_S:-1200}
+      APPROVAL_TIMEOUT_MS: ${APPROVAL_TIMEOUT_MS:-900000}
+      # Trusted identity mapping (P1-03): web sign-in needs these.
+      PERSONA_MAYA_EMAIL: ${PERSONA_MAYA_EMAIL:-}
+      PERSONA_SAM_EMAIL: ${PERSONA_SAM_EMAIL:-}
+      PERSONA_PRIYA_EMAIL: ${PERSONA_PRIYA_EMAIL:-}
+      SLACK_USER_MAYA_ID: ${SLACK_USER_MAYA_ID:-}
+      SLACK_USER_SAM_ID: ${SLACK_USER_SAM_ID:-}
+      SLACK_USER_PRIYA_ID: ${SLACK_USER_PRIYA_ID:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:-}
+      SLACK_TEAM_ID: ${SLACK_TEAM_ID:-}
+      SLACK_ALLOWED_CHANNELS: ${SLACK_ALLOWED_CHANNELS:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-claude-opus-5-5}
+      TOOLSERVER_BASE_URL: ${TOOLSERVER_BASE_URL:-}
+      # The API's own role DSN only. TOOLSERVER / MIGRATE are never mapped here.
+      # Empty until P2-01 defines the backend role (see the header note).
+      DATABASE_URL_BACKEND: ${DATABASE_URL_BACKEND:-}
+    volumes:
+      # Live source for --reload. .venv / node_modules live outside these
+      # trees, so no anonymous volumes are needed here. Writes are suppressed
+      # by PYTHONDONTWRITEBYTECODE in the image.
+      - ./apps:/app/apps
+      - ./services:/app/services
+    command: uvicorn apps.api.main:create_app --factory --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+
+  toolserver:
+    build:
+      context: .
+      dockerfile: deploy/toolserver/Dockerfile
+    image: proxylead-toolserver:dev
+    ports:
+      - "127.0.0.1:8100:8100"
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: 8100
+      TOOLSERVER_BEARER_MEMORY: ${TOOLSERVER_BEARER_MEMORY:-}
+      TOOLSERVER_BEARER_WORKSPACE: ${TOOLSERVER_BEARER_WORKSPACE:-}
+      # Compose service name first (container-to-container), then host access.
+      # Fixed here on purpose: .env.example sets MCP_ALLOWED_HOSTS for host runs
+      # (no `toolserver:8100`), and a copied .env would otherwise replace it.
+      MCP_ALLOWED_HOSTS: toolserver:8100,localhost:8100,127.0.0.1:8100
+      # true locally only: the scaffold has no product tools yet, so the
+      # ping tools are the only way to exercise the MCP path. Render keeps
+      # this false (deploy/toolserver/README.md).
+      MCP_ENABLE_DIAGNOSTIC_TOOLS: ${MCP_ENABLE_DIAGNOSTIC_TOOLS:-true}
+      CTX_SECRET: ${CTX_SECRET:-}
+      # The tool server's own role DSN only. BACKEND / MIGRATE never mapped.
+      # Empty until P2-01 defines the toolserver role (see the header note).
+      DATABASE_URL_TOOLSERVER: ${DATABASE_URL_TOOLSERVER:-}
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web/Dockerfile
+    image: proxylead-web:dev
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      # Read by the Vite dev server at startup (not a build ARG): the browser
+      # calls the API directly, so this is the host-visible URL. Public by
+      # design — never a secret (apps/web/.env.example).
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+      # File-watching through the bind mount needs polling on Windows Docker
+      # Desktop; harmless elsewhere (see docs/DOCKER.md troubleshooting).
+      CHOKIDAR_USEPOLLING: "1"
+    volumes:
+      - ./apps/web:/app/apps/web
+      # Anonymous volume: keeps the image's clean `npm ci` tree. Without it
+      # the bind mount would shadow node_modules with the host's (absent on
+      # a clean clone) and the dev server would not start.
+      - /app/apps/web/node_modules
+    depends_on:
+      - api
+
+  migrate:
+    # Profile-gated: `up` never starts it. Runs the P2-01 migration script
+    # with the migration DSN — the ONLY service that receives it (PRD §8.1:
+    # the migration role is never available to runtime processes).
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: deploy/toolserver/Dockerfile
+    image: proxylead-toolserver:dev
+    environment:
+      # Local owner account by default (it creates schema, roles and grants).
+      DATABASE_URL_MIGRATE: ${DATABASE_URL_MIGRATE:-postgresql://${POSTGRES_USER:-proxylead}:${POSTGRES_PASSWORD:-proxylead-local-only}@db:5432/${POSTGRES_DB:-proxylead}}
+    volumes:
+      # The tool-server image does not contain scripts/; P2-01 also needs its
+      # migrations directory here (ADR-028).
+      - ./scripts:/app/scripts:ro
+    # Fails loudly (exit 1) until P2-01 (#13) adds scripts/migrate.py: never
+    # reports success when no migration ran.
+    command:
+      [
+        "sh",
+        "-c",
+        "test -f scripts/migrate.py || { echo 'migrate: scripts/migrate.py not found; P2-01 (#13) adds it. No migrations ran.' >&2; exit 1; }; exec python scripts/migrate.py",
+      ]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  dev:
+    # Profile-gated checks runner: pinned Python 3.12 + Node 22.
+    #   docker compose run --rm dev bash scripts/check.sh
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: deploy/dev/Dockerfile
+    image: proxylead-dev:dev
+    environment:
+      # Mirrors CI (.github/workflows/ci.yml sets APP_ENV=test).
+      APP_ENV: test
+    volumes:
+      - .:/app
+      # Anonymous volumes: preserve the image's venv + node_modules over the
+      # bind mount, so a clean clone (no host .venv / node_modules) passes.
+      - /app/.venv
+      - /app/apps/web/node_modules
+
+volumes:
+  pgdata:

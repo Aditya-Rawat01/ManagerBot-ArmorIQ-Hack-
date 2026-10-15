@@ -1,4 +1,4 @@
-# Docker build context exclusions (P1-05, ADR-029).
+# Docker build context exclusions (P1-05, extended by P1-11, ADR-029).
 # Required: secrets and local-only files must never reach an image layer.
 # Reused by P1-11's compose builds and the Render Docker services.
 #
@@ -30,6 +30,10 @@ venv/
 env/
 **/node_modules/
 apps/web/dist/
+
+# Supporting research / decision reports (never shipped)
+research/
+FlowState-ArmorIQ-Decision-Report.md
 
 # VCS, editors, OS
 .git/
