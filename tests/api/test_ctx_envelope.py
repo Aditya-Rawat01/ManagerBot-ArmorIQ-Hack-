@@ -1,6 +1,8 @@
 """Signing-side tests for the `_ctx` envelope (P1-04). Offline unit tests."""
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +19,7 @@ from services.authorization.ctx_envelope import (
     verify_ctx,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 SECRET = "test-ctx-secret-not-a-real-secret"
 NOW = 1_700_000_000.0
 
@@ -186,4 +189,10 @@ def test_empty_secret_never_mints_or_verifies() -> None:
 
 
 def test_ctx_envelope_does_not_import_armoriq_sdk() -> None:
-    assert "armoriq_sdk" not in sys.modules
+    # Fresh interpreter: other test modules (e.g. the gateway tests) legitimately
+    # import armoriq_sdk into this process, so checking sys.modules here depends
+    # on test order and proves nothing about this module.
+    code = "import sys, services.authorization.ctx_envelope; sys.exit('armoriq_sdk' in sys.modules)"
+    # Fixed interpreter and constant code, no external input.
+    result = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, check=False)  # noqa: S603
+    assert result.returncode == 0
