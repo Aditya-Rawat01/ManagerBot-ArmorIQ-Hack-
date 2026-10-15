@@ -199,3 +199,18 @@ def test_seed_files_validate() -> None:
 
         data = json.loads(path.read_text())
         assert ingest.validate_source_record(data) == [], path.name
+
+
+def test_cli_never_prints_the_dsn_on_database_errors(monkeypatch, capsys) -> None:
+    """A malformed DSN makes libpq echo it (password included); the CLI must not."""
+    from services.knowledge import ingest
+
+    fake_password = "not-a-real-password-0000"
+    monkeypatch.setenv(
+        "DATABASE_URL_MIGRATE", f"'postgresql://owner:{fake_password}@nowhere.invalid/db'"
+    )
+    code = ingest.main(["--source", "seed/"])
+    captured = capsys.readouterr()
+    assert code == 1
+    assert fake_password not in captured.out + captured.err
+    assert "database error" in captured.err

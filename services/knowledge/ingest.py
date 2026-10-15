@@ -437,7 +437,13 @@ def main(argv: list[str] | None = None) -> int:
     if not dsn:
         print(f"error: {_MIGRATE_ENV} is not set (migration role only)", file=sys.stderr)
         return 2
-    stats = run(args.source, dsn, os.environ)
+    try:
+        stats = run(args.source, dsn, os.environ)
+    except psycopg.Error as exc:
+        # Never print the message: libpq parse errors echo the whole DSN,
+        # password included (same rule as scripts/migrate.py).
+        print(f"error: database error ({type(exc).__name__})", file=sys.stderr)
+        return 1
     print(f"ingested: {stats}")
     return 0
 
