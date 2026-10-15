@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
     llm_model: str = "claude-opus-5-5"
 
+    # --- grounding (responder abstention; calibrated by E17, P3-08) ------------
+    # PRD §12 MIN_SCORE. None until E17 calibrates it: the responder abstains
+    # rather than guessing a threshold (D-23).
+    min_score: float | None = None
+
     # --- MCP tool server -----------------------------------------------------
     toolserver_base_url: str | None = None
 
