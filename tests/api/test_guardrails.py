@@ -71,3 +71,24 @@ def test_offline_fakes_never_reach_production_code() -> None:
         or "FakeArmorIQGateway" in path.read_text(encoding="utf-8")
     ]
     assert offenders == [], f"test doubles referenced from production code: {offenders}"
+
+
+def test_armoriq_email_for_is_called_only_by_the_gateway() -> None:
+    """Raw member emails leave `apps/api/identity.py` only through the gateway.
+
+    The definition lives in `apps/api/identity.py`; the only non-test caller
+    allowed is `services/authorization/armoriq_gateway.py` (lands in P1-02).
+    """
+    gateway = ARMORIQ_GATEWAY.relative_to(REPO_ROOT).as_posix()
+    allowed = {
+        "apps/api/identity.py",  # definition site
+        gateway,  # the single permitted caller (P1-02)
+    }
+    offenders = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (p for d in PYTHON_SOURCE_DIRS for p in d.rglob("*.py"))
+        if path.relative_to(REPO_ROOT).as_posix() not in allowed
+        and "tests" not in path.parts
+        and "armoriq_email_for" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"armoriq_email_for referenced outside the gateway: {offenders}"
