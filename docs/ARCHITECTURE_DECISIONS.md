@@ -429,6 +429,16 @@ The Arch §11 names (`tools_access.py`, `tools_work.py`) are not used.
 
 ---
 
+## ADR-031 — Web demo session: stdlib HMAC cookie (P1-03)
+
+**Decision.** The web demo session (`POST/GET/DELETE /api/v1/session`) is a compact `base64url(payload).base64url(mac)` cookie signed with `SESSION_SECRET` (HMAC-SHA256, implemented with the standard library in `apps/api/identity.py`). No new dependency (`itsdangerous` and JWT libraries were considered and rejected: one signed opaque value needs neither key management nor claims machinery). Payload is `{persona, exp}` only (12 h lifetime); identity is re-resolved server-side from the member table on every request.
+
+**Flags.** `HttpOnly; SameSite=Lax; Path=/`; `Secure` everywhere except `development`/`test` (local plain-HTTP dev). Works unchanged through the ADR-030 same-origin rewrite; do not switch to `SameSite=None`.
+
+**Known limitations (accepted).** No rate limiting on sign-in beyond a constant-time passcode compare — brute force against the public demo passcode is possible; the passcode protects demo access only, never authorization (every protected read still goes through ArmorIQ per requester). No server-side session revocation list; cookie expiry (12 h) is the only invalidation.
+
+---
+
 ## Unresolved questions (decide before the related phase)
 
 | # | Question | Decided by |

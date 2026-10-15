@@ -19,6 +19,7 @@ from typing import Any
 from pydantic.json_schema import models_json_schema
 
 from . import models
+from .api_session import SessionCreateRequest, SessionInfo
 
 EXPORTED_MODELS: tuple[type[models.ContractModel], ...] = (
     models.AuthenticatedUser,
@@ -35,6 +36,8 @@ EXPORTED_MODELS: tuple[type[models.ContractModel], ...] = (
     models.HealthResponse,
     models.ErrorBody,
     models.ErrorResponse,
+    SessionCreateRequest,
+    SessionInfo,
 )
 
 CONTRACTS_DIR = Path(__file__).resolve().parent  # services/contracts

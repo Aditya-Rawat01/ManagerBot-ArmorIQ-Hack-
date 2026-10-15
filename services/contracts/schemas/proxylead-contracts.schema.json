@@ -762,6 +762,53 @@
       "title": "ReviewStatus",
       "type": "string"
     },
+    "SessionCreateRequest": {
+      "additionalProperties": false,
+      "description": "Sign-in body. The only request body that may carry a persona (PRD §4.1).",
+      "properties": {
+        "passcode": {
+          "title": "Passcode",
+          "type": "string"
+        },
+        "persona": {
+          "$ref": "#/$defs/PersonaKey"
+        }
+      },
+      "required": [
+        "persona",
+        "passcode"
+      ],
+      "title": "SessionCreateRequest",
+      "type": "object"
+    },
+    "SessionInfo": {
+      "additionalProperties": false,
+      "description": "Current session. Carries the masked email, never the raw address.",
+      "properties": {
+        "app_role": {
+          "$ref": "#/$defs/AppRole"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "masked_email": {
+          "title": "Masked Email",
+          "type": "string"
+        },
+        "persona": {
+          "$ref": "#/$defs/PersonaKey"
+        }
+      },
+      "required": [
+        "persona",
+        "display_name",
+        "app_role",
+        "masked_email"
+      ],
+      "title": "SessionInfo",
+      "type": "object"
+    },
     "SourceCitation": {
       "additionalProperties": false,
       "description": "Provenance for a knowledge record (PRD v2 §8.1).",
