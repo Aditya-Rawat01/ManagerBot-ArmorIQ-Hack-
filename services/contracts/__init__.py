@@ -76,10 +76,16 @@ from .tools import FORBIDDEN_ARGUMENT_KEYS, SEARCH_TOOLS, TOOL_CATALOG, ToolSpec
 
 CONTRACTS_VERSION = "0.1.0"
 
+#: Stable demo workspace id (D-20/ADR-021). The seed (P2-03), the ledger
+#: (P2-07), and every RequestContext producer (P3-04/P3-05/P4-01) use this
+#: value so workspace references agree across components.
+DEFAULT_WORKSPACE_ID = "workspace-primary"
+
 __all__ = [
     "ARMORIQ_DECISION_SOURCES",
     "ARMORIQ_POLICY_SOURCES",
     "CONTRACTS_VERSION",
+    "DEFAULT_WORKSPACE_ID",
     "ELEVATED_TIERS",
     "FORBIDDEN_ARGUMENT_KEYS",
     "SEARCH_TOOLS",

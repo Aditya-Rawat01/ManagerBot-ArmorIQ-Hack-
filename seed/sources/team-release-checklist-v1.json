@@ -1,0 +1,13 @@
+{
+  "source_id": "team-release-checklist-v1",
+  "title": "Release checklist v1 (superseded)",
+  "tier": "team",
+  "status": "superseded",
+  "source_type": "decision-note",
+  "author": "sam",
+  "reference": "team-decisions-2026-08",
+  "recorded_at": "2026-08-15",
+  "case": "superseded-old",
+  "provenance": {"superseded_by": "team-release-checklist-v2"},
+  "content": "The old release checklist required only a green build before tagging. It was superseded in September: the new checklist adds migration review and a rollback plan. Do not follow this version."
+}

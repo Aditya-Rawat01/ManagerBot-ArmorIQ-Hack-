@@ -1,0 +1,13 @@
+{
+  "source_id": "team-release-checklist-v2",
+  "title": "Release checklist v2 (current)",
+  "tier": "team",
+  "status": "active",
+  "source_type": "decision-note",
+  "author": "maya",
+  "reference": "team-decisions-2026-09",
+  "recorded_at": "2026-09-19",
+  "case": "superseded-new",
+  "provenance": {"supersedes": "team-release-checklist-v1"},
+  "content": "The current release checklist requires a green build, a migration review for schema changes, and a rollback plan posted before tagging. It supersedes the August checklist, which missed migration review."
+}

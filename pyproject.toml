@@ -33,6 +33,7 @@ toolserver = [
   "mcp==2.3.0",           # official MCP Python SDK (MCPServer, streamable HTTP)
   "psycopg[binary,pool]==3.3.6",  # Neon/local PostgreSQL driver + pool (P2-01)
   "pgvector==0.5.1",               # pgvector column adapter (P2-01)
+  "fastembed==0.9.0",      # local embeddings, BAAI/bge-small-en-v1.5 384 dims (P2-03)
 ]
 dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.17.0"]
 
@@ -43,3 +44,7 @@ include = ["apps", "apps.*", "services", "services.*"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
+markers = [
+  "slow: needs a cached local model or a live database; skipped otherwise",
+  "e2e: live end-to-end test, runs only with PROXYLEAD_E2E=1",
+]

@@ -1,0 +1,13 @@
+{
+  "source_id": "team-ci-runner-hosted",
+  "title": "CI runners: stay on hosted",
+  "tier": "team",
+  "status": "active",
+  "source_type": "decision-note",
+  "author": "sam",
+  "reference": "team-decisions-2026-09",
+  "recorded_at": "2026-09-12",
+  "case": "conflict-a",
+  "provenance": {},
+  "content": "The team decided to stay on hosted CI runners. Self-hosting was rejected: runner maintenance cost more engineer time than the hosted bill. Builds stay under ten minutes on the current plan."
+}
