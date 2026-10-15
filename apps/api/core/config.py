@@ -77,7 +77,9 @@ class Settings(BaseSettings):
 
     # --- grounding (responder abstention; calibrated by E17, P3-08) ------------
     # PRD §12 MIN_SCORE. None until E17 calibrates it: the responder abstains
-    # rather than guessing a threshold (D-23).
+    # (`threshold_unset`) rather than guessing a threshold (D-23). P3-04 passes
+    # it to `respond`; the stricter of it and a search result's `min_score`
+    # applies.
     min_score: float | None = None
 
     # --- MCP tool server -----------------------------------------------------

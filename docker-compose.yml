@@ -18,7 +18,8 @@
 # cross-over) and §9.6 require these explicit mappings. The deviation is
 # recorded in docs/DOCKER.md.
 #
-#   api        → its own settings (ArmorIQ, Slack, Anthropic, personas) and
+#   api        → its own settings (ArmorIQ, Slack, Anthropic, personas,
+#                MIN_SCORE) and
 #                DATABASE_URL_BACKEND only (never TOOLSERVER / MIGRATE)
 #   toolserver → DATABASE_URL_TOOLSERVER only (never BACKEND / MIGRATE)
 #   migrate    → DATABASE_URL_MIGRATE only (nothing else)
@@ -99,6 +100,9 @@ services:
       SLACK_ALLOWED_CHANNELS: ${SLACK_ALLOWED_CHANNELS:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-claude-opus-5-5}
+      # Responder grounding threshold (D-23). Pass-through only: empty means
+      # unset, and the responder abstains until E17 calibrates a value.
+      MIN_SCORE: ${MIN_SCORE:-}
       TOOLSERVER_BASE_URL: ${TOOLSERVER_BASE_URL:-}
       # The API's own role DSN only. TOOLSERVER / MIGRATE are never mapped here.
       # Empty until P2-01 defines the backend role (see the header note).
