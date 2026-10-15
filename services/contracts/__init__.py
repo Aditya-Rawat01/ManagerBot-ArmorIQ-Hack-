@@ -4,6 +4,7 @@ Pydantic models are the single source of truth. The frontend consumes the
 generated JSON Schema (services/contracts/schemas/) as TypeScript types.
 """
 
+from .api_session import SessionCreateRequest, SessionInfo
 from .enums import (
     ARMORIQ_DECISION_SOURCES,
     ELEVATED_TIERS,
@@ -74,6 +75,8 @@ __all__ = [
     "PlannedToolCall",
     "RequestContext",
     "ReviewStatus",
+    "SessionCreateRequest",
+    "SessionInfo",
     "SourceCitation",
     "ToolExecutionStatus",
     "ToolInvocationResult",
