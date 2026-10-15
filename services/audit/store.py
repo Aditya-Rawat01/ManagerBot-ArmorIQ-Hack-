@@ -447,6 +447,7 @@ def record_approval(
                     f"plan step {step_key} already has an unresolved HOLD for another delegation"
                 )
         changed = False
+        stored_delegation = existing[2] if existing is not None else None
         if existing is None:
             cursor.execute(
                 "INSERT INTO approval_requests (plan_id, step_index, tool_name, "
@@ -474,7 +475,6 @@ def record_approval(
         else:
             approval_id = existing[0]
             current = existing[1]
-            stored_delegation = existing[2]
             changed = approval.state.value != current
             if changed:
                 _forward(
@@ -519,7 +519,7 @@ def record_approval(
                         {
                             "approval_id": approval_id,
                             "state": approval.state.value,
-                            "delegation_id": delegation,
+                            "delegation_id": delegation or stored_delegation,
                             "tool_name": approval.tool.value,
                         }
                     ),
