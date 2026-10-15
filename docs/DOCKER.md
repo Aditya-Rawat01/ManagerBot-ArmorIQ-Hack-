@@ -30,9 +30,12 @@ docker compose down           # stop; the pgdata volume (database) is kept
 ```
 
 Expected: both `/health` endpoints return `200 {"status":"ok",...}`, the web
-app loads with its API health indicator green. MCP endpoints answer `401`
-without a bearer token until `TOOLSERVER_BEARER_*` are set in `.env` (the
-scaffold fails closed — that is correct behavior, not an error).
+app loads with its API health indicator green. All published ports bind to
+`127.0.0.1` only, so the stack (including the MCP tool server) is not
+reachable from the local network. MCP endpoints answer `503`
+(`endpoint_not_configured`) until `TOOLSERVER_BEARER_*` are set in `.env`, and
+`401` without a valid bearer token after that (the scaffold fails closed —
+that is correct behavior, not an error).
 
 ## 3. Daily commands
 
@@ -69,12 +72,15 @@ every container:
 | `APP_ENV`, `LOG_LEVEL`, `PORT` | ✔ | ✔ | — | — | — | `APP_ENV=test` only |
 | `SESSION_SECRET`, `CTX_SECRET`, `DEMO_PASSCODE`, `ADMIN_TOKEN` | ✔ | `CTX_SECRET` ✔ | — | — | — | — |
 | `CORS_ALLOWED_ORIGINS` | ✔ | — | — | — | — | — |
+| `ARMORIQ_*`, `TOKEN_VALIDITY_S`, `APPROVAL_TIMEOUT_MS` | ✔ only | — | — | — | — | — |
+| `PERSONA_*_EMAIL`, `SLACK_USER_*_ID`, `SLACK_*` tokens and IDs | ✔ only | — | — | — | — | — |
+| `ANTHROPIC_API_KEY`, `LLM_MODEL`, `TOOLSERVER_BASE_URL` | ✔ only | — | — | — | — | — |
 | `TOOLSERVER_BEARER_MEMORY` / `_WORKSPACE` | — | ✔ | — | — | — | — |
-| `MCP_ALLOWED_HOSTS` (compose default adds `toolserver:8100`) | — | ✔ | — | — | — | — |
+| `MCP_ALLOWED_HOSTS` (fixed in compose: `toolserver:8100`, `localhost:8100`, `127.0.0.1:8100`) | — | ✔ | — | — | — | — |
 | `MCP_ENABLE_DIAGNOSTIC_TOOLS` (default `true` locally) | — | ✔ | — | — | — | — |
-| `DATABASE_URL_BACKEND` | ✔ only | — | — | — | — | — |
-| `DATABASE_URL_TOOLSERVER` | — | ✔ only | — | — | — | — |
-| `DATABASE_URL_MIGRATE` | — | — | — | — | ✔ only | — |
+| `DATABASE_URL_BACKEND` (empty until P2-01) | ✔ only | — | — | — | — | — |
+| `DATABASE_URL_TOOLSERVER` (empty until P2-01) | — | ✔ only | — | — | — | — |
+| `DATABASE_URL_MIGRATE` (defaults to the local owner account) | — | — | — | — | ✔ only | — |
 | `POSTGRES_USER` / `PASSWORD` / `DB` (local-only) | — | — | — | ✔ | — | — |
 | `VITE_API_BASE_URL` (public, no secrets) | — | — | ✔ | — | — | — |
 
@@ -99,15 +105,19 @@ back needs a security decision with reviewer `samarth-chawla`.
   grant behavior must still be proven on Neon itself).
 - Port bound to `127.0.0.1:5432` only; data persists in the named volume
   `pgdata` across `down`.
-- Default DSNs point at it:
-  `postgresql://proxylead:proxylead-local-only@db:5432/proxylead`
-  (override any of `POSTGRES_*` / `DATABASE_URL_*` in `.env`; keep the three
-  role DSNs consistent).
-- `migrate` is the only `DATABASE_URL_MIGRATE` holder. Until P2-01 adds
-  `scripts/migrate.py`, `docker compose run --rm migrate` fails with "no
-  such file" — pending integration, not a bug. (Follow-up for P2-01: the
-  migrate container reuses the tool-server image, which does not COPY
-  `scripts/` yet.)
+- Only `migrate` defaults to it, as the local owner account:
+  `postgresql://proxylead:proxylead-local-only@db:5432/proxylead`.
+- `api` and `toolserver` get **no** database DSN by default. P2-01 creates the
+  separate backend and toolserver roles in its migrations (ADR-028); then set
+  `DATABASE_URL_BACKEND` / `DATABASE_URL_TOOLSERVER` in `.env` to those roles.
+  Never give them the owner account: the backend's denial on protected tables
+  (PRD §8.1) would no longer be exercised locally.
+- `migrate` is the only `DATABASE_URL_MIGRATE` holder. It mounts `./scripts`
+  read-only (the tool-server image does not contain `scripts/`). Until P2-01
+  adds `scripts/migrate.py`, `docker compose run --rm migrate` exits 1 with
+  "scripts/migrate.py not found ... No migrations ran." That is the pending
+  integration, not a success. P2-01 also adds its `migrations/` mount and the
+  driver pin in the `toolserver` extra (ADR-028).
 
 Safe reset (destroys local dev data — never run against shared infrastructure):
 
@@ -119,7 +129,8 @@ docker compose down -v   # removes pgdata too
 
 Only when authorized (never default): set `DATABASE_URL_BACKEND`,
 `DATABASE_URL_TOOLSERVER`, and (operator only) `DATABASE_URL_MIGRATE` in
-`.env` to the Neon role DSNs. The `db` service still starts but is simply
+`.env` to the Neon role DSNs. A set `DATABASE_URL_MIGRATE` replaces the local
+default, so `docker compose run --rm migrate` then targets Neon. The `db` service still starts but is simply
 unused. Grant checks (`scripts/verify_db_grants.py`, P2-01) must pass on
 Neon regardless of local results.
 
@@ -149,7 +160,8 @@ All run as non-root (`appuser` / `node` / `devuser`; verify with
 - **`curl.exe` quoting:** PowerShell mangles inline `-d '{json}'` (server
   sees a parse error — a client artifact). Use `--data @file.json` or Git Bash.
 - **Port conflicts:** another local Postgres/API already on 5432/8000/8100/
-  5173 — stop it or adjust the left side of the `ports:` mapping.
+  5173 — stop it or adjust the host port in the `ports:` mapping (keep the
+  `127.0.0.1:` prefix).
 - **Stale `node_modules`:** the web/dev anonymous volumes freeze the
   dependency tree at first run. After `package-lock.json` changes:
   `docker compose down -v` (or targeted volume remove) then `up --build`.
