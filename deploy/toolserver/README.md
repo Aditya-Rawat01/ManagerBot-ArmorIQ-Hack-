@@ -36,7 +36,7 @@ docker build -f deploy/toolserver/Dockerfile -t proxylead-toolserver:dev .
 What the Dockerfile does (`deploy/toolserver/Dockerfile`):
 
 - `FROM python:3.12-slim` (R-81: pinned Python 3.12).
-- Copies `pyproject.toml`, `apps/`, `services/` and runs
+- Copies `pyproject.toml` and `services/` only (no API or web source) and runs
   `pip install --no-cache-dir ".[toolserver]"` — the toolserver extra only,
   matching the CI `toolserver` job isolation (`armoriq-sdk`, `anthropic`,
   `slack-bolt` are **not** installed; verified in §4).
@@ -47,10 +47,12 @@ What the Dockerfile does (`deploy/toolserver/Dockerfile`):
   the `JSONArgsRecommended` build warning is accepted deliberately — exec-form
   `CMD` cannot expand `PORT`).
 - Bakes in no secrets: image `Env` is only `PATH`/`LANG`/Python-build vars
-  plus non-secret defaults (`PORT=8100`); there is no `.env` in `/app`
-  (verified in §4). Root `.dockerignore` keeps `.env`, `.venv`,
-  `node_modules/`, `research/`, `.git/`, and local journals out of the
-  context (ADR-029).
+  plus non-secret defaults (`PORT=8100`, `MCP_ENABLE_DIAGNOSTIC_TOOLS=false`);
+  there is no `.env` in `/app` (verified in §4). Root `.dockerignore` keeps
+  `.env*` files and `node_modules/` at any depth, `.venv`, `.git/`, and local
+  journals out of the context (ADR-029).
+- Diagnostic ping tools are **off by default** in the image. Only local
+  compose opts in (`docs/DOCKER.md`); Render keeps them off.
 - The FastEmbed model is **not** downloaded at build time. Retrieval lands in
   P2-05, which adds the build-time model preparation step there.
 
