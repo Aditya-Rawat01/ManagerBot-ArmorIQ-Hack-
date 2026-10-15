@@ -272,7 +272,7 @@ def record_step_decision(
             [plan_id, step_index],
             ("open", "planned"),
             f"plan step {plan_id}:{step_index}",
-            touch_updated_at=True,
+            touch_updated_at=False,  # plan_steps has no updated_at column (0004)
         )
 
 
@@ -436,7 +436,7 @@ def record_execution_ref(
                     [plan_id, step_index],
                     ("decided",),
                     f"plan step {plan_id}:{step_index}",
-                    touch_updated_at=True,
+                    touch_updated_at=False,  # plan_steps has no updated_at column (0004)
                 )
 
 

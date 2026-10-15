@@ -7,21 +7,31 @@ or fallback for tool-server or migration credentials, so a caller cannot
 substitute them by accident. ``services/audit`` writers receive the
 :class:`AuditDatabase` protocol, which keeps unit tests offline.
 
-Role defaults (migrations/0005_roles_grants.sql) already set a 10 s statement
-timeout for the backend role; the pool repeats it per connection so the bound
-holds even where role settings do not apply. Neon connections require
-``sslmode=require`` in the DSN (operator procedure in migrations/README.md).
+Statement timeout: the operator sets it on the backend LOGIN user
+(migrations/README.md step 4; settings on the NOLOGIN group role are not
+inherited), and every transaction repeats it with ``SET LOCAL``. The libpq
+``options`` startup parameter is deliberately not used: Neon's pooled
+(``-pooler``) endpoint rejects it. JSON payloads (``dict``) are sent as
+``jsonb`` (psycopg 3 does not adapt ``dict`` by default). Neon connections
+require ``sslmode=require`` in the DSN.
 """
 
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Protocol
 
+from psycopg import Connection
+from psycopg.types.json import JsonbDumper
 from psycopg_pool import ConnectionPool
 
 STATEMENT_TIMEOUT = "10s"
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 5
+
+
+def _configure(connection: Connection) -> None:
+    """Per-connection setup: send Python dicts as jsonb (audit payloads)."""
+    connection.adapters.register_dumper(dict, JsonbDumper)
 
 
 class BackendDbNotConfiguredError(Exception):
@@ -62,7 +72,7 @@ class BackendDatabase:
             min_size=_POOL_MIN_SIZE,
             max_size=_POOL_MAX_SIZE,
             open=False,
-            kwargs={"options": f"-c statement_timeout={STATEMENT_TIMEOUT}"},
+            configure=_configure,
         )
         self._opened = False
 
@@ -82,6 +92,9 @@ class BackendDatabase:
         self.open()
         with self._pool.connection() as connection, connection.cursor() as cursor:
             try:
+                # Bound every statement even where the role setting is missing;
+                # SET LOCAL also works through Neon's pooled endpoint.
+                cursor.execute(f"SET LOCAL statement_timeout = '{STATEMENT_TIMEOUT}'")
                 yield cursor  # type: ignore[misc]
             except Exception:
                 connection.rollback()

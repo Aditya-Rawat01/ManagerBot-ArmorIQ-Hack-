@@ -763,3 +763,52 @@ def test_live_backend_role_connectivity_and_denial() -> None:
             cursor.execute("SELECT * FROM team_notes LIMIT 1")
     finally:
         db.close()
+
+
+# --- live write round trip (opt-in; writes permanent append-only rows) --------
+
+DB_WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
+needs_live_write = pytest.mark.skipif(
+    not (LIVE_DSN and DB_WRITE_TESTS),
+    reason="needs DATABASE_URL_BACKEND and PROXYLEAD_DB_WRITE_TESTS=1 "
+    "(writes permanent append-only audit rows: local database only)",
+)
+
+
+@needs_live_write
+def test_live_write_round_trip() -> None:
+    """Real Postgres: catches SQL/column and parameter-adaptation errors that
+    the offline FakeCursor cannot (e.g. dict payloads, missing columns).
+    Needs the seeded workspace and members (P2-03 ingestion) on this database."""
+    import uuid
+
+    ctx = _ctx().model_copy(
+        update={
+            "request_id": f"test-req-{uuid.uuid4().hex[:12]}",
+            "received_at": datetime.now(UTC),
+            # Seeded by the P2-03 ingestion (ADR-021): run it on this database first.
+            "workspace_id": "workspace-primary",
+        }
+    )
+    db = BackendDatabase(LIVE_DSN)
+    try:
+        assert create_request(db, ctx) == ctx.request_id
+        assert create_request(db, ctx) == ctx.request_id  # replay is a no-op
+        plan_id = record_plan(db, request_id=ctx.request_id, trace_id=ctx.trace_id, plan=_plan())
+        record_step_decision(
+            db,
+            request_id=ctx.request_id,
+            trace_id=ctx.trace_id,
+            plan_id=plan_id,
+            step_index=0,
+            outcome=_Outcome(_decision()),
+        )
+        view = request_status(db, ctx.request_id, "m-sam")
+        assert view.plan_ids == (plan_id,)
+        assert view.requester_member_id == "m-sam"
+        with pytest.raises(AuditNotAuthorizedError):
+            request_status(db, ctx.request_id, "m-priya")
+        event_types = [entry.event_type for entry in timeline(db, ctx.request_id, _maya())]
+        assert "request_received" in event_types
+    finally:
+        db.close()
