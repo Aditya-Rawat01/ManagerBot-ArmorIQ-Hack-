@@ -423,3 +423,22 @@ def test__offline_fake_slack_failed_notice_post_is_recorded() -> None:
     assert record.notice_posted is False
     failed = [n for n in db.attempts("private_response_notice") if n["status"] == "failed"]
     assert [n["error_class"] for n in failed] == ["RuntimeError"]
+
+
+# --- I1: notices carry team tier, never the answer's elevated tier ----------
+
+
+@pytest.mark.parametrize("fail_dm", [False, True])
+def test__offline_fake_slack_notice_records_team_tier(fail_dm: bool) -> None:
+    sender, db = FakeSender(fail_dm=fail_dm), AuditSim()
+    deliver(_ctx(), _answer("secret"), DataTier.RESTRICTED, sender=sender, db=db)
+    notices = db.attempts()
+    assert notices, "the notice attempt must be audited"
+    assert {n["tier_delivered"] for n in notices} == {"team"}
+    # The answer's own delivery event keeps the true (restricted) tier.
+    answer_tiers = {
+        e["payload"]["tier_delivered"]  # type: ignore[index]
+        for e in db.events
+        if e["type"] in ("delivery_succeeded", "delivery_failed")
+    }
+    assert answer_tiers == {"restricted"}

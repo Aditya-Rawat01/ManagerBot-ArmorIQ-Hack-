@@ -197,11 +197,14 @@ def test__offline_fake_slack_hold_no_store_refuses() -> None:
         notify_hold(_ctx(), _approval(), sender=FakeSender(), db=None, members=_members())
 
 
-def test__offline_fake_slack_hold_records_confidential_tier_metadata() -> None:
+def test__offline_fake_slack_hold_records_team_tier_not_held_tool_tier() -> None:
     sender, db = FakeSender(), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
-    # Labels the held action's tier (metadata about that tier, not its content).
-    assert record.tier_delivered is DataTier.CONFIDENTIAL
+    # The held tool is confidential, but the DM carries metadata only: the
+    # audit evidence must not claim confidential content went to Maya.
+    assert record.tier_delivered is DataTier.TEAM
+    assert {a["tier_delivered"] for a in db.attempts("hold_notice")} == {"team"}
+    assert "confidential" not in str(db.attempts())
 
 
 # --- B1: the HOLD DM never marks the request delivered ----------------------

@@ -61,7 +61,6 @@ from services.contracts import (
     PersonaKey,
     RequestContext,
 )
-from services.contracts.tools import TOOL_CATALOG
 
 GENERIC_THREAD_NOTICE = "I sent you a private response."
 DM_FAILURE_NOTICE = "I couldn't deliver that privately. Please send me a direct message."
@@ -233,7 +232,9 @@ def _notice_event(
 
     Metadata only (purpose, channel, recipient, status, error class) — never
     the message text. Writes no ``delivery_events`` row and never touches
-    ``plans``. Returns False when the audit write itself fails.
+    ``plans``. The tier is always ``team``: a fixed notice or the HOLD DM
+    carries no elevated content, whatever tier the answer or the held tool
+    has. Returns False when the audit write itself fails.
     """
     try:
         append_event(
@@ -248,6 +249,7 @@ def _notice_event(
                     "purpose": purpose,
                     "channel": channel.value,
                     "recipient_member_id": recipient_member_id,
+                    "tier_delivered": DataTier.TEAM.value,
                     "status": status,
                     "error_class": error_class,
                 },
@@ -588,13 +590,12 @@ def notify_hold(
     the FIXED console base URL. No query text, excerpts, answers, titles,
     emails, tokens, approve buttons, or deep links (D-22 open — the exact
     console page stays pending, so only the base URL is linked).
-    The recorded tier labels the *held action's* tier (metadata about that
-    tier, never content of that tier).
+    The recorded tier is ``team``: the DM carries metadata only, never
+    content of the held tool's tier (the held tool is on the HOLD record).
     """
     if db is None:
         raise DeliveryError("no audit store: refusing undocumented delivery")
     maya_member_id, maya_slack_id = _maya_slack_id(members)
-    tool_tier = TOOL_CATALOG[approval.tool].tier or DataTier.TEAM
     text = (
         "ProxyLead needs your review.\n"
         f"Request {ctx.request_id} from {ctx.requester.persona.value} "
@@ -625,7 +626,7 @@ def notify_hold(
         request_id=ctx.request_id,
         channel=DeliveryChannel.SLACK_DM,
         recipient_member_id=maya_member_id,
-        tier_delivered=tool_tier,
+        tier_delivered=DataTier.TEAM,
         status="delivered" if sent else "failed",
         error_class=error,
     )
