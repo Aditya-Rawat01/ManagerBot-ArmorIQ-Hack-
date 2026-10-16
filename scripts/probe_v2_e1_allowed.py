@@ -100,6 +100,9 @@ _ATTEMPTS_SQL = (
 # Only the gateway's own logger is shown (request_id, jti, ledger reference,
 # exception class): never the root, SDK, or httpx loggers.
 GATEWAY_LOGGER = "services.authorization.armoriq_gateway"
+# Driver/pool loggers muted during the ledger lookup: psycopg_pool's connect
+# warnings quote the libpq error, which names the Neon host and role.
+QUIET_DB_LOGGERS = ("psycopg", "psycopg.pool")
 
 
 def load_settings() -> Any:
@@ -176,6 +179,19 @@ def gateway_logs_to_stderr() -> Iterator[None]:
     finally:
         gateway_logger.removeHandler(handler)
         gateway_logger.setLevel(previous_level)
+
+
+@contextlib.contextmanager
+def quiet_db_logs() -> Iterator[None]:
+    """Mute `QUIET_DB_LOGGERS` for the block (levels restored afterwards)."""
+    saved = [(logging.getLogger(name), logging.getLogger(name).level) for name in QUIET_DB_LOGGERS]
+    for db_logger, _ in saved:
+        db_logger.setLevel(logging.CRITICAL + 1)
+    try:
+        yield
+    finally:
+        for db_logger, level in saved:
+            db_logger.setLevel(level)
 
 
 def summarize_value(value: Any, depth: int = 0) -> Any:
@@ -402,31 +418,20 @@ def _empty_ledger_report(lookup: str) -> dict[str, Any]:
     }
 
 
-def correlate_ledger(
-    dsn: str | None,
+def _query_ledger(
+    dsn: str,
     run: RunIdentifiers,
-    *,
-    lookup_factory: Callable[[str], Any] | None = None,
-) -> dict[str, Any]:
-    """Find this run's ledger row and check it against the run.
-
-    Lookup by jti; when the gateway returned no jti (no invocation record)
-    or no row has it, fall back to `request_id` (unique per run). Attempt
-    rows (`credential_id`, verification outcome) are fetched by jti or
-    request_id. `correlated` is True only when one row matches every
-    identifier of this run (`ledger_mismatches` is empty). Output holds the
-    allow-listed `LEDGER_FIELDS` / `ATTEMPT_FIELDS` only: never arguments,
-    hashes, or the DSN.
-    """
-    if not dsn:
-        return _empty_ledger_report("unavailable (no DATABASE_URL_TOOLSERVER)")
-    report = _empty_ledger_report("not started")
-    factory = lookup_factory or NeonLedgerLookup
+    factory: Callable[[str], Any],
+    report: dict[str, Any],
+) -> Mapping[str, Any] | None:
+    """Fill `report` (lookup, rows_by_request_id, attempts); return the row to
+    check, if exactly one was found. Errors are reported by class name only."""
     row: Mapping[str, Any] | None = None
     try:
         lookup = factory(dsn)
     except Exception as exc:
-        return _empty_ledger_report(f"lookup error ({type(exc).__name__})")
+        report["lookup"] = f"lookup error ({type(exc).__name__})"
+        return None
     try:
         steps: list[str] = []
         try:
@@ -452,6 +457,31 @@ def correlate_ledger(
     finally:
         with contextlib.suppress(Exception):
             lookup.close()
+    return row
+
+
+def correlate_ledger(
+    dsn: str | None,
+    run: RunIdentifiers,
+    *,
+    lookup_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Find this run's ledger row and check it against the run.
+
+    Lookup by jti; when the gateway returned no jti (no invocation record)
+    or no row has it, fall back to `request_id` (unique per run). Attempt
+    rows (`credential_id`, verification outcome) are fetched by jti or
+    request_id. `correlated` is True only when one row matches every
+    identifier of this run (`ledger_mismatches` is empty). Output holds the
+    allow-listed `LEDGER_FIELDS` / `ATTEMPT_FIELDS` only: never arguments,
+    hashes, or the DSN.
+    """
+    if not dsn:
+        return _empty_ledger_report("unavailable (no DATABASE_URL_TOOLSERVER)")
+    report = _empty_ledger_report("not started")
+    # Pool creation, queries, and close all run muted (M1: no host/role output).
+    with quiet_db_logs():
+        row = _query_ledger(dsn, run, lookup_factory or NeonLedgerLookup, report)
     if row is not None:
         report["row"] = safe_fields(row, LEDGER_FIELDS)
         report["mismatches"] = ledger_mismatches(row, run)

@@ -533,6 +533,33 @@ def test_correlate_ledger_reports_attempts_safely__offline_fake_ledger() -> None
     assert "requester_member_id" not in attempt
 
 
+def test_ledger_lookup_mutes_driver_logs__offline_fake_ledger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """M1: psycopg/psycopg_pool connect warnings (Neon host, role) never print."""
+    import logging
+
+    leak = "connection to server at fake-host.invalid failed for user fake_role"
+
+    class NoisyLookup(_RowLookup):
+        def by_jti(self, jti: str) -> dict[str, object] | None:
+            logging.getLogger("psycopg.pool").warning("error connecting in 'pool-1': %s", leak)
+            logging.getLogger("psycopg").error("%s", leak)
+            return super().by_jti(jti)
+
+    def factory(dsn: str) -> NoisyLookup:
+        logging.getLogger("psycopg.pool").warning("pool start: %s", leak)
+        return NoisyLookup(_ledger_row())
+
+    levels = {name: logging.getLogger(name).level for name in probe.QUIET_DB_LOGGERS}
+    with caplog.at_level(logging.DEBUG):
+        report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=factory)
+    assert report["correlated"] is True
+    assert leak not in caplog.text
+    assert not [r for r in caplog.records if r.name.startswith("psycopg")]
+    assert {name: logging.getLogger(name).level for name in probe.QUIET_DB_LOGGERS} == levels
+
+
 def test_pass_candidate_needs_executed_and_correlated() -> None:
     executed = {"invocation_status": "executed"}
     assert probe.pass_candidate(executed, {"correlated": True})
