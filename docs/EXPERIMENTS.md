@@ -8,7 +8,7 @@ organization and the deployed HTTPS MCP endpoint. Mocks never pass a gate.
 
 | ID | Legacy ID | Question | Status | Evidence |
 |---|---|---|---|---|
-| E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **NOT RUN** | — |
+| E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **INCONCLUSIVE** (probe built, live run blocked — see §E1 record) | — |
 | E2 | E2 | Off-plan attempt: SDK-side vs hosted-proxy enforcement; underscore-field tampering | **NOT RUN** | — |
 | E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | — |
 | E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | — |
@@ -112,6 +112,46 @@ Handoff to P1-06 (`samarth-chawla`): this URL, commit `0e25b79`, and the bearer 
 a private channel only. The ArmorIQ agent registry still holds the placeholder URL until
 P1-06 attaches this endpoint. E1–E5 and E17 remain **NOT RUN**: nothing here is ArmorIQ
 evidence.
+
+## E1 record (P1-06, #7)
+
+### E1 — planned ArmorIQ call reaches the MCP tool server
+- Run at (UTC): 2026-10-16 (probe executed on a developer machine; no live invocation)
+- SDK version: 0.6.10 (pinned; probe reports the installed version at run time)
+- Agent / MCP names as registered: `proxylead` / `memory-mcp` (tool
+  `knowledge_search_team`; endpoint attach to the public URL still pending)
+- Endpoint URL (no secrets): `https://managerbot-armoriq-hack.onrender.com`
+  (P1-05 record; redeploy state with the P2-06 build unverified from here)
+- Plan / session IDs: none (no plan was created)
+- SDK return or exception (type + message, secrets removed): none — the probe
+  refused before any SDK, network, or database use:
+  `probe_v2_e1_allowed: missing required environment: ARMORIQ_API_KEY,
+  PERSONA_MAYA_EMAIL, CTX_SECRET` (exit 2; names only, no values)
+- Tool server request observed? Ledger row / jti: no (nothing was invoked)
+- Credential path observed: none (D-06 open; bearer vs `X-Armoriq-MCP-Auth`
+  still undetermined)
+- Outcome: INCONCLUSIVE
+- Enforcement layer (DecisionSource): none observed
+- Evidence (screenshots, log excerpts): probe source
+  `scripts/probe_v2_e1_allowed.py` (branch `feat/security-p1-06-e1-live-run`);
+  offline harness `tests/api/test_e1_probe.py` (13 passed); refusal output
+  above, captured without secrets
+- Fallback chosen / next action: no fallback (nothing failed; nothing ran).
+  To reach a verdict, an operator with private access runs, in order:
+  1. attach `memory-mcp` with the public URL in the ArmorIQ console and
+     confirm the deployed tool server runs the P2-06 build (`tools/list`
+     shows `knowledge_search_team`);
+  2. confirm the P2-03 seed record exists on shared Neon;
+  3. set `ARMORIQ_API_KEY`, `PERSONA_MAYA_EMAIL`, and the deployed
+     `CTX_SECRET` privately, then `python scripts/probe_v2_e1_allowed.py`;
+  4. correlate the printed `jti` via `Ledger.get_by_jti` (or set
+     `DATABASE_URL_TOOLSERVER` and let the probe do it), check the Render
+     request log and `tool_call_attempts`, and record the credential path
+     plus `_ctx` arrival (D-05/D-06);
+  5. replace this record with PASS/FAIL per PRD §11 step 9 (2-hour
+     diagnosis rule, then the documented fallback).
+
+INCONCLUSIVE — live E1 not executed because required credentials were unavailable.
 
 ## Result record template
 
