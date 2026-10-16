@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +51,22 @@ TOOLSERVER_ENV_FILE = REPO_ROOT / "services" / "toolserver" / ".env"
 E1_QUERY = "quokka Friday deploy freeze"
 E1_LIMIT = 5
 E1_TOOL = "knowledge_search_team"
+
+# Ledger columns the record may show (P2-07 ledger). Never `arguments_sha256`,
+# `prev_hash`, or `entry_hash`.
+LEDGER_FIELDS = (
+    "id",
+    "jti",
+    "request_id",
+    "trace_id",
+    "plan_id",
+    "step_index",
+    "tool_name",
+    "requester_member_id",
+    "validation_outcome",
+    "execution_status",
+    "created_at",
+)
 
 
 def load_settings() -> Any:
@@ -180,34 +198,116 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
     return described
 
 
-def correlate_ledger(jti: str | None, dsn: str | None) -> dict[str, Any]:
-    """Correlate `jti` via `Ledger.get_by_jti` when a toolserver DSN exists.
+@dataclass(frozen=True)
+class RunIdentifiers:
+    """What this run sent (or was told), to check the ledger row against."""
 
-    Returns a safe subset (no arguments, no hashes); never the DSN.
+    request_id: str
+    trace_id: str
+    plan_id: str
+    requester_member_id: str
+    jti: str | None
+    ledger_entry_id: str | None
+    step_index: int = 0
+    tool_name: str = E1_TOOL
+
+
+def safe_fields(row: Mapping[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    """Allow-listed columns only; timestamps as ISO text."""
+    safe: dict[str, Any] = {}
+    for key in fields:
+        if key in row:
+            value = row[key]
+            safe[key] = value.isoformat() if isinstance(value, datetime) else value
+    return safe
+
+
+def ledger_mismatches(row: Mapping[str, Any], run: RunIdentifiers) -> list[str]:
+    """Columns where the ledger row disagrees with this run (empty = correlated).
+
+    A value this run does not have (no jti, no `_meta.ledger_entry_id`) is a
+    mismatch too: correlation is never assumed.
     """
-    if not dsn:
-        return {"ledger": "unavailable (no DATABASE_URL_TOOLSERVER)"}
-    if not jti:
-        return {"ledger": "no jti to correlate"}
-    try:
+    pairs: tuple[tuple[str, str, object], ...] = (
+        ("id", "_meta.ledger_entry_id", run.ledger_entry_id),
+        ("jti", "jti", run.jti),
+        ("request_id", "ctx.request_id", run.request_id),
+        ("plan_id", "handle.plan_id", run.plan_id),
+        ("trace_id", "ctx.trace_id", run.trace_id),
+        ("requester_member_id", "ctx.requester.member_id", run.requester_member_id),
+        ("step_index", "step_index", run.step_index),
+        ("tool_name", "tool", run.tool_name),
+    )
+    mismatches: list[str] = []
+    for column, label, expected in pairs:
+        actual = row.get(column)
+        if expected is None or actual is None or str(actual) != str(expected):
+            mismatches.append(f"row.{column}={actual!r} vs {label}={expected!r}")
+    return mismatches
+
+
+class NeonLedgerLookup:
+    """Read-only ledger lookups over one private toolserver-role pool."""
+
+    def __init__(self, dsn: str) -> None:
+        from services.toolserver import db
         from services.toolserver.ledger import Ledger
 
-        ledger = Ledger(dsn)
+        self._pool = db.create_pool(dsn, min_size=1, max_size=1)
+        self._ledger = Ledger(pool=self._pool)
+
+    def by_jti(self, jti: str) -> dict[str, Any] | None:
+        return self._ledger.get_by_jti(jti)
+
+    def close(self) -> None:
+        self._pool.close()
+
+
+def _empty_ledger_report(lookup: str) -> dict[str, Any]:
+    return {"correlated": False, "lookup": lookup, "row": None, "mismatches": []}
+
+
+def correlate_ledger(
+    dsn: str | None,
+    run: RunIdentifiers,
+    *,
+    lookup_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Find this run's ledger row by jti and check it against the run.
+
+    `correlated` is True only when the row matches every identifier of this
+    run (`ledger_mismatches` is empty). Output holds the allow-listed
+    `LEDGER_FIELDS` only: never arguments, hashes, or the DSN.
+    """
+    if not dsn:
+        return _empty_ledger_report("unavailable (no DATABASE_URL_TOOLSERVER)")
+    if not run.jti:
+        return _empty_ledger_report("no jti to correlate")
+    factory = lookup_factory or NeonLedgerLookup
+    try:
+        lookup = factory(dsn)
         try:
-            row = ledger.get_by_jti(jti)
+            row = lookup.by_jti(run.jti)
         finally:
-            ledger.close()
+            lookup.close()
     except Exception as exc:
-        return {"ledger": f"lookup error ({type(exc).__name__})"}
+        return _empty_ledger_report(f"lookup error ({type(exc).__name__})")
     if row is None:
-        return {"ledger": "no row for jti"}
+        report = _empty_ledger_report("no row for jti")
+        report["mismatches"] = ["no ledger row for this run's jti"]
+        return report
+    mismatches = ledger_mismatches(row, run)
     return {
-        "ledger": {
-            key: row.get(key)
-            for key in ("id", "request_id", "tool_name", "execution_status", "created_at")
-            if key in row
-        }
+        "correlated": not mismatches,
+        "lookup": "by jti",
+        "row": safe_fields(row, LEDGER_FIELDS),
+        "mismatches": mismatches,
     }
+
+
+def pass_candidate(described: Mapping[str, Any], ledger: Mapping[str, Any]) -> bool:
+    """PASS needs both: the gateway reports EXECUTED and the ledger row correlates."""
+    return described.get("invocation_status") == "executed" and ledger.get("correlated") is True
 
 
 def build_record(
@@ -242,14 +342,19 @@ def build_record(
         f"ledger_entry_id={described['ledger_entry_id']} "
         f"error_code={described['error_code']} jti={described['jti']}",
         f"- Result shape (redacted): {result_shape}",
-        f"- Ledger correlation: {ledger}",
+        f"- Ledger correlation: correlated: {'true' if ledger['correlated'] else 'false'} "
+        f"(lookup: {ledger['lookup']})",
+        f"- Ledger row (safe subset): {ledger['row']}",
+        f"- Ledger mismatches: {ledger['mismatches'] or 'none'}",
+        "- PASS candidate (EXECUTED and correlated): "
+        f"{'yes' if pass_candidate(described, ledger) else 'no'}",
         "- Credential path observed: see deployed tool-server request log "
         "(bearer accepted vs 401) plus tool_call_attempts.credential_id",
         "- `_ctx` arrival: see deployed tool-server log (verified tool call "
         "vs invalid_context/context_expired/replay) — names of `_` keys only",
         f"- Assessment: {described['assessment']}",
-        "- Outcome: operator-assigned in docs/EXPERIMENTS.md "
-        "(PASS needs correlated request + ledger evidence)",
+        "- Outcome: operator-assigned in docs/EXPERIMENTS.md (PASS needs EXECUTED, "
+        "a correlated ledger row, and the matching Render request log)",
         "- Evidence: Render request log excerpt; Neon ledger/attempt rows "
         "(collected privately, secrets redacted)",
         "- Fallback chosen / next action: per PRD §11 step 9 on failure",
@@ -309,40 +414,44 @@ def build_maya_request(settings: Any) -> tuple[Any, Any]:
     return ctx, plan
 
 
-async def run_probe(settings: Any, *, ledger_dsn: str | None = None) -> tuple[int, str]:
-    """Execute the live probe; return (exit_code, record_text)."""
+async def run_probe(
+    settings: Any,
+    *,
+    ledger_dsn: str | None = None,
+    gateway: Any = None,
+    lookup_factory: Callable[[str], Any] | None = None,
+) -> tuple[int, str]:
+    """Execute the live probe; return (exit_code, record_text).
+
+    `gateway` and `lookup_factory` are seams for offline tests only; the
+    operator path builds the real gateway and the Neon ledger lookup.
+    """
     from services.authorization import armoriq_gateway
 
-    gateway = armoriq_gateway.ArmorIQGateway(settings)
+    if gateway is None:
+        gateway = armoriq_gateway.ArmorIQGateway(settings)
     ctx, plan = build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
     if handle.decision is not None:
-        described = describe_outcome(
-            type(
-                "Outcome",
-                (),
-                {"decision": handle.decision, "invocation": None},
-            )()
-        )
-        record = build_record(
-            run_at=datetime.now(UTC).isoformat(),
-            sdk_version=armoriq_gateway.SDK_VERSION,
-            agent_id=settings.armoriq_agent_id,
-            endpoint_url="(deployed tool-server URL; recorded by operator)",
+        outcome = armoriq_gateway.StepOutcome(decision=handle.decision)
+        described = describe_outcome(outcome)
+        payload = None
+        ledger = _empty_ledger_report("skipped (plan/mint did not reach invocation)")
+    else:
+        outcome = await gateway.invoke_step(handle, 0, ctx, plan)
+        described = describe_outcome(outcome)
+        payload = outcome.invocation.result if outcome.invocation is not None else None
+        run = RunIdentifiers(
             request_id=ctx.request_id,
-            masked_email=ctx.requester.masked_email,
+            trace_id=ctx.trace_id,
             plan_id=handle.plan_id,
-            armoriq_plan_id=handle.armoriq_plan_id,
-            query=E1_QUERY,
-            described=described,
-            result_shape=None,
-            ledger={"ledger": "plan/mint did not reach invocation"},
+            requester_member_id=ctx.requester.member_id,
+            jti=described["jti"],
+            ledger_entry_id=described["ledger_entry_id"],
         )
-        return 0, record
-    outcome = await gateway.invoke_step(handle, 0, ctx, plan)
-    described = describe_outcome(outcome)
-    payload = outcome.invocation.result if outcome.invocation is not None else None
-    ledger = correlate_ledger(described["jti"], ledger_dsn)
+        ledger = await asyncio.to_thread(
+            correlate_ledger, ledger_dsn, run, lookup_factory=lookup_factory
+        )
     record = build_record(
         run_at=datetime.now(UTC).isoformat(),
         sdk_version=armoriq_gateway.SDK_VERSION,

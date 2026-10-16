@@ -271,7 +271,7 @@ def test_build_record_is_complete_and_redacted() -> None:
         query=probe.E1_QUERY,
         described=described,
         result_shape={"hits": {"type": "list", "length": 1}},
-        ledger={"ledger": {"id": 7}},
+        ledger={"correlated": True, "lookup": "by jti", "row": {"id": 7}, "mismatches": []},
     )
     for field in (
         "Run at (UTC)",
@@ -282,7 +282,9 @@ def test_build_record_is_complete_and_redacted() -> None:
         "Tool server reached",
         "Invocation:",
         "Result shape",
-        "Ledger correlation",
+        "Ledger correlation: correlated: true",
+        "Ledger mismatches: none",
+        "PASS candidate (EXECUTED and correlated): yes",
         "Credential path",
         "`_ctx` arrival",
         "Assessment",
@@ -295,71 +297,136 @@ def test_build_record_is_complete_and_redacted() -> None:
     assert "m***@e***.com" in record
 
 
-def test_correlate_ledger_without_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert probe.correlate_ledger("jti-abc", None) == {
-        "ledger": "unavailable (no DATABASE_URL_TOOLSERVER)"
-    }
+RUN = probe.RunIdentifiers(
+    request_id="r1",
+    trace_id="t1",
+    plan_id="p-1",
+    requester_member_id="m-maya",
+    jti="jti-abc",
+    ledger_entry_id="7",
+)
 
 
-def test_correlate_ledger_reports_classes_not_secrets(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class BoomLedger:
-        def __init__(self, dsn: str) -> None:
-            self.dsn = dsn
-
-        def get_by_jti(self, jti: str) -> object:
-            raise ConnectionError("db down")
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr("services.toolserver.ledger.Ledger", BoomLedger, raising=False)
-    try:
-        result = probe.correlate_ledger("jti-abc", "postgresql://secret-dsn")
-    finally:
-        monkeypatch.undo()
-    assert result == {"ledger": "lookup error (ConnectionError)"}
-    assert "secret-dsn" not in str(result)
-
-
-def test_correlate_ledger_returns_safe_subset(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = {
+def _ledger_row(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
         "id": 7,
+        "jti": "jti-abc",
         "request_id": "r1",
+        "trace_id": "t1",
+        "plan_id": "p-1",
+        "step_index": 0,
         "tool_name": "knowledge_search_team",
+        "requester_member_id": "m-maya",
+        "validation_outcome": "accepted",
         "execution_status": "executed",
-        "created_at": "2026-10-16",
-        "arguments": {"query": "private"},
-        "entry_hash": "aa",
-        "prev_hash": "bb",
+        "created_at": NOW,
+        "arguments_sha256": "d" * 64,
+        "prev_hash": "b" * 64,
+        "entry_hash": "e" * 64,
     }
+    row.update(overrides)
+    return row
 
-    class RowLedger:
-        def __init__(self, dsn: str) -> None:
-            pass
 
-        def get_by_jti(self, jti: str) -> dict:
-            assert jti == "jti-abc"
-            return dict(row)
+class _RowLookup:
+    """Fake toolserver ledger returning fixed rows (offline, no Neon)."""
 
-        def close(self) -> None:
-            pass
+    def __init__(self, row: dict[str, object] | None) -> None:
+        self.row = row
+        self.closed = False
 
-    monkeypatch.setattr("services.toolserver.ledger.Ledger", RowLedger, raising=False)
-    try:
-        result = probe.correlate_ledger("jti-abc", "postgresql://x")
-    finally:
-        monkeypatch.undo()
-    assert result == {
-        "ledger": {
-            "id": 7,
-            "request_id": "r1",
-            "tool_name": "knowledge_search_team",
-            "execution_status": "executed",
-            "created_at": "2026-10-16",
+    def by_jti(self, jti: str) -> dict[str, object] | None:
+        return dict(self.row) if self.row is not None and self.row["jti"] == jti else None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_correlate_ledger_without_dsn() -> None:
+    report = probe.correlate_ledger(None, RUN)
+    assert report["correlated"] is False
+    assert report["lookup"] == "unavailable (no DATABASE_URL_TOOLSERVER)"
+
+
+def test_correlate_ledger_reports_classes_not_secrets__offline_fake_ledger() -> None:
+    def boom(dsn: str) -> object:
+        raise ConnectionError(f"db down at {dsn}")
+
+    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=boom)
+    assert report["correlated"] is False
+    assert report["lookup"] == "lookup error (ConnectionError)"
+    _assert_no_fake_values(str(report))
+
+
+def test_correlate_ledger_matches_every_identifier__offline_fake_ledger() -> None:
+    lookup = _RowLookup(_ledger_row())
+    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: lookup)
+    assert report["correlated"] is True
+    assert report["mismatches"] == []
+    assert lookup.closed
+    row = report["row"]
+    for key in (
+        "id",
+        "jti",
+        "plan_id",
+        "trace_id",
+        "step_index",
+        "requester_member_id",
+        "validation_outcome",
+        "execution_status",
+    ):
+        assert key in row
+    assert row["created_at"] == NOW.isoformat()
+    for hidden in ("arguments_sha256", "prev_hash", "entry_hash"):
+        assert hidden not in row
+    assert "d" * 64 not in str(report)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "run_changes", "expected"),
+    [
+        ({"id": 8}, {}, "row.id=8 vs _meta.ledger_entry_id='7'"),
+        ({"plan_id": "p-other"}, {}, "row.plan_id='p-other' vs handle.plan_id='p-1'"),
+        ({"request_id": "r-other"}, {}, "row.request_id='r-other' vs ctx.request_id='r1'"),
+        ({}, {"ledger_entry_id": None}, "row.id=7 vs _meta.ledger_entry_id=None"),
+    ],
+)
+def test_correlate_ledger_reports_mismatches__offline_fake_ledger(
+    overrides: dict[str, object], run_changes: dict[str, object], expected: str
+) -> None:
+    from dataclasses import replace
+
+    run = replace(RUN, **run_changes)  # type: ignore[arg-type]
+    lookup = _RowLookup(_ledger_row(**overrides))
+    report = probe.correlate_ledger(FAKE_DSN, run, lookup_factory=lambda dsn: lookup)
+    assert report["correlated"] is False
+    assert expected in report["mismatches"]
+
+
+def test_correlate_ledger_missing_row_is_not_correlated__offline_fake_ledger() -> None:
+    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: _RowLookup(None))
+    assert report["correlated"] is False
+    assert report["row"] is None
+    assert report["mismatches"]
+
+
+def test_pass_candidate_needs_executed_and_correlated() -> None:
+    executed = {"invocation_status": "executed"}
+    assert probe.pass_candidate(executed, {"correlated": True})
+    assert not probe.pass_candidate(executed, {"correlated": False})
+    assert not probe.pass_candidate({"invocation_status": "unknown"}, {"correlated": True})
+
+
+EXECUTED_RESULT = {
+    "content": [
+        {
+            "type": "text",
+            "text": '{"hits": [{"snippet": "private snippet text"}], "abstained": false}',
         }
-    }
+    ],
+    "isError": False,
+    "_meta": {"ledger_entry_id": "7"},
+}
 
 
 class _FakeSession:
@@ -388,8 +455,14 @@ class _FakeScope:
 
 
 class _FakeClient:
-    def __init__(self, calls: list) -> None:
+    """Fake ArmorIQ SDK client: returns `result` or raises `raises` on invoke."""
+
+    def __init__(
+        self, calls: list, result: object = None, raises: BaseException | None = None
+    ) -> None:
         self.calls = calls
+        self.result = EXECUTED_RESULT if result is None else result
+        self.raises = raises
 
     def for_user(self, email: str) -> _FakeScope:
         self.calls.append(("for_user", email))
@@ -404,7 +477,114 @@ class _FakeClient:
         options: object = None,
     ) -> object:
         self.calls.append(("invoke", mcp, action, dict(params or {})))
-        return SimpleNamespace(result={"_meta": {"ledger_entry_id": "7"}, "tool": action})
+        if self.raises is not None:
+            raise self.raises
+        return SimpleNamespace(result=self.result, status="success", verified=True)
+
+
+class _Signer:
+    """Fake `_ctx` signer that remembers what it signed (jti, plan_id, ...)."""
+
+    def __init__(self) -> None:
+        self.fields: list[dict[str, object]] = []
+
+    def __call__(self, fields: object, secret: str) -> str:
+        assert secret == FAKE_CTX_SECRET
+        signed = dict(fields)  # type: ignore[call-overload]
+        self.fields.append(signed)
+        return f"signed-{signed['jti']}"
+
+
+class _CtxLedgerLookup:
+    """Fake toolserver ledger: the row the tool server would write for the
+    signed `_ctx` (identity from the envelope), plus `overrides`."""
+
+    def __init__(self, signer: _Signer, **overrides: object) -> None:
+        self.signer = signer
+        self.overrides = overrides
+        self.calls: list[tuple[str, object]] = []
+        self.closed = False
+
+    def _row(self) -> dict[str, object]:
+        signed = self.signer.fields[-1]
+        row = _ledger_row(
+            jti=signed["jti"],
+            request_id=signed["request_id"],
+            trace_id=signed["trace_id"],
+            plan_id=signed["plan_id"],
+            step_index=signed["step_index"],
+            tool_name=signed["tool"],
+            requester_member_id=signed["requester_member_id"],
+        )
+        row.update(self.overrides)
+        return row
+
+    def by_jti(self, jti: str) -> dict[str, object] | None:
+        self.calls.append(("by_jti", jti))
+        if self.signer.fields and self.signer.fields[-1]["jti"] == jti:
+            return self._row()
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _probe_settings() -> Settings:
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="test",
+        armoriq_api_key=FAKE_API_KEY,
+        persona_maya_email=FAKE_EMAIL,
+        ctx_secret=FAKE_CTX_SECRET,
+    )
+
+
+def _run_probe_offline(
+    *,
+    result: object = None,
+    raises: BaseException | None = None,
+    ledger_overrides: dict[str, object] | None = None,
+    ledger_dsn: str | None = FAKE_DSN,
+) -> tuple[int, str, _CtxLedgerLookup, list]:
+    """`probe.run_probe` over the real gateway with a fake SDK and fake ledger."""
+    import asyncio
+
+    from services.authorization.armoriq_gateway import ArmorIQGateway
+
+    settings = _probe_settings()
+    calls: list = []
+    signer = _Signer()
+    client = _FakeClient(calls, result=result, raises=raises)
+    gateway = ArmorIQGateway(settings, client_factory=lambda member_id: client, ctx_signer=signer)
+    lookup = _CtxLedgerLookup(signer, **(ledger_overrides or {}))
+    code, record = asyncio.run(
+        probe.run_probe(
+            settings,
+            ledger_dsn=ledger_dsn,
+            gateway=gateway,
+            lookup_factory=lambda dsn: lookup,
+        )
+    )
+    return code, record, lookup, calls
+
+
+def test_run_probe_executed_and_correlated__offline_fake_sdk_and_ledger() -> None:
+    _, record, lookup, _ = _run_probe_offline()
+    assert "Ledger correlation: correlated: true (lookup: by jti)" in record
+    assert "Ledger mismatches: none" in record
+    assert "PASS candidate (EXECUTED and correlated): yes" in record
+    assert lookup.calls and lookup.closed
+    assert "arguments_sha256" not in record
+    assert "d" * 64 not in record
+    assert "private snippet text" not in record
+    _assert_no_fake_values(record)
+
+
+def test_run_probe_ledger_mismatch_is_not_pass__offline_fake_sdk_and_ledger() -> None:
+    _, record, _, _ = _run_probe_offline(ledger_overrides={"plan_id": "p-someone-else"})
+    assert "Ledger correlation: correlated: false" in record
+    assert "row.plan_id='p-someone-else'" in record
+    assert "PASS candidate (EXECUTED and correlated): no" in record
 
 
 def test_probe_drives_real_gateway_path() -> None:
