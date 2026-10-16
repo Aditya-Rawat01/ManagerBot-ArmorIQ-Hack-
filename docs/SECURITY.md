@@ -104,8 +104,8 @@ source, not live**: live behavior is confirmed or corrected only by E1–E4
 
 | Symbol | Location | Verified behavior |
 |---|---|---|
-| `build_plan_from_tool_calls(tool_calls, goal, tool_name_parser, default_mcp_name)` | `plan_builder.py:57` | Builds `{goal, steps: [{action, tool, mcp, params, description}]}`. Step identity is `(mcp, action)`; the gateway feeds one `ToolCall` per planned step in order. |
-| `default_tool_name_parser(default_mcp_name)` | `plan_builder.py:22` | Splits `mcp__action` / bare action names. Gateway passes bare tool names with an explicit per-step MCP. |
+| `build_plan_from_tool_calls(tool_calls, goal, tool_name_parser, default_mcp_name)` | `plan_builder.py:57` | Builds `{goal, steps: [{action, tool, mcp, params, description}]}`. Each step records `(mcp, action)`; the gateway feeds one `ToolCall` per planned step in order. At invoke time `client.invoke` finds the step by `action` alone (first match, `client.py:806`) and raises `IntentMismatchException` when none matches. |
+| `default_tool_name_parser(default_mcp_name)` | `plan_builder.py:22` | Splits `<mcp>__<action>` at the first `__`. A bare name is accepted only when the session has a `default_mcp_name`; otherwise it raises `ValueError` (`plan_builder.py:37`). The gateway sets no default (one plan can span `memory-mcp` and `workspace-mcp`), so it names every call `f"{step.mcp.value}__{step.tool.value}"`. The parser splits that back into the same `(mcp, action)` pair that `invoke_with_policy` sends. Corrected after an offline check: bare names made every real mint fail closed (`test_mint_plan_names_each_steps_mcp__offline_fake_sdk`). |
 | `hash_tool_calls(tool_calls)` | `plan_builder.py:81` | Canonical plan hash used for the session's same-plan cache. |
 | `ToolCall{name, args}` | `models.py:235` | The plan input shape. |
 
