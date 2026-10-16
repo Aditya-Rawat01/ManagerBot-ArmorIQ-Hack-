@@ -79,7 +79,11 @@ class CtxEnvelope(BaseModel):
     requester_member_id: str = Field(min_length=1)
     # Env-var NAME holding the member's ArmorIQ email (never the address itself).
     armoriq_member_email_ref: str = Field(min_length=1)
-    # Informational label only; ArmorIQ policy (not this label) authorizes tools.
+    # Requester role, signed by the backend from its trusted member record
+    # (never from message text). ArmorIQ policy decides first; after it, the
+    # tool server's member tier ceiling authorizes on this signed value
+    # (P2-08, SHARED_INTERFACES §6: manager -> restricted, senior ->
+    # confidential, junior -> team).
     app_role: Literal["manager", "senior", "junior"]
     plan_id: str = Field(min_length=1)
     step_index: int = Field(ge=0)
