@@ -87,6 +87,8 @@ services:
       ARMORIQ_MCP_WORKSPACE_NAME: ${ARMORIQ_MCP_WORKSPACE_NAME:-workspace-mcp}
       TOKEN_VALIDITY_S: ${TOKEN_VALIDITY_S:-1200}
       APPROVAL_TIMEOUT_MS: ${APPROVAL_TIMEOUT_MS:-900000}
+      # SDK telemetry upload stays off unless `.env` opts in (docs/SECURITY.md).
+      ARMORIQ_OBSERVABILITY: ${ARMORIQ_OBSERVABILITY:-false}
       # Trusted identity mapping (P1-03): web sign-in needs these.
       PERSONA_MAYA_EMAIL: ${PERSONA_MAYA_EMAIL:-}
       PERSONA_SAM_EMAIL: ${PERSONA_SAM_EMAIL:-}
