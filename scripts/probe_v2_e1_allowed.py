@@ -5,29 +5,44 @@ deployed MCP tool server — never the raw SDK, never a direct MCP call
 (ADR-018). Prints the E1 record with secrets redacted; the PASS/FAIL verdict
 is assigned by the operator in `docs/EXPERIMENTS.md`, never by this script.
 
-Usage (operator only, repository root, real values in the environment):
+Usage (operator only, repository root):
     python scripts/probe_v2_e1_allowed.py
 
-Required: ARMORIQ_API_KEY, PERSONA_MAYA_EMAIL, CTX_SECRET (must match the
-deployed tool server). Optional: ARMORIQ_AGENT_ID (default `proxylead`),
-DATABASE_URL_TOOLSERVER (ledger correlation via `Ledger.get_by_jti`).
+Configuration is read the way the API reads it: `apps.api.core.config.Settings`
+(process environment first, then the repo-root `.env` and `apps/api/.env`).
+Required: ARMORIQ_API_KEY, PERSONA_MAYA_EMAIL, CTX_SECRET (must equal the
+deployed tool server's). Optional: ARMORIQ_AGENT_ID (default `proxylead`).
+DATABASE_URL_TOOLSERVER (ledger correlation) is read from the environment or
+the same `.env` files, then `services/toolserver/.env`.
 
 Exit codes: 0 the probe ran to completion (any observed outcome); 1 an
-unexpected error stopped it; 2 prerequisites missing (names only, no values).
+unexpected error stopped it; 2 prerequisites missing (settings unreadable or
+required values unset: names only, never values).
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-REQUIRED_ENV = ("ARMORIQ_API_KEY", "PERSONA_MAYA_EMAIL", "CTX_SECRET")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+# (API `Settings` attribute, environment variable name) of each required value.
+REQUIRED_SETTINGS = (
+    ("armoriq_api_key", "ARMORIQ_API_KEY"),
+    ("persona_maya_email", "PERSONA_MAYA_EMAIL"),
+    ("ctx_secret", "CTX_SECRET"),
+)
+REQUIRED_ENV = tuple(name for _, name in REQUIRED_SETTINGS)
+# The tool server's own env file: read after the API's for DATABASE_URL_TOOLSERVER.
+TOOLSERVER_ENV_FILE = REPO_ROOT / "services" / "toolserver" / ".env"
 
 # E1 evidence record (P2-03 seed): the word `quokka` isolates this source for
 # keyword search; the freeze protocol gives the semantic match.
@@ -36,9 +51,57 @@ E1_LIMIT = 5
 E1_TOOL = "knowledge_search_team"
 
 
-def missing_env() -> list[str]:
-    """Names (never values) of required variables that are unset."""
-    return [name for name in REQUIRED_ENV if not os.environ.get(name)]
+def load_settings() -> Any:
+    """API settings exactly as the backend reads them (environment + `.env` files)."""
+    from apps.api.core.config import Settings
+
+    return Settings()
+
+
+def secret_text(value: Any) -> str:
+    """Plain text of a `SecretStr` (or str), for presence checks only; never printed."""
+    if value is None:
+        return ""
+    getter = getattr(value, "get_secret_value", None)
+    raw = getter() if callable(getter) else value
+    return raw if isinstance(raw, str) else ""
+
+
+def missing_settings(settings: Any) -> list[str]:
+    """Names (never values) of required settings that are unset or blank."""
+    return [
+        name
+        for attr, name in REQUIRED_SETTINGS
+        if not secret_text(getattr(settings, attr, None)).strip()
+    ]
+
+
+class _LedgerSettings(BaseSettings):
+    """DATABASE_URL_TOOLSERVER only (the API `Settings` has no such field)."""
+
+    model_config = SettingsConfigDict(env_file_encoding="utf-8", extra="ignore")
+
+    database_url_toolserver: SecretStr | None = None
+
+
+def _env_files(settings_cls: Any) -> tuple[Any, ...]:
+    configured = settings_cls.model_config.get("env_file")
+    if configured is None:
+        return ()
+    if isinstance(configured, (str, Path)):
+        return (configured,)
+    return tuple(configured)
+
+
+def load_ledger_dsn() -> str | None:
+    """DATABASE_URL_TOOLSERVER from the environment, else the API's `.env` files,
+    then `services/toolserver/.env` (a later file wins; the environment wins
+    over every file). Never printed."""
+    from apps.api.core.config import Settings
+
+    files = (*_env_files(Settings), TOOLSERVER_ENV_FILE)
+    value = _LedgerSettings(_env_file=files).database_url_toolserver  # type: ignore[call-arg]
+    return secret_text(value).strip() or None
 
 
 def summarize_value(value: Any, depth: int = 0) -> Any:
@@ -117,12 +180,11 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
     return described
 
 
-def correlate_ledger(jti: str | None) -> dict[str, Any]:
+def correlate_ledger(jti: str | None, dsn: str | None) -> dict[str, Any]:
     """Correlate `jti` via `Ledger.get_by_jti` when a toolserver DSN exists.
 
     Returns a safe subset (no arguments, no hashes); never the DSN.
     """
-    dsn = os.environ.get("DATABASE_URL_TOOLSERVER")
     if not dsn:
         return {"ledger": "unavailable (no DATABASE_URL_TOOLSERVER)"}
     if not jti:
@@ -247,12 +309,10 @@ def build_maya_request(settings: Any) -> tuple[Any, Any]:
     return ctx, plan
 
 
-async def run_probe() -> tuple[int, str]:
+async def run_probe(settings: Any, *, ledger_dsn: str | None = None) -> tuple[int, str]:
     """Execute the live probe; return (exit_code, record_text)."""
-    from apps.api.core.config import Settings
     from services.authorization import armoriq_gateway
 
-    settings = Settings()
     gateway = armoriq_gateway.ArmorIQGateway(settings)
     ctx, plan = build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
@@ -282,7 +342,7 @@ async def run_probe() -> tuple[int, str]:
     outcome = await gateway.invoke_step(handle, 0, ctx, plan)
     described = describe_outcome(outcome)
     payload = outcome.invocation.result if outcome.invocation is not None else None
-    ledger = correlate_ledger(described["jti"])
+    ledger = correlate_ledger(described["jti"], ledger_dsn)
     record = build_record(
         run_at=datetime.now(UTC).isoformat(),
         sdk_version=armoriq_gateway.SDK_VERSION,
@@ -306,15 +366,40 @@ def main(argv: list[str] | None = None) -> int:
     if argv:
         print("probe_v2_e1_allowed: no arguments accepted", file=sys.stderr)
         return 2
-    missing = missing_env()
+    try:
+        settings = load_settings()
+    except Exception as exc:
+        # Type name only: a validation message can echo the offending value.
+        print(
+            f"probe_v2_e1_allowed: settings could not be loaded ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+        return 2
+    missing = missing_settings(settings)
     if missing:
         print(
-            "probe_v2_e1_allowed: missing required environment: " + ", ".join(missing),
+            "probe_v2_e1_allowed: missing required settings (environment or .env): "
+            + ", ".join(missing),
             file=sys.stderr,
         )
         return 2
     try:
-        code, record = asyncio.run(run_probe())
+        ledger_dsn = load_ledger_dsn()
+    except Exception as exc:
+        print(
+            "probe_v2_e1_allowed: DATABASE_URL_TOOLSERVER could not be loaded "
+            f"({type(exc).__name__})",
+            file=sys.stderr,
+        )
+        return 2
+    if ledger_dsn is None:
+        print(
+            "probe_v2_e1_allowed: DATABASE_URL_TOOLSERVER is not set; "
+            "ledger correlation will be skipped",
+            file=sys.stderr,
+        )
+    try:
+        code, record = asyncio.run(run_probe(settings, ledger_dsn=ledger_dsn))
     except Exception as exc:
         print(
             f"probe_v2_e1_allowed: probe error ({type(exc).__name__})",

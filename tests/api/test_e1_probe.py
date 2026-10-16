@@ -1,16 +1,20 @@
 """Offline probe tests (no credentials, no network — never E1 evidence).
 
-Covers the probe harness only: env refusal, redaction, record completeness,
-and presentation of real gateway result shapes. Result classification itself
-lives in the gateway (tested in test_armoriq_gateway.py) and is not repeated
-here.
+Covers the probe harness only: settings refusal, redaction, record
+completeness, and presentation of real gateway result shapes. Result
+classification itself lives in the gateway (tested in
+test_armoriq_gateway.py) and is not repeated here. Every ArmorIQ client and
+ledger here is a fake; a guard fixture fails any test that would build the
+real SDK client.
 """
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from apps.api.core.config import Settings
 from scripts import probe_v2_e1_allowed as probe
 from services.authorization.armoriq_gateway import StepOutcome
 from services.contracts import (
@@ -23,6 +27,42 @@ from services.contracts import (
 )
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+
+# Fake values: none of them may ever appear in probe output.
+FAKE_API_KEY = "ak_fake_value_that_must_not_leak"
+FAKE_EMAIL = "maya.fake.person@example.com"
+FAKE_CTX_SECRET = "ctx-fake-secret-that-must-not-leak"
+FAKE_DSN = "postgresql://fake_role:fake_password@fake-host.invalid:5432/fakedb"
+FAKE_VALUES = (FAKE_API_KEY, FAKE_EMAIL, FAKE_CTX_SECRET, FAKE_DSN, "fake_password")
+
+
+@pytest.fixture(autouse=True)
+def _never_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Offline guard: building the real SDK client fails the test."""
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("offline test tried to build the real ArmorIQ client")
+
+    monkeypatch.setattr("services.authorization.armoriq_gateway.ArmorIQClient", _refuse)
+    monkeypatch.delenv("DATABASE_URL_TOOLSERVER", raising=False)
+
+
+def _use_env_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str | None = None
+) -> Path:
+    """Point `Settings` and the probe at temporary env files (never the real `.env`)."""
+    env_file = tmp_path / ".env"
+    if content is not None:
+        env_file.write_text(content, encoding="utf-8")
+    monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
+    monkeypatch.setattr(probe, "TOOLSERVER_ENV_FILE", tmp_path / "toolserver.env", raising=False)
+    return env_file
+
+
+def _assert_no_fake_values(*texts: str) -> None:
+    for text in texts:
+        for value in FAKE_VALUES:
+            assert value not in text
 
 
 def _decision(outcome: DecisionOutcome, source: DecisionSource) -> ArmorIQDecision:
@@ -51,17 +91,78 @@ def _outcome(
 
 
 def test_missing_env_refuses_with_names_only(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    for name in probe.REQUIRED_ENV:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ARMORIQ_API_KEY", "ak_test_value_that_must_not_leak")
+    _use_env_files(monkeypatch, tmp_path)
+    monkeypatch.setenv("ARMORIQ_API_KEY", FAKE_API_KEY)
+    called: list[object] = []
+    monkeypatch.setattr(probe, "run_probe", lambda *a, **k: called.append(a))
     assert probe.main([]) == 2
     captured = capsys.readouterr()
     assert "PERSONA_MAYA_EMAIL" in captured.err
     assert "CTX_SECRET" in captured.err
-    assert "ak_test_value_that_must_not_leak" not in captured.err
-    assert "ak_test_value_that_must_not_leak" not in captured.out
+    assert "ARMORIQ_API_KEY" not in captured.err
+    assert not called
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def test_main_reads_required_values_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I1: values in `.env` (not exported) satisfy the probe, as `Settings` reads them."""
+    _use_env_files(
+        monkeypatch,
+        tmp_path,
+        f"ARMORIQ_API_KEY={FAKE_API_KEY}\n"
+        f"PERSONA_MAYA_EMAIL={FAKE_EMAIL}\n"
+        f"CTX_SECRET={FAKE_CTX_SECRET}\n"
+        f"DATABASE_URL_TOOLSERVER={FAKE_DSN}\n",
+    )
+    for name in probe.REQUIRED_ENV:
+        monkeypatch.delenv(name, raising=False)
+    seen: dict[str, object] = {}
+
+    async def fake_run_probe(settings: object = None, **kwargs: object) -> tuple[int, str]:
+        seen["settings"] = settings
+        seen.update(kwargs)
+        return 0, "fake record"
+
+    monkeypatch.setattr(probe, "run_probe", fake_run_probe)
+    assert probe.main([]) == 0
+    settings = seen["settings"]
+    assert settings.armoriq_api_key.get_secret_value() == FAKE_API_KEY  # type: ignore[attr-defined]
+    assert settings.persona_maya_email.get_secret_value() == FAKE_EMAIL  # type: ignore[attr-defined]
+    assert settings.ctx_secret.get_secret_value() == FAKE_CTX_SECRET  # type: ignore[attr-defined]
+    assert seen["ledger_dsn"] == FAKE_DSN
+    captured = capsys.readouterr()
+    assert "missing" not in captured.err
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def test_ledger_dsn_from_toolserver_env_file_and_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_env_files(monkeypatch, tmp_path, "APP_ENV=test\n")
+    assert probe.load_ledger_dsn() is None
+    (tmp_path / "toolserver.env").write_text(f"DATABASE_URL_TOOLSERVER={FAKE_DSN}\n")
+    assert probe.load_ledger_dsn() == FAKE_DSN
+    monkeypatch.setenv("DATABASE_URL_TOOLSERVER", "postgresql://from-environment.invalid/db")
+    assert probe.load_ledger_dsn() == "postgresql://from-environment.invalid/db"
+
+
+def test_unreadable_settings_print_type_name_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_env_files(
+        monkeypatch,
+        tmp_path,
+        f"ARMORIQ_API_KEY={FAKE_API_KEY}\nTOKEN_VALIDITY_S=not-a-number-{FAKE_CTX_SECRET}\n",
+    )
+    assert probe.main([]) == 2
+    captured = capsys.readouterr()
+    assert "(ValidationError)" in captured.err
+    assert "not-a-number" not in captured.err
+    _assert_no_fake_values(captured.out, captured.err)
 
 
 def test_rejects_arguments() -> None:
@@ -195,8 +296,7 @@ def test_build_record_is_complete_and_redacted() -> None:
 
 
 def test_correlate_ledger_without_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DATABASE_URL_TOOLSERVER", raising=False)
-    assert probe.correlate_ledger("jti-abc") == {
+    assert probe.correlate_ledger("jti-abc", None) == {
         "ledger": "unavailable (no DATABASE_URL_TOOLSERVER)"
     }
 
@@ -215,9 +315,8 @@ def test_correlate_ledger_reports_classes_not_secrets(
             pass
 
     monkeypatch.setattr("services.toolserver.ledger.Ledger", BoomLedger, raising=False)
-    monkeypatch.setenv("DATABASE_URL_TOOLSERVER", "postgresql://secret-dsn")
     try:
-        result = probe.correlate_ledger("jti-abc")
+        result = probe.correlate_ledger("jti-abc", "postgresql://secret-dsn")
     finally:
         monkeypatch.undo()
     assert result == {"ledger": "lookup error (ConnectionError)"}
@@ -248,9 +347,8 @@ def test_correlate_ledger_returns_safe_subset(monkeypatch: pytest.MonkeyPatch) -
             pass
 
     monkeypatch.setattr("services.toolserver.ledger.Ledger", RowLedger, raising=False)
-    monkeypatch.setenv("DATABASE_URL_TOOLSERVER", "postgresql://x")
     try:
-        result = probe.correlate_ledger("jti-abc")
+        result = probe.correlate_ledger("jti-abc", "postgresql://x")
     finally:
         monkeypatch.undo()
     assert result == {
