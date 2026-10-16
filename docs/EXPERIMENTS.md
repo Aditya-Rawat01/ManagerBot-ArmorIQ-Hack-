@@ -153,6 +153,35 @@ evidence.
 
 INCONCLUSIVE — live E1 not executed because required credentials were unavailable.
 
+## E2 record (P1-07, #8) — NOT RUN
+
+Probe: `scripts/probe_v2_e2_offplan.py` (branch
+`feat/security-p1-07-e2-enforcement`, stacked on PR #72); offline harness
+`tests/api/test_e2_probe.py`. No live attempt has run; every row below is
+unfilled until an authorized operator runs the probe with private access
+(same three env vars as E1, plus `TOOLSERVER_BASE_URL` +
+`TOOLSERVER_BEARER_MEMORY` for the direct-call group and a prior live `jti`
+for the replay row).
+
+### E2 evidence rows (one per attempt)
+
+| attempt | expected | observed | enforcing layer | evidence reference |
+|---|---|---|---|---|
+| off-plan `knowledge_search_confidential` under a team-only plan | BLOCK `armoriq_sdk_plan_check` before any network call | not run | unknown | gateway log; Render log + ledger/attempt absence by request_id/jti |
+| off-plan `send_external_message` under a team-only plan | BLOCK `armoriq_sdk_plan_check` before any network call | not run | unknown | same as above |
+| direct proxy off-plan request bypassing the SDK check | not tested absent a verified shape | not tested | unknown | none (no verified direct-proxy shape in-tree) |
+| off-plan search with forbidden `tier` key | BLOCK before execution | not run | unknown | gateway log; server log trace_metadata |
+| off-plan search with forbidden `user_email` key | BLOCK before execution | not run | unknown | same as above |
+| off-plan search with forged `_approvals` / `_delegation_id` / `_policy_context` | BLOCK; forged `_` fields grant nothing | not run | unknown | same as above; stripping proven offline by P1-04 tests |
+| direct call, no `_ctx` | `invalid_context` | not run | unknown | response §4 code + Render log |
+| direct call, forged `_ctx` | `invalid_context` | not run | unknown | same as above |
+| replayed `jti` | `replay` with `original_entry_id` | pending (needs a prior live jti, e.g. from E1) | unknown | operator replays the E1 jti after a live E1 |
+
+- Server-side plan binding: not tested (no verified shape).
+- Zero ledger executions: unproven until the operator correlates each
+  request_id/jti via Render log + `Ledger.get_by_jti` + `tool_call_attempts`.
+- Outcome: NOT RUN.
+
 ## Result record template
 
 ```text
