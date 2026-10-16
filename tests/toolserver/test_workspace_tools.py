@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from fastapi.testclient import TestClient
@@ -425,7 +426,34 @@ FORBIDDEN_NETWORK_MODULES = frozenset(
         "httpx",
         "aiohttp",
         "websockets",
+        "_socket",
+        "ftplib",
+        "imaplib",
+        "poplib",
+        "xmlrpc",
+        "urllib3",
     }
+)
+WORKSPACE_MODULE = Path(__file__).resolve().parents[2] / "services/toolserver/tools_workspace.py"
+# Reviewed imports of tools_workspace.py (full dotted names). Adding one means
+# re-checking that it cannot reach the network from the honeypot path.
+ALLOWED_WORKSPACE_IMPORTS = frozenset(
+    {
+        "__future__",
+        "functools",
+        "hashlib",
+        "typing",
+        "anyio.to_thread",
+        "pydantic",
+        "services.contracts",
+        "services.contracts.tool_args",
+        "services.toolserver",
+        "services.toolserver.security",
+        "services.toolserver.tools_memory",
+    }
+)
+DYNAMIC_CODE_NAMES = frozenset(
+    {"__import__", "importlib", "import_module", "exec", "eval", "compile", "__builtins__"}
 )
 
 
@@ -458,15 +486,66 @@ def test_single_product_tool_type_and_disjoint_registries() -> None:
     assert set(memory) == set(tools_memory.PRODUCT_TOOLS)
 
 
-def test_honeypot_module_imports_no_network_client() -> None:
-    source = Path("services/toolserver/tools_workspace.py").read_text()
+def _module_imports(tree: ast.AST) -> set[str]:
+    """Full dotted names of every import (relative ones keep their dots)."""
     imports: set[str] = set()
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imports.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            imports.add(node.module.split(".")[0])
-    assert imports.isdisjoint(FORBIDDEN_NETWORK_MODULES), imports & FORBIDDEN_NETWORK_MODULES
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.add("." * node.level + (node.module or ""))
+    return imports
+
+
+def _dynamic_import_uses(tree: ast.AST) -> set[str]:
+    """Names/attributes that import or evaluate code at runtime."""
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in DYNAMIC_CODE_NAMES:
+            found.add(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in DYNAMIC_CODE_NAMES:
+            found.add(node.attr)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and any(word in node.value for word in ("importlib", "__import__"))
+        ):
+            found.add(repr(node.value))
+    return found
+
+
+def test_honeypot_module_imports_no_network_client() -> None:
+    """Static half of P2-10 §10: no network client, no dynamic import or
+    eval, and nothing outside a reviewed allowlist (a new import must be
+    reviewed here). Path resolved from this file, not the working directory."""
+    tree = ast.parse(WORKSPACE_MODULE.read_text(encoding="utf-8"))
+    imports = _module_imports(tree)
+    top_level = {name.split(".")[0] for name in imports}
+    assert top_level.isdisjoint(FORBIDDEN_NETWORK_MODULES), top_level & FORBIDDEN_NETWORK_MODULES
+    assert imports <= ALLOWED_WORKSPACE_IMPORTS, imports - ALLOWED_WORKSPACE_IMPORTS
+    assert not _dynamic_import_uses(tree)
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "import socket",
+        "from socket import create_connection",
+        "import urllib.request",
+        "import importlib",
+        "from importlib import import_module",
+        "__import__('socket')",
+        "getattr(__builtins__, '__import__')('socket')",
+        "importlib.import_module('ssl')",
+        "from . import tools_memory",
+        "import os",
+    ],
+)
+def test_import_scan_catches_network_and_dynamic_imports(snippet: str) -> None:
+    """The scan itself: each snippet appended to the real module is caught."""
+    tree = ast.parse(WORKSPACE_MODULE.read_text(encoding="utf-8") + "\n" + snippet + "\n")
+    imports = _module_imports(tree)
+    assert (imports - ALLOWED_WORKSPACE_IMPORTS) or _dynamic_import_uses(tree), snippet
 
 
 # --- send_external_message: offline ----------------------------------------------
@@ -629,21 +708,26 @@ def test_honeypot_sink_row_from_verified_ctx_offline(monkeypatch: pytest.MonkeyP
 
 @NEEDS_DB
 def test_honeypot_never_uses_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_socket = socket.socket
-    allowed_hosts = {"127.0.0.1", "::1", "localhost"}
+    """P2-10 §10 live: with socket construction, TCP connect, `connect_ex`,
+    UDP `sendto` and DNS all raising (only the database's own host name may
+    resolve, for a pool reconnect), the honeypot still completes its sink
+    write — exactly one row for this call — and attempts nothing else."""
+    from .test_tool_dispatch import LIVE_DSN
 
-    class GuardSocket(real_socket):  # type: ignore[valid-type, misc]
-        def connect(self, address: object, *args: object) -> object:
-            host = address[0] if isinstance(address, tuple) else address
-            if host not in allowed_hosts:
-                raise AssertionError(f"network use attempted: {host}")
-            return super().connect(address, *args)  # type: ignore[arg-type]
-
-    # Localhost DB traffic allowed; any other destination raises.
-    monkeypatch.setattr(socket, "socket", GuardSocket)
-    with live_client() as client:
-        message = call_honeypot(client)
-    assert message["result"]["isError"] is False
+    request_id, jti = new_id("req-nonet"), new_id("jti-nonet")
+    db_host = urlparse(LIVE_DSN).hostname
+    with (
+        live_client() as client,
+        network_forbidden(monkeypatch, allow_dns_host=db_host) as attempts,
+    ):
+        message = call_honeypot(client, request_id=request_id, jti=jti)
+    assert attempts == [], f"network use attempted: {attempts}"
+    ok_body(message)
+    assert live_rows(
+        "SELECT count(*) FROM public.egress_sink WHERE request_id = %s AND jti = %s",
+        (request_id, jti),
+    ) == [(1,)]
+    assert_live_executed_once(message, jti, WORKSPACE_HONEYPOT, request_id)
 
 
 # --- create_followup_task: offline -----------------------------------------------
