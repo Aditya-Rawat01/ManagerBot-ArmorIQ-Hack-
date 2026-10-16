@@ -100,6 +100,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     pool = db.create_pool(dsn)
                     ledger = Ledger(pool=pool)
+                    # DB warmup (Neon cold start): one cheap round trip on a
+                    # throwaway connection (not the pool: startup must not
+                    # consume pooled checkouts) so the first real call does
+                    # not pay the wake. Failure only logs (error class, never
+                    # the DSN); /health stays up and product tools fail closed
+                    # per call as before.
+                    try:
+                        import psycopg
+
+                        warm_conn = psycopg.connect(dsn, connect_timeout=10)
+                        try:
+                            warm_conn.execute("SELECT 1")
+                        finally:
+                            warm_conn.close()
+                    except Exception as warm_exc:
+                        logging.getLogger(__name__).error(
+                            "toolserver db warmup failed (%s)",
+                            type(warm_exc).__name__,
+                        )
                 except Exception as exc:
                     logging.getLogger(__name__).error(
                         "toolserver pool unavailable (%s); tools fail closed",
