@@ -11,6 +11,7 @@ keeps it (16 Oct 12:00); otherwise it is not registered.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import partial
@@ -24,9 +25,30 @@ from services.contracts.tool_args import MAX_MESSAGE_CHARS
 from services.toolserver import db
 from services.toolserver.security import VerifiedCall
 
+# Joins the parts of a scoped idempotency key (ASCII unit separator: never in
+# a workspace/member id, so ("a", "b\x1fc") and ("a\x1fb", "c") cannot collide).
+_KEY_SEPARATOR = "\x1f"
+
 
 class _NoDatabase(Exception):
     """No database pool is configured; product tools fail closed."""
+
+
+class _IdempotencyScopeMismatch(Exception):
+    """A conflicting row exists but not in this workspace/requester scope."""
+
+
+def scoped_idempotency_key(workspace_id: str, requester_member_id: str, key: str) -> str:
+    """The value stored in `tasks.idempotency_key` (hex SHA-256).
+
+    The column is globally UNIQUE (0004), so storing the caller's raw key
+    would let one requester's key collide with another's and return the
+    other requester's task. Scoping the stored value by the verified
+    workspace and requester makes a key unique per (workspace, requester)
+    without a migration; the raw key is never stored.
+    """
+    material = _KEY_SEPARATOR.join((workspace_id, requester_member_id, key))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 async def handle_send_external_message(
@@ -76,7 +98,10 @@ async def handle_create_followup_task(
     """Insert one follow-up task row. Ships only if D-17 keeps it (16 Oct
     12:00); removal is one registry line below. Requester and workspace come
     from the verified `_ctx`; owner/priority enums and the idempotency key
-    come from validated arguments. A repeated key returns the original row."""
+    come from validated arguments. The key is scoped to the verified
+    (workspace, requester): a repeat by the same requester returns that
+    requester's original row; another requester's identical key creates
+    their own task and never sees the first one."""
     from services.contracts import FollowupTaskResult
 
     if runtime.pool is None:
@@ -106,7 +131,7 @@ async def handle_create_followup_task(
 def _insert_followup_task(
     pool: Any,
     workspace_id: str,
-    requester_member_id: str | None,
+    requester_member_id: str,
     title: str,
     description: str,
     owner: str,
@@ -117,6 +142,7 @@ def _insert_followup_task(
     # m-<persona> ids, D-20): the seed creates the matching member rows, so
     # the FK holds wherever members were seeded. No lookup here — the
     # toolserver role cannot read the members table by design.
+    scoped_key = scoped_idempotency_key(workspace_id, requester_member_id, idempotency_key)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO public.tasks
@@ -131,17 +157,23 @@ def _insert_followup_task(
                 description,
                 owner,
                 priority,
-                idempotency_key,
+                scoped_key,
                 requester_member_id,
             ),
         )
         row = cur.fetchone()
-        if row is None:  # conflict: return the original row
+        if row is None:
+            # Replay by the same requester: return the stored row. The scope
+            # filters repeat what the hash already binds (defense in depth).
             cur.execute(
-                "SELECT id, title FROM public.tasks WHERE idempotency_key = %s",
-                (idempotency_key,),
+                """SELECT id, title FROM public.tasks
+                   WHERE idempotency_key = %s AND workspace_id = %s
+                     AND created_by_member_id IS NOT DISTINCT FROM %s""",
+                (scoped_key, workspace_id, requester_member_id),
             )
             row = cur.fetchone()
+            if row is None:
+                raise _IdempotencyScopeMismatch("conflicting task outside this scope")
         names = [d.name for d in cur.description or []]
         return dict(zip(names, row, strict=True))
 

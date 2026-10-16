@@ -6,17 +6,30 @@ time, never logged.
 """
 
 import ast
+import hashlib
 import json
+import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from services.contracts import ToolName
+from services.toolserver import main
+from services.toolserver.main import create_app
 from services.toolserver.tools_workspace import PRODUCT_TOOLS
 
+from .conftest import make_settings
 from .test_tool_dispatch import (
+    CTX_SECRET,
+    FAKE_DSN,
     NEEDS_DB,
+    FakeLedger,
     call,
     dev_client,
     live_client,
@@ -25,13 +38,199 @@ from .test_tool_dispatch import (
 )
 
 WORKSPACE_HONEYPOT = ToolName.SEND_EXTERNAL_MESSAGE.value
+FOLLOWUP = ToolName.CREATE_FOLLOWUP_TASK.value
 WORKSPACE_AUD = "workspace-mcp"
+WORKSPACE_TOKEN = "test-workspace-token"
+DEFAULT_WORKSPACE = "workspace-primary"
+
+# persona -> (member id, app role, email env-var NAME) as the seed creates them.
+PERSONAS: dict[str, tuple[str, str, str]] = {
+    "maya": ("m-maya", "manager", "PERSONA_MAYA_EMAIL"),
+    "sam": ("m-sam", "senior", "PERSONA_SAM_EMAIL"),
+    "priya": ("m-priya", "junior", "PERSONA_PRIYA_EMAIL"),
+}
 
 
-def workspace_ctx(tool: str = WORKSPACE_HONEYPOT, **overrides: object) -> str:
-    values: dict[str, object] = {"tool": tool, "aud": WORKSPACE_AUD}
+def workspace_ctx(
+    tool: str = WORKSPACE_HONEYPOT, *, persona: str = "sam", **overrides: object
+) -> str:
+    member, role, email_ref = PERSONAS[persona]
+    values: dict[str, object] = {
+        "tool": tool,
+        "aud": WORKSPACE_AUD,
+        "requester_member_id": member,
+        "app_role": role,
+        "armoriq_member_email_ref": email_ref,
+    }
     values.update(overrides)
     return make_ctx(**values)
+
+
+def scoped_key(workspace_id: str, member_id: str, key: str) -> str:
+    """Independent re-statement of the stored key (tools_workspace B1 fix)."""
+    return hashlib.sha256(f"{workspace_id}\x1f{member_id}\x1f{key}".encode()).hexdigest()
+
+
+def task_args(key: str, **overrides: object) -> dict[str, object]:
+    arguments: dict[str, object] = {
+        "title": "Follow up on freeze",
+        "description": "Confirm the freeze lifted",
+        "owner": "sam",
+        "priority": "high",
+        "idempotency_key": key,
+    }
+    arguments.update(overrides)
+    return arguments
+
+
+def call_followup(
+    client: TestClient, arguments: dict[str, object], *, persona: str = "sam", **ctx: object
+) -> dict:
+    return call(
+        client,
+        {**arguments, "_ctx": workspace_ctx(FOLLOWUP, persona=persona, **ctx)},
+        token=WORKSPACE_TOKEN,
+        path="/workspace/mcp",
+        tool=FOLLOWUP,
+    )
+
+
+def ok_body(message: dict) -> dict:
+    assert message["result"]["isError"] is False, message
+    return json.loads(message["result"]["content"][0]["text"])
+
+
+# --- offline database double ---------------------------------------------------
+
+_INSERT_SQL = re.compile(
+    r"INSERT INTO public\.(\w+)\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)(.*)", re.S | re.I
+)
+_SELECT_SQL = re.compile(r"SELECT (.+?) FROM public\.(\w+) WHERE (.+)", re.S | re.I)
+_FILTER = re.compile(r"(\w+)\s*(?:=|IS NOT DISTINCT FROM)\s*%s", re.I)
+_RETURNING = re.compile(r"RETURNING (.+)", re.S | re.I)
+# The UNIQUE column per table, as in 0004 (`tasks`) and 0012 (`egress_sink`).
+_UNIQUE_COLUMN = {"tasks": "idempotency_key", "egress_sink": "jti"}
+
+
+class FakeUniqueViolation(Exception):
+    """Stands in for psycopg's UniqueViolation (INSERT without ON CONFLICT)."""
+
+
+class TablePool:
+    """`ConnectionPool` double for the workspace handlers.
+
+    Records every statement and keeps in-memory `tasks` / `egress_sink`
+    tables: INSERT (unique column, `ON CONFLICT ... DO NOTHING`, RETURNING)
+    and SELECT with `col = %s` / `col IS NOT DISTINCT FROM %s` filters. It
+    interprets the SQL the handler actually sends, so a changed statement
+    (dropped filter, dropped ON CONFLICT, hard-coded value) changes the
+    outcome instead of passing silently. Never opens a socket.
+    """
+
+    def __init__(self) -> None:
+        self.statements: list[tuple[str, tuple[Any, ...]]] = []
+        self.tables: dict[str, list[dict[str, Any]]] = {"tasks": [], "egress_sink": []}
+        self._next_id = 1000
+
+    def close(self) -> None:
+        pass
+
+    @contextmanager
+    def connection(self) -> Iterator["_FakeConnection"]:
+        yield _FakeConnection(self)
+
+    def run(self, query: str, params: tuple[Any, ...]) -> tuple[list[str], tuple | None]:
+        text = " ".join(str(query).split())
+        self.statements.append((text, params))
+        if match := _INSERT_SQL.fullmatch(text):
+            return self._insert(*match.groups(), params)
+        if match := _SELECT_SQL.fullmatch(text):
+            return self._select(*match.groups(), params)
+        raise AssertionError(f"unexpected SQL: {text}")
+
+    def _insert(
+        self, table: str, columns: str, values: str, tail: str, params: tuple[Any, ...]
+    ) -> tuple[list[str], tuple | None]:
+        supplied = iter(params)
+        row: dict[str, Any] = {}
+        for name, value in zip(columns.split(","), values.split(","), strict=True):
+            value = value.strip()
+            row[name.strip()] = next(supplied) if value == "%s" else value.strip("'")
+        assert next(supplied, None) is None, "unused SQL parameters"
+        unique = _UNIQUE_COLUMN[table]
+        if row.get(unique) is not None and any(
+            existing.get(unique) == row[unique] for existing in self.tables[table]
+        ):
+            if "ON CONFLICT" in tail.upper():
+                return [], None  # DO NOTHING: RETURNING yields no row
+            raise FakeUniqueViolation(f"{table}.{unique}")
+        self._next_id += 1
+        row["id"] = self._next_id
+        self.tables[table].append(row)
+        returning = _RETURNING.search(tail)
+        if returning is None:
+            return [], None
+        names = [name.strip() for name in returning.group(1).split(",")]
+        return names, tuple(row.get(name) for name in names)
+
+    def _select(
+        self, columns: str, table: str, where: str, params: tuple[Any, ...]
+    ) -> tuple[list[str], tuple | None]:
+        names = [name.strip() for name in columns.split(",")]
+        filters = _FILTER.findall(where)
+        assert len(filters) == len(params), "every filter must be bound"
+        for row in self.tables[table]:
+            if all(row.get(column) == value for column, value in zip(filters, params, strict=True)):
+                return names, tuple(row.get(name) for name in names)
+        return names, None
+
+    def rows(self, table: str) -> list[dict[str, Any]]:
+        return list(self.tables[table])
+
+
+class _FakeCursor:
+    def __init__(self, pool: TablePool) -> None:
+        self._pool = pool
+        self._row: tuple | None = None
+        self.description: list[SimpleNamespace] | None = None
+
+    def __enter__(self) -> "_FakeCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
+        names, self._row = self._pool.run(query, tuple(params))
+        self.description = [SimpleNamespace(name=name) for name in names] or None
+
+    def fetchone(self) -> tuple | None:
+        return self._row
+
+
+class _FakeConnection:
+    def __init__(self, pool: TablePool) -> None:
+        self._pool = pool
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        yield
+
+    def execute(self, query: object, params: object = None) -> None:
+        """`SET LOCAL statement_timeout` from `db.transaction` (no-op)."""
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self._pool)
+
+
+def table_pool_client(
+    monkeypatch: pytest.MonkeyPatch, ledger: FakeLedger, pool: TablePool
+) -> TestClient:
+    """App whose lifespan gets `ledger` and `pool` instead of a database."""
+    monkeypatch.setattr(main.db, "create_pool", lambda dsn, **kwargs: pool)
+    monkeypatch.setattr(main, "Ledger", lambda pool: ledger)
+    app = create_app(make_settings(ctx_secret=CTX_SECRET, database_url_toolserver=FAKE_DSN))
+    return TestClient(app, raise_server_exceptions=False)
 
 
 FORBIDDEN_NETWORK_MODULES = frozenset(
@@ -161,8 +360,15 @@ def test_task_idempotency() -> None:
     first_id = json.loads(first["result"]["content"][0]["text"])["task_id"]
     assert json.loads(second["result"]["content"][0]["text"])["task_id"] == first_id
     with psycopg.connect(LIVE_DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM public.tasks WHERE idempotency_key = %s", (key,))
+        # Rows are found by the returned task_id: the stored key is scoped (B1).
+        cur.execute(
+            "SELECT count(*) FROM public.tasks WHERE idempotency_key ="
+            " (SELECT idempotency_key FROM public.tasks WHERE id = %s)",
+            (int(first_id),),
+        )
         assert cur.fetchone()[0] == 1
+        cur.execute("SELECT count(*) FROM public.tasks WHERE idempotency_key = %s", (key,))
+        assert cur.fetchone()[0] == 0, "the raw caller key is never stored"
 
 
 @NEEDS_DB
@@ -188,14 +394,73 @@ def test_task_requester_from_ctx() -> None:
             path="/workspace/mcp",
             tool=ToolName.CREATE_FOLLOWUP_TASK.value,
         )
-    assert message["result"]["isError"] is False
+    task_id = int(ok_body(message)["task_id"])
     with psycopg.connect(LIVE_DSN) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT created_by_member_id, workspace_id FROM public.tasks"
-            " WHERE idempotency_key = %s",
-            (key,),
+            "SELECT created_by_member_id, workspace_id, idempotency_key FROM public.tasks"
+            " WHERE id = %s",
+            (task_id,),
         )
-        assert cur.fetchone() == ("m-sam", "workspace-primary")
+        assert cur.fetchone() == (
+            "m-sam",
+            DEFAULT_WORKSPACE,
+            scoped_key(DEFAULT_WORKSPACE, "m-sam", key),
+        )
+
+
+@NEEDS_DB
+def test_task_idempotency_is_scoped_per_requester() -> None:
+    """B1: the same caller key from two requesters creates two tasks; neither
+    requester ever receives the other's task id or title."""
+    import psycopg
+
+    from .test_tool_dispatch import LIVE_DSN
+
+    key = f"key-{uuid.uuid4().hex}"
+    sam_title = f"Sam private {uuid.uuid4().hex[:8]}"
+    priya_title = f"Priya own {uuid.uuid4().hex[:8]}"
+    with live_client() as client:
+        sam = ok_body(call_followup(client, task_args(key, title=sam_title), persona="sam"))
+        priya = call_followup(client, task_args(key, title=priya_title), persona="priya")
+        sam_again = ok_body(call_followup(client, task_args(key, title=sam_title), persona="sam"))
+    priya_body = ok_body(priya)
+    assert priya_body["task_id"] != sam["task_id"]
+    assert priya_body["title"] == priya_title
+    assert sam_title not in json.dumps(priya)
+    assert sam_again["task_id"] == sam["task_id"]
+    with psycopg.connect(LIVE_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, created_by_member_id, title, idempotency_key FROM public.tasks"
+            " WHERE id = ANY(%s) ORDER BY id",
+            ([int(sam["task_id"]), int(priya_body["task_id"])],),
+        )
+        rows = cur.fetchall()
+    assert [(row[1], row[2]) for row in rows] == [("m-sam", sam_title), ("m-priya", priya_title)]
+    assert [row[3] for row in rows] == [
+        scoped_key(DEFAULT_WORKSPACE, "m-sam", key),
+        scoped_key(DEFAULT_WORKSPACE, "m-priya", key),
+    ]
+
+
+def test_followup_key_scoped_per_requester_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B1 without a database: two requesters, one caller key, two rows; the
+    same requester's replay returns its own row; the raw key is never stored."""
+    ledger, pool = FakeLedger(), TablePool()
+    key = f"key-{uuid.uuid4().hex}"
+    with table_pool_client(monkeypatch, ledger, pool) as client:
+        sam = ok_body(call_followup(client, task_args(key, title="Sam private"), persona="sam"))
+        priya = call_followup(client, task_args(key, title="Priya own"), persona="priya")
+        sam_again = ok_body(call_followup(client, task_args(key, title="Sam private")))
+    priya_body = ok_body(priya)
+    assert priya_body["task_id"] != sam["task_id"]
+    assert priya_body["title"] == "Priya own" and "Sam private" not in json.dumps(priya)
+    assert sam_again["task_id"] == sam["task_id"]
+    rows = pool.rows("tasks")
+    assert [(row["created_by_member_id"], row["idempotency_key"]) for row in rows] == [
+        ("m-sam", scoped_key(DEFAULT_WORKSPACE, "m-sam", key)),
+        ("m-priya", scoped_key(DEFAULT_WORKSPACE, "m-priya", key)),
+    ]
+    assert all(key not in str(params) for _, params in pool.statements)
 
 
 def test_task_enum_bounds() -> None:
