@@ -22,9 +22,11 @@ from typing import Any
 
 import anyio
 
-from services.contracts import KnowledgeGetSourceTeamArgs
+from services.contracts import DataTier, KnowledgeGetSourceTeamArgs, ReadSourceTeamArgs
+from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.toolserver import tools_memory
 
+from .conftest import OneShotPool
 from .test_tool_dispatch import LIVE_DSN, NEEDS_DB
 
 WS = "workspace-primary"
@@ -166,3 +168,170 @@ def fixture_rows_left(tag: str) -> int:
         )
         [count] = cur.fetchone()
     return count
+
+
+# --- I4: get_source filters (D-09 authoritative, workspace, tier, truncation) ---
+
+
+@NEEDS_DB
+def test_get_source_hides_drafts_and_non_authoritative_sources() -> None:
+    """D-09: only `review_status = 'authoritative'` sources are readable;
+    draft, unknown, and superseded sources answer not_found like a miss."""
+    tag = uuid.uuid4().hex[:10]
+    cases: dict[str, dict[str, str]] = {
+        "control": {"review_status": "authoritative"},
+        "draft": {"review_status": "draft"},
+        "unknown": {"review_status": "pending"},
+        "superseded": {"review_status": "authoritative", "status": "superseded"},
+    }
+    with rolled_back() as conn:
+        for case, extra in cases.items():
+            insert_source(
+                conn,
+                source_id=f"fx-d09-{case}-{tag}",
+                tier="team",
+                chunks=[("team", f"zq {case} text {tag}")],
+                **extra,
+            )
+        found = {case: get_source_team(conn, f"fx-d09-{case}-{tag}") for case in cases}
+    assert found["control"] is not None
+    assert found["control"].source.review_status.value == "authoritative"
+    assert {case for case, result in found.items() if result is not None} == {"control"}
+    assert fixture_rows_left(tag) == 0
+
+
+@NEEDS_DB
+def test_get_source_is_workspace_scoped() -> None:
+    """A seeded team source is invisible under any other workspace id (the
+    workspace comes from the verified `_ctx`, never from arguments)."""
+    import psycopg
+
+    with psycopg.connect(LIVE_DSN) as conn:
+        assert get_source_team(conn, "team-friday-deploy-freeze") is not None
+        other = f"ws-fx-other-{uuid.uuid4().hex[:8]}"
+        assert get_source_team(conn, "team-friday-deploy-freeze", workspace_id=other) is None
+
+
+@NEEDS_DB
+def test_get_source_excerpt_is_truncated_to_the_contract_limit() -> None:
+    tag = uuid.uuid4().hex[:10]
+    long_text = f"zq long excerpt {tag} " * 400  # well over 2000 chars
+    with rolled_back() as conn:
+        insert_source(conn, source_id=f"fx-long-{tag}", tier="team", chunks=[("team", long_text)])
+        result = get_source_team(conn, f"fx-long-{tag}")
+    assert len(long_text) > MAX_EXCERPT_CHARS
+    assert result is not None
+    assert result.excerpt == long_text[:MAX_EXCERPT_CHARS]
+    assert fixture_rows_left(tag) == 0
+
+
+# --- I4: read_source filters (workspace, LIKE escaping, truncation) -------------
+
+
+def read_source_team(pool: Any, workspace_id: str = WS, **arguments: Any) -> Any:
+    """Run the real team read handler on `pool`; returns the result model."""
+    verified = SimpleNamespace(ctx=SimpleNamespace(workspace_id=workspace_id))
+    args = ReadSourceTeamArgs(view="approved_company_data_team", limit=50, **arguments)
+    runtime = SimpleNamespace(pool=pool)
+    return anyio.run(tools_memory.handle_read_source_team, verified, args, runtime)
+
+
+@NEEDS_DB
+def test_read_source_is_workspace_scoped() -> None:
+    pool = OneShotPool(LIVE_DSN)
+    own = read_source_team(pool)
+    assert {row.source_id for row in own.rows} >= {"proj-atlas", "proj-beacon"}
+    other = read_source_team(pool, workspace_id=f"ws-fx-other-{uuid.uuid4().hex[:8]}")
+    assert other.rows == [] and other.row_count == 0
+
+
+@NEEDS_DB
+def test_author_filter_is_a_literal_substring_match() -> None:
+    """`%` and `_` in `author` match themselves only. Seeded owners are
+    `sam`/`priya`/`maya`: unescaped, each probe below would match rows."""
+    pool = OneShotPool(LIVE_DSN)
+    assert {row.source_id for row in read_source_team(pool, author="sam").rows} >= {"proj-atlas"}
+    for probe in ("%", "_", "s_m", "%a%"):
+        result = read_source_team(pool, author=probe)
+        assert (result.rows, result.row_count) == ([], 0), probe
+
+
+@NEEDS_DB
+def test_like_literal_matches_metacharacters_literally_in_postgres() -> None:
+    """The escaped pattern under the handler's exact `ILIKE ... ESCAPE`."""
+    import psycopg
+
+    backslash = chr(92)
+    cases = [
+        ("50%_off", "50%_OFF", True),
+        ("50%_off", "50xyoff", False),
+        ("a_b", "a_b", True),
+        ("a_b", "axb", False),
+        (f"back{backslash}slash", f"back{backslash}slash", True),
+        (f"back{backslash}slash", "backslash", False),
+    ]
+    with psycopg.connect(LIVE_DSN) as conn, conn.cursor() as cur:
+        for author, owner, expected in cases:
+            # Same clause text as the handler: ESCAPE '\' (one backslash).
+            cur.execute(
+                "SELECT %s ILIKE %s ESCAPE '\\'", (owner, tools_memory._like_literal(author))
+            )
+            assert cur.fetchone()[0] is expected, (author, owner)
+
+
+def test_like_literal_escapes_every_metacharacter() -> None:
+    backslash = chr(92)
+    raw = f"50%_a{backslash}b"
+    expected = f"%50{backslash}%{backslash}_a{backslash}{backslash}b%"
+    assert tools_memory._like_literal(raw) == expected
+
+
+def test_read_source_snippet_is_truncated(monkeypatch: Any) -> None:
+    """Offline: no runtime role writes the company-data base table, so a long
+    body is injected below the SQL layer; the row builder must cap it."""
+    long_body = "x" * (MAX_EXCERPT_CHARS + 500)
+
+    def fake_rows(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
+        row = {
+            "project_key": "proj-long",
+            "project_name": "Long",
+            "body": long_body,
+            "owner": "sam",
+            "tier": "team",
+            "status": "active",
+        }
+        return [row], 1
+
+    monkeypatch.setattr(tools_memory, "_read_view_rows", fake_rows)
+    result = read_source_team(object())
+    assert [len(row.snippet) for row in result.rows] == [MAX_EXCERPT_CHARS]
+
+
+# --- I4: the Sam cell (senior, confidential tool, restricted id) ---------------
+
+
+@NEEDS_DB
+def test_sam_cannot_read_a_restricted_source_through_the_confidential_tool() -> None:
+    """Sam clears `knowledge_get_source_confidential`, but a restricted
+    source id through it is a byte-identical not_found (never the record,
+    never `internal`); his own tier's source still reads."""
+    from .test_elevated_tier_tools import GET_SOURCE_TOOLS, member_ctx
+    from .test_tool_dispatch import call, live_client, result_text
+
+    tool = GET_SOURCE_TOOLS[DataTier.CONFIDENTIAL]
+    with live_client() as client:
+        replies = {
+            name: call(client, {"source_ref": ref, "_ctx": member_ctx("sam", tool)}, tool=tool)
+            for name, ref in (
+                ("restricted", "restr-workforce-planning"),
+                ("missing", f"no-such-source-{uuid.uuid4().hex[:8]}"),
+                ("own", "conf-runway-review"),
+            )
+        }
+    restricted, missing, own = replies["restricted"], replies["missing"], replies["own"]
+    assert result_text(restricted) == {"code": "not_found", "message": "No matching source found."}
+    assert restricted["result"]["content"] == missing["result"]["content"]
+    assert "workforce" not in json.dumps(restricted).lower()
+    assert own["result"]["isError"] is False
+    body = json.loads(own["result"]["content"][0]["text"])
+    assert (body["source"]["source_id"], body["tier"]) == ("conf-runway-review", "confidential")
