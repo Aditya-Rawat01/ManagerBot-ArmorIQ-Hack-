@@ -442,6 +442,45 @@ def test_task_idempotency_is_scoped_per_requester() -> None:
     ]
 
 
+@NEEDS_DB
+def test_task_replay_returns_stored_fields() -> None:
+    """I1: a replay with different owner/priority/title reports the stored task."""
+    key = f"key-{uuid.uuid4().hex}"
+    with live_client() as client:
+        first = ok_body(call_followup(client, task_args(key, owner="sam", priority="high")))
+        replay = ok_body(
+            call_followup(
+                client, task_args(key, title="Changed title", owner="priya", priority="low")
+            )
+        )
+    assert replay["task_id"] == first["task_id"]
+    assert (replay["title"], replay["owner"], replay["priority"]) == (
+        "Follow up on freeze",
+        "sam",
+        "high",
+    )
+
+
+def test_followup_replay_returns_stored_fields_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """I1 without a database: the replay result comes from the stored row."""
+    ledger, pool = FakeLedger(), TablePool()
+    key = f"key-{uuid.uuid4().hex}"
+    with table_pool_client(monkeypatch, ledger, pool) as client:
+        first = ok_body(call_followup(client, task_args(key, owner="sam", priority="high")))
+        replay = ok_body(
+            call_followup(
+                client, task_args(key, title="Changed title", owner="priya", priority="low")
+            )
+        )
+    assert replay == first
+    assert (replay["title"], replay["owner"], replay["priority"]) == (
+        "Follow up on freeze",
+        "sam",
+        "high",
+    )
+    assert len(pool.rows("tasks")) == 1
+
+
 def test_followup_key_scoped_per_requester_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     """B1 without a database: two requesters, one caller key, two rows; the
     same requester's replay returns its own row; the raw key is never stored."""

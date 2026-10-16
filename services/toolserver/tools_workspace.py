@@ -20,7 +20,7 @@ from typing import Any
 import anyio.to_thread
 from pydantic import BaseModel
 
-from services.contracts import ToolName
+from services.contracts import PersonaKey, ToolName
 from services.contracts.tool_args import MAX_MESSAGE_CHARS
 from services.toolserver import db
 from services.toolserver.security import VerifiedCall
@@ -122,9 +122,11 @@ async def handle_create_followup_task(
     return FollowupTaskResult(
         tool=ToolName.CREATE_FOLLOWUP_TASK,
         task_id=str(row["id"]),
+        # Every field from the stored row: a replay reports the task that
+        # exists, never the replaying call's owner/priority/title.
         title=row["title"],
-        owner=args.owner,
-        priority=args.priority,
+        owner=PersonaKey(row["owner"]),
+        priority=row["priority"],
     )
 
 
@@ -150,7 +152,7 @@ def _insert_followup_task(
                 idempotency_key, created_by_member_id, status)
                VALUES (%s,%s,%s,%s,%s,%s,%s,'open')
                ON CONFLICT (idempotency_key) DO NOTHING
-               RETURNING id, title""",
+               RETURNING id, title, owner, priority""",
             (
                 workspace_id,
                 title,
@@ -166,7 +168,7 @@ def _insert_followup_task(
             # Replay by the same requester: return the stored row. The scope
             # filters repeat what the hash already binds (defense in depth).
             cur.execute(
-                """SELECT id, title FROM public.tasks
+                """SELECT id, title, owner, priority FROM public.tasks
                    WHERE idempotency_key = %s AND workspace_id = %s
                      AND created_by_member_id IS NOT DISTINCT FROM %s""",
                 (scoped_key, workspace_id, requester_member_id),
