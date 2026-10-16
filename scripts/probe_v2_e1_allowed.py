@@ -241,7 +241,8 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
         )
     elif invocation.status.value == "unknown":
         described["assessment"] = (
-            "ambiguous: proxy dropped the ledger reference; record UNKNOWN, never EXECUTED"
+            "ambiguous: allowed result without a ledger reference (cause unconfirmed); "
+            "record UNKNOWN, never EXECUTED"
         )
     elif invocation.status.value == "rejected_by_tool_server":
         described["assessment"] = (
@@ -256,6 +257,59 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
     else:
         described["assessment"] = "unclassified invocation state; investigate, do not claim"
     return described
+
+
+def meta_present(payload: Any, described: Mapping[str, Any]) -> tuple[str, str]:
+    """Whether the result payload carries an MCP `_meta` object: yes / no / n.a.
+
+    Key names only, never values.
+    """
+    if payload is None:
+        if described.get("invocation_status") == "rejected_by_tool_server":
+            return "n.a.", "the gateway keeps no payload for a rejection"
+        return "n.a.", "no result payload"
+    if isinstance(payload, Mapping) and isinstance(payload.get("_meta"), Mapping):
+        return "yes", f"keys {sorted(str(key) for key in payload['_meta'])}"
+    return "no", "the payload has no `_meta` object"
+
+
+# Rejection codes raised only after `verify_tool_call` accepted `_ctx`
+# (services/toolserver/servers.py, P2-06 dispatch).
+_D05_AFTER_VERIFICATION = frozenset({"invalid_arguments", "out_of_scope", "precondition_failed"})
+# `verify_ctx` checks the HMAC before expiry, and the replay check runs after
+# verification: `_ctx` arrived intact for these too.
+_D05_SIGNATURE_VERIFIED = frozenset({"context_expired", "replay"})
+
+
+def d05_finding(described: Mapping[str, Any]) -> tuple[str, str]:
+    """D-05 (did `_ctx` survive the proxy?): yes / ambiguous / n.a. (+ why).
+
+    "no" is never inferred from the result: only the Render log line
+    "rejecting tool call: missing _ctx" shows a stripped `_ctx`.
+    """
+    status = described.get("invocation_status")
+    code = described.get("error_code")
+    if status == "executed":
+        return "yes", "EXECUTED: the tool server verified `_ctx` before the handler ran"
+    if status == "rejected_by_tool_server":
+        if code in _D05_AFTER_VERIFICATION:
+            return "yes", f"{code} is raised only after `_ctx` verified"
+        if code in _D05_SIGNATURE_VERIFIED:
+            return "yes", f"{code}: the `_ctx` signature verified before this check"
+        if code == "invalid_context":
+            return "ambiguous", (
+                "invalid_context: either the proxy stripped `_ctx` or CTX_SECRET differs "
+                "from the deployed value; check the Render log at this time for "
+                '"rejecting tool call: missing _ctx" (stripped: D-05 no) vs '
+                '"rejecting tool call: invalid context" (secret or format mismatch)'
+            )
+        return "ambiguous", f"{code}: not decidable from the result; check the Render log"
+    if status == "unknown":
+        return "ambiguous", (
+            'allowed result without a ledger reference; check the Render log for "verified '
+            'tool call" at this time'
+        )
+    return "n.a.", "the tool server was not reached (or reach is unknown)"
 
 
 @dataclass(frozen=True)
@@ -424,10 +478,12 @@ def build_record(
     armoriq_plan_id: str | None,
     query: str,
     described: dict[str, Any],
-    result_shape: Any,
+    payload: Any,
     ledger: dict[str, Any],
 ) -> str:
     """Render the E1 record in the `docs/EXPERIMENTS.md` template format."""
+    meta_answer, meta_reason = meta_present(payload, described)
+    d05_answer, d05_reason = d05_finding(described)
     lines = [
         "### E1 — planned ArmorIQ call reaches the MCP tool server",
         f"- Run at (UTC): {run_at}",
@@ -443,7 +499,8 @@ def build_record(
         f"- Invocation: status={described['invocation_status']} "
         f"ledger_entry_id={described['ledger_entry_id']} "
         f"error_code={described['error_code']} jti={described['jti']}",
-        f"- Result shape (redacted): {result_shape}",
+        f"- `_meta` present: {meta_answer} ({meta_reason})",
+        f"- Result shape (redacted): {summarize_result(payload)}",
         f"- Ledger correlation: correlated: {'true' if ledger['correlated'] else 'false'} "
         f"(lookup: {ledger['lookup']})",
         f"- Ledger row (safe subset): {ledger['row']}",
@@ -459,8 +516,9 @@ def build_record(
         f"{'yes' if pass_candidate(described, ledger) else 'no'}",
         "- Credential path observed: see deployed tool-server request log "
         "(bearer accepted vs 401) plus tool_call_attempts.credential_id",
-        "- `_ctx` arrival: see deployed tool-server log (verified tool call "
-        "vs invalid_context/context_expired/replay) — names of `_` keys only",
+        f"- D-05 (`_ctx` forwarded): {d05_answer} ({d05_reason})",
+        "- `_ctx` arrival detail: deployed tool-server log (verified tool call vs "
+        "invalid_context/context_expired/replay; names of `_` keys only)",
         f"- Assessment: {described['assessment']}",
         "- Outcome: operator-assigned in docs/EXPERIMENTS.md (PASS needs EXECUTED, "
         "a correlated ledger row, and the matching Render request log)",
@@ -573,7 +631,7 @@ async def run_probe(
         armoriq_plan_id=handle.armoriq_plan_id,
         query=E1_QUERY,
         described=described,
-        result_shape=summarize_result(payload),
+        payload=payload,
         ledger=ledger,
     )
     return 0, record

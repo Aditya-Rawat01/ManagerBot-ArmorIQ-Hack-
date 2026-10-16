@@ -195,6 +195,69 @@ def test_missing_ledger_reference_stays_unknown() -> None:
     assert described["invocation_status"] == "unknown"
     assert described["ledger_entry_id"] is None
     assert "never EXECUTED" in described["assessment"]
+    # I5: the cause is not known from the result, so none is asserted.
+    assert "cause unconfirmed" in described["assessment"]
+    assert "proxy dropped" not in described["assessment"]
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "answer"),
+    [
+        (ToolExecutionStatus.EXECUTED, None, "yes"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "invalid_arguments", "yes"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "out_of_scope", "yes"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "context_expired", "yes"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "replay", "yes"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "invalid_context", "ambiguous"),
+        (ToolExecutionStatus.REJECTED_BY_TOOL_SERVER, "internal", "ambiguous"),
+        (ToolExecutionStatus.UNKNOWN, None, "ambiguous"),
+        (ToolExecutionStatus.NOT_REACHED, None, "n.a."),
+    ],
+)
+def test_d05_answer_follows_the_rules(
+    status: ToolExecutionStatus, code: str | None, answer: str
+) -> None:
+    extra: dict[str, object] = {"error_code": code}
+    if status is ToolExecutionStatus.EXECUTED:
+        extra["ledger_entry_id"] = "7"
+    if status is ToolExecutionStatus.NOT_REACHED:
+        extra["tool_server_reached"] = False
+    described = probe.describe_outcome(
+        _outcome(
+            _decision(DecisionOutcome.ALLOW, DecisionSource.ARMORIQ_POLICY_DECISION),
+            _invocation(status, **extra),
+        )
+    )
+    assert probe.d05_finding(described)[0] == answer
+
+
+def test_d05_invalid_context_points_at_both_render_log_lines() -> None:
+    answer, reason = probe.d05_finding(
+        {"invocation_status": "rejected_by_tool_server", "error_code": "invalid_context"}
+    )
+    assert answer == "ambiguous"
+    assert "rejecting tool call: missing _ctx" in reason
+    assert "rejecting tool call: invalid context" in reason
+    assert "CTX_SECRET" in reason
+
+
+def test_d05_without_invocation_is_not_applicable() -> None:
+    described = probe.describe_outcome(
+        _outcome(_decision(DecisionOutcome.UNVERIFIED, DecisionSource.UNKNOWN))
+    )
+    assert probe.d05_finding(described)[0] == "n.a."
+
+
+def test_meta_present_reads_the_payload() -> None:
+    executed = {"invocation_status": "executed"}
+    assert probe.meta_present({"_meta": {"ledger_entry_id": "7"}}, executed) == (
+        "yes",
+        "keys ['ledger_entry_id']",
+    )
+    assert probe.meta_present({"content": []}, executed)[0] == "no"
+    assert probe.meta_present(None, {"invocation_status": None})[0] == "n.a."
+    rejected = {"invocation_status": "rejected_by_tool_server"}
+    assert probe.meta_present(None, rejected)[0] == "n.a."
 
 
 def test_rejection_reports_tool_server_layer() -> None:
@@ -273,7 +336,7 @@ def test_build_record_is_complete_and_redacted() -> None:
         armoriq_plan_id="ap-1",
         query=probe.E1_QUERY,
         described=described,
-        result_shape={"hits": {"type": "list", "length": 1}},
+        payload={"hits": ["private hit"], "_meta": {"ledger_entry_id": "7"}},
         ledger={"correlated": True, "lookup": "by jti", "row": {"id": 7}, "mismatches": []},
     )
     for field in (
@@ -284,11 +347,13 @@ def test_build_record_is_complete_and_redacted() -> None:
         "Decision:",
         "Tool server reached",
         "Invocation:",
+        "`_meta` present: yes",
         "Result shape",
         "Ledger correlation: correlated: true",
         "Ledger mismatches: none",
         "PASS candidate (EXECUTED and correlated): yes",
         "Credential path",
+        "D-05 (`_ctx` forwarded): yes",
         "`_ctx` arrival",
         "Assessment",
         "Outcome:",
@@ -298,6 +363,7 @@ def test_build_record_is_complete_and_redacted() -> None:
         assert field in record
     assert "jti-abc" in record
     assert "m***@e***.com" in record
+    assert "private hit" not in record
 
 
 RUN = probe.RunIdentifiers(
@@ -638,6 +704,8 @@ def test_run_probe_executed_and_correlated__offline_fake_sdk_and_ledger() -> Non
     assert "Ledger correlation: correlated: true (lookup: by jti)" in record
     assert "Ledger mismatches: none" in record
     assert "PASS candidate (EXECUTED and correlated): yes" in record
+    assert "`_meta` present: yes (keys ['ledger_entry_id'])" in record
+    assert "D-05 (`_ctx` forwarded): yes" in record
     assert lookup.calls and lookup.closed
     assert "arguments_sha256" not in record
     assert "d" * 64 not in record
@@ -720,6 +788,19 @@ def test_build_maya_request_ids_are_unique_per_run() -> None:
     second, _ = probe.build_maya_request(settings)
     assert first.request_id != second.request_id
     assert first.request_id.startswith("e1-")
+
+
+def test_run_probe_invalid_context_is_ambiguous_for_d05__offline_fake_sdk_and_ledger() -> None:
+    rejection = {
+        "isError": True,
+        "content": [{"type": "text", "text": '{"code": "invalid_context", "message": "rejected"}'}],
+    }
+    _, record, _, _ = _run_probe_offline(result=rejection)
+    assert "status=rejected_by_tool_server" in record
+    assert "D-05 (`_ctx` forwarded): ambiguous" in record
+    assert "rejecting tool call: missing _ctx" in record
+    assert "`_meta` present: n.a." in record
+    assert "PASS candidate (EXECUTED and correlated): no" in record
 
 
 def test_run_probe_ledger_mismatch_is_not_pass__offline_fake_sdk_and_ledger() -> None:
