@@ -678,3 +678,25 @@ def test__offline_fake_slack_ordinary_abstention_is_delivered() -> None:
     record = deliver(_ctx(), abstain, DataTier.TEAM, sender=sender, db=db)
     assert record.status == "delivered"
     assert len(sender.thread_posts) == 1
+
+
+# --- minor: plan_id reaches every audit write --------------------------------
+
+
+@pytest.mark.parametrize(
+    ("entry", "tier"),
+    [*_ROUTES, (EntryPoint.WEB, DataTier.RESTRICTED)],
+)
+def test__offline_fake_slack_plan_id_is_recorded(entry: EntryPoint, tier: DataTier) -> None:
+    sender, db = FakeSender(), AuditSim()
+    deliver(_ctx(entry), _answer("x"), tier, sender=sender, db=db, plan_id="p-0123456789abcdef")
+    assert db.delivery_rows, "the answer must be recorded"
+    assert {row["plan_id"] for row in db.delivery_rows} == {"p-0123456789abcdef"}
+    assert {event["plan_id"] for event in db.events} == {"p-0123456789abcdef"}
+
+
+def test__offline_fake_slack_plan_id_defaults_to_none() -> None:
+    db = AuditSim()
+    deliver(_ctx(), _answer("x"), DataTier.CONFIDENTIAL, sender=FakeSender(), db=db)
+    assert {row["plan_id"] for row in db.delivery_rows} == {None}
+    assert {event["plan_id"] for event in db.events} == {None}

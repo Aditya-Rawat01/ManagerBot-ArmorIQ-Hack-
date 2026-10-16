@@ -411,3 +411,13 @@ def test__offline_fake_slack_hold_invalid_console_url_omits_link(bad_url: str) -
     assert sender.dms == [
         ("U-maya", _HOLD_HEAD + "Review pending approvals in the ArmorIQ console.")
     ]
+
+
+# --- minor: the HOLD events carry the approval's plan_id --------------------
+
+
+def test__offline_fake_slack_hold_events_carry_plan_id() -> None:
+    sender, db = FakeSender(), AuditSim()
+    notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert db.events, "the HOLD DM must be audited"
+    assert {event["plan_id"] for event in db.events} == {"plan-7"}

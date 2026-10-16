@@ -159,6 +159,7 @@ def _record(
     tier: DataTier,
     status: DeliveryStatus,
     error_class: str | None,
+    plan_id: str | None,
 ) -> int | None:
     """Persist one answer delivery row; None when the audit write fails."""
     try:
@@ -171,6 +172,7 @@ def _record(
             tier_delivered=tier,
             status=status,
             error_class=error_class,
+            plan_id=plan_id,
         )
     except AuditError:
         return None
@@ -185,6 +187,7 @@ def _deliver_answer(
     tier: DataTier,
     send: Callable[[], None] | None,
     unavailable: str = "unavailable",
+    plan_id: str | None = None,
 ) -> DeliveryRecord:
     """Audit-first send of the answer to exactly one destination (R-64).
 
@@ -206,6 +209,7 @@ def _deliver_answer(
             tier=tier,
             status=status,
             error_class=error_class,
+            plan_id=plan_id,
         )
 
     def outcome(
@@ -252,6 +256,7 @@ def _notice_event(
     recipient_member_id: str,
     status: NoticeStatus,
     error_class: str | None,
+    plan_id: str | None,
 ) -> bool:
     """Audit one non-answer message as a ``delivery_attempted`` event.
 
@@ -270,6 +275,7 @@ def _notice_event(
                 event_type=AuditEventType.DELIVERY_ATTEMPTED,
                 request_id=ctx.request_id,
                 trace_id=ctx.trace_id,
+                plan_id=plan_id,
                 payload={
                     "purpose": purpose,
                     "channel": channel.value,
@@ -294,6 +300,7 @@ def _send_notice(
     recipient_member_id: str,
     send: Callable[[], None] | None,
     unavailable: str = "unavailable",
+    plan_id: str | None = None,
 ) -> tuple[bool, str | None]:
     """Audit-first send of one non-answer message; returns (sent, error_class).
 
@@ -314,6 +321,7 @@ def _send_notice(
             recipient_member_id=recipient_member_id,
             status=status,
             error_class=error_class,
+            plan_id=plan_id,
         )
 
     if send is None:
@@ -337,6 +345,7 @@ def _post_thread_notice(
     ctx: RequestContext,
     text: str,
     purpose: NoticePurpose,
+    plan_id: str | None,
 ) -> tuple[bool, str | None]:
     """Post a fixed generic notice in the originating thread.
 
@@ -363,6 +372,7 @@ def _post_thread_notice(
         recipient_member_id=ctx.requester.member_id,
         send=send,
         unavailable=unavailable,
+        plan_id=plan_id,
     )
 
 
@@ -373,11 +383,14 @@ def deliver(
     *,
     sender: SlackSender | None = None,
     db: AuditDatabase | None = None,
+    plan_id: str | None = None,
 ) -> DeliveryRecord:
     """Route one answer by entry point and highest tier (SHARED_INTERFACES §11).
 
     ``answer`` is the responder's output (its ``request_id`` must match
     ``ctx``; anything else raises). Destinations resolve from ``ctx`` alone.
+    ``plan_id`` (the recorded gateway plan, SHARED_INTERFACES §13), when the
+    request has one, is attached to every audit row and event written here.
     ``db`` is required: without persistence there is no delivery. Content
     leaves only after a ``pending`` audit row exists; a failed post-send
     audit write raises :class:`DeliveryAuditAfterSendError` (do not re-send).
@@ -415,6 +428,7 @@ def deliver(
             tier=highest_tier,
             status="pending",
             error_class=None,
+            plan_id=plan_id,
         )
         return DeliveryRecord(
             request_id=ctx.request_id,
@@ -429,12 +443,13 @@ def deliver(
     # Model text is untrusted: Slack control sequences are escaped (I6).
     text = _slack_escape(answer.answer_text)
     if ctx.entry_point is EntryPoint.SLACK_DM:
-        return _deliver_dm(ctx, text, highest_tier, sender=sender, db=db, recipient=recipient)
-    if highest_tier is DataTier.TEAM:
-        # The shared thread is allowed for team-tier data only (R-62).
-        return _deliver_thread(ctx, text, highest_tier, sender=sender, db=db, recipient=recipient)
-    return _deliver_dm_with_notice(
-        ctx, text, highest_tier, sender=sender, db=db, recipient=recipient
+        route = _deliver_dm
+    elif highest_tier is DataTier.TEAM:
+        route = _deliver_thread  # the shared thread: team-tier data only (R-62)
+    else:
+        route = _deliver_dm_with_notice
+    return route(
+        ctx, text, highest_tier, sender=sender, db=db, recipient=recipient, plan_id=plan_id
     )
 
 
@@ -446,6 +461,7 @@ def _deliver_dm(
     sender: SlackSender | None,
     db: AuditDatabase,
     recipient: str,
+    plan_id: str | None,
 ) -> DeliveryRecord:
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
@@ -462,6 +478,7 @@ def _deliver_dm(
         tier=tier,
         send=send,
         unavailable=unavailable,
+        plan_id=plan_id,
     )
 
 
@@ -473,6 +490,7 @@ def _deliver_thread(
     sender: SlackSender | None,
     db: AuditDatabase,
     recipient: str,
+    plan_id: str | None,
 ) -> DeliveryRecord:
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
@@ -491,6 +509,7 @@ def _deliver_thread(
         tier=tier,
         send=send,
         unavailable=unavailable,
+        plan_id=plan_id,
     )
 
 
@@ -502,8 +521,11 @@ def _deliver_dm_with_notice(
     sender: SlackSender | None,
     db: AuditDatabase,
     recipient: str,
+    plan_id: str | None,
 ) -> DeliveryRecord:
-    record = _deliver_dm(ctx, text, tier, sender=sender, db=db, recipient=recipient)
+    record = _deliver_dm(
+        ctx, text, tier, sender=sender, db=db, recipient=recipient, plan_id=plan_id
+    )
     purpose: NoticePurpose
     if record.status == "delivered":
         # Content is private; the thread learns only that it exists.
@@ -513,7 +535,9 @@ def _deliver_dm_with_notice(
         # failure notice (no content), and report failure regardless. The
         # notice is not the answer, so it never marks the request delivered.
         notice, purpose = DM_FAILURE_NOTICE, "dm_failure_notice"
-    posted, error = _post_thread_notice(sender, db, ctx=ctx, text=notice, purpose=purpose)
+    posted, error = _post_thread_notice(
+        sender, db, ctx=ctx, text=notice, purpose=purpose, plan_id=plan_id
+    )
     record = replace(record, notice_posted=posted)
     if posted and error == "audit_failed":
         raise DeliveryAuditAfterSendError(record)
@@ -590,6 +614,10 @@ def notify_hold(
     table raises :class:`DeliveryError` (configuration error, nothing sent);
     Maya without a Slack mapping is a recorded ``no_maya_mapping`` failure.
 
+    The audit events carry ``approval.plan_id``, which must be a recorded
+    plan (``record_plan`` with the gateway plan ID, SHARED_INTERFACES §13):
+    if that write fails, nothing is sent.
+
     Blocking, like :func:`deliver`: P3-04 calls it via ``asyncio.to_thread``.
     """
     if db is None:
@@ -624,6 +652,7 @@ def notify_hold(
         recipient_member_id=maya_member_id,
         send=send,
         unavailable=unavailable,
+        plan_id=approval.plan_id,
     )
     record = DeliveryRecord(
         request_id=ctx.request_id,
