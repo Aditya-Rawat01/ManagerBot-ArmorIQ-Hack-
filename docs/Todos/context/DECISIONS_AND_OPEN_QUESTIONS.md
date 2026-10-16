@@ -61,6 +61,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-15 — Planner input scope
 
+**RESOLVED 16 Oct 2026 by `VTCodeCraft` ([issue #20](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/20); no ADR):** message only. The planner sees the user's message, the trusted identity context and the tool catalog; there is no conversation-history parameter. Implemented in P3-02 (`apps/api/planner.py`): the message travels as one nonce-delimited, HTML-escaped, untrusted block, capped at 4000 characters.
+
 - **PRD §7.2:** the planner sees "the user's message, trusted display context, conversation text allowed by policy, and tool catalog".
 - **Arch §5.3 and §8.4:** "only the user's message, trusted identity/context, and tool catalog descriptions".
 - Open: whether any prior conversation text is included, and from where (Slack history needs scopes; PRD §4.2 says never assume history access).
@@ -161,12 +163,16 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-13 — Plan schema limits (= U-7)
 
+**RESOLVED 16 Oct 2026 by `VTCodeCraft` ([issue #20](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/20); no ADR):** `MAX_PLAN_STEPS = 3`, enforced by the planner. No `intent` or clarifying-question field is added to the contracts, so no ICR. Clarifications are a planner result variant only (SHARED_INTERFACES §12).
+
 - Maximum steps, an `intent` field, and a clarifying-question output. Bounded
   by PRD §5.2 (≤ 1 elevated call plus an optional team search). Per-tool
   argument schemas are handled by P2-02.
 - Decider: `VTCodeCraft`. Needed before **P3-02**. Blocking: **finish**.
 
 ### D-14 — User confirmation mechanism
+
+**RESOLVED 16 Oct 2026 by `VTCodeCraft` ([issue #20](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/20); no ADR; co-decider `samarth-chawla` confirmation pending):** the confirmation hook is approved. `EscalationConfirmation{tier, token}` authorizes nothing unless the `confirmation_verifier` (supplied by **P3-04**) accepts it; a missing verifier, any value other than `True`, or an exception fails closed, and model text is never a confirmation. Binding (as implemented in P3-02): an `Escalation` carries the validated proposal and its `plan_digest`; the verifier is called as `(confirmation, ctx, plan_digest)`, and the confirmed call re-validates the stored proposal with no new model call. P3-04 mints the token, binds it to the requester and that digest, and stores the `Escalation`. Interface: SHARED_INTERFACES §12.
 
 - PRD §5.2 (confirm a safe escalation prompt), PRD §7.11 / Arch §5.3 and §8.10
   (confirm a new action, then a new plan).
@@ -286,6 +292,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `samarth-chawla` with `VTCodeCraft`. P2-02 ships a provisional honeypot model (revised by ICR); needed before **P2-10** and **P3-07** finish. Blocking: **finish** (P2-10, P3-07).
 
 ### D-30 — Planner pre-filtering by requester tier versus demonstrating a real ArmorIQ BLOCK
+
+**RESOLVED 16 Oct 2026 by `VTCodeCraft` ([issue #20](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/20); no ADR; co-decider `samarth-chawla` confirmation pending):** option (b) for confidential. The junior/confidential pre-filter is off by default (`ENFORCE_REQUESTER_TIER = False`, a module setting in `apps/api/planner.py`), so Priya's confidential request reaches ArmorIQ for a **real policy BLOCK** (SC-01; the honeypot likewise). `restricted` tools for non-Maya are always refused by the application (`application_rule`). Maya-only maintenance tools (`knowledge_confirm_maya_decision`, `knowledge_mark_superseded`) are never planned from a chat message for any persona; their only route is the trusted manager-console path (P4-04).
 
 - **Arch §5.3.1(a):** use a higher tier only when the topic matches a manager-approved rule "**and the requester is allowed to ask at that tier**".
 - **PRD §5.2** omits the requester condition (it says only that restricted is available only to Maya).
