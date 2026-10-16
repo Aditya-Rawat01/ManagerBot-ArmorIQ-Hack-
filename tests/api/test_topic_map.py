@@ -1,8 +1,13 @@
 """Topic-map tier selection (P3-01 backend reads, P3-02 matching).
 
-Offline: test-local fake database, no DSN or network.
+Offline: test-local fake database, no DSN or network. The live test at the
+end needs a LOCAL migrated and seeded database (`DATABASE_URL_BACKEND` +
+`PROXYLEAD_DB_WRITE_TESTS=1`). Regression tests for the PR #69 review
+findings live in `tests/api/test_planner_followups.py`.
 """
 
+import os
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -139,8 +144,10 @@ def test_no_match_returns_none() -> None:
     assert match(_match_rules_db(), "ws-1", "what is the lunch menu?") is None
 
 
-def test_match_without_database_is_team_only() -> None:
-    assert match(None, "ws-1", "atlas budget review") is None
+def test_match_short_tokens_still_match_as_whole_tokens() -> None:
+    db = FakeDb(rows=[("rule-q4", "q4 pricing", "confidential")])
+    found = match(db, "ws-1", "Where is the Q4-pricing deck?")
+    assert found is not None and found.rule_id == "rule-q4"
 
 
 def test_match_database_error_is_team_only() -> None:
@@ -209,7 +216,7 @@ def test_upsert_rule_maya_only_and_normalizes() -> None:
     assert rule_id == "rule-9"
     sql, params = db.cursors[0].statements[0]
     assert "ON CONFLICT (workspace_id, topic)" in sql
-    assert params == ["ws-1", "atlas budget", "confidential"]
+    assert params == ["ws-1", "atlas budget", "confidential", "m-maya"]
     with pytest.raises(AuditNotAuthorizedError):
         upsert_rule(
             FakeDb(),
@@ -243,3 +250,57 @@ def test_list_rules_rejects_corrupt_tier() -> None:
     db = FakeDb(rows=[("rule-x", "ws-1", "hiring", "topsecret")])
     with pytest.raises(AuditStoreError):
         list_rules(db, "ws-1", _maya())
+
+
+# --- live (local database only) ----------------------------------------------
+
+# Captured at import: the API conftest scrubs settings variables per test.
+LIVE_DSN = os.environ.get("DATABASE_URL_BACKEND")
+DB_WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
+needs_live_write = pytest.mark.skipif(
+    not (LIVE_DSN and DB_WRITE_TESTS),
+    reason="needs DATABASE_URL_BACKEND and PROXYLEAD_DB_WRITE_TESTS=1 (local database only)",
+)
+
+
+@needs_live_write
+def test_live_topic_rules_round_trip_under_backend_role() -> None:
+    """upsert / list / match through the backend login against a migrated,
+    seeded LOCAL database (workspace from the P2-03 seed). Cleans up its row."""
+    from apps.api.core.db import BackendDatabase
+
+    workspace = "workspace-primary"
+    marker = f"zq{uuid.uuid4().hex[:10]}"
+    topic = f"Livetopic {marker}"
+    db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
+    rule_id: str | None = None
+    try:
+        rule_id = upsert_rule(
+            db, actor=_maya(), workspace_id=workspace, topic=topic, max_tier=DataTier.CONFIDENTIAL
+        )
+        again = upsert_rule(
+            db, actor=_maya(), workspace_id=workspace, topic=topic, max_tier=DataTier.RESTRICTED
+        )
+        assert again == rule_id  # same (workspace, normalized topic) row
+        listed = {rule.id: rule for rule in list_rules(db, workspace, _maya())}
+        assert listed[rule_id].topic == f"livetopic {marker}"
+        assert listed[rule_id].max_tier is DataTier.RESTRICTED
+        with db.tx() as cursor:
+            cursor.execute(
+                "SELECT created_by_member_id FROM topic_access_rules WHERE id = %s", [rule_id]
+            )
+            assert cursor.fetchone() == ("m-maya",)
+        found = match(db, workspace, f"what about the LIVETOPIC {marker} numbers?")
+        assert found is not None and found.rule_id == rule_id
+        assert match(db, workspace, f"livetopic {marker[:-1]}") is None  # whole tokens only
+        with pytest.raises(AuditStoreError):
+            upsert_rule(
+                db, actor=_maya(), workspace_id=workspace, topic="ai", max_tier=DataTier.TEAM
+            )
+        with pytest.raises(AuditNotAuthorizedError):
+            list_rules(db, workspace, _sam())
+    finally:
+        if rule_id is not None:
+            with db.tx() as cursor:
+                cursor.execute("DELETE FROM topic_access_rules WHERE id = %s", [rule_id])
+        db.close()
