@@ -166,6 +166,40 @@ def test_non_connection_errors_are_not_retried() -> None:
     assert pool.checkouts == checkouts_before
 
 
+@pytest.mark.parametrize(
+    ("make_error", "retried"),
+    [
+        (lambda: pg_errors.OperationalError("server closed the connection unexpectedly"), True),
+        (
+            lambda: pg_errors.AdminShutdown("terminating connection due to administrator command"),
+            True,
+        ),
+        (lambda: pg_errors.QueryCanceled("canceling statement due to statement timeout"), False),
+        (lambda: __import__("psycopg_pool").PoolTimeout("couldn't get a connection"), False),
+    ],
+)
+def test_only_dead_connections_are_retried(make_error, retried) -> None:
+    """Pool and statement timeouts are not retried (they would double the wait)."""
+    from services.toolserver.ledger import _retry_once_on_disconnect
+
+    calls: list[int] = []
+
+    @_retry_once_on_disconnect
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise make_error()
+        return "ok"
+
+    if retried:
+        assert flaky() == "ok"
+        assert len(calls) == 2
+    else:
+        with pytest.raises(pg_errors.OperationalError):
+            flaky()
+        assert len(calls) == 1
+
+
 @NEEDS_RESTART
 def test_container_restart_between_calls(real_model: object) -> None:
     """Live: restart Postgres between two valid calls; both record and run."""

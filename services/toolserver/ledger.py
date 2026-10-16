@@ -57,7 +57,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from psycopg import errors as _pg_errors
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from services.authorization.ctx_envelope import ReplayGuard
 from services.contracts import McpEndpoint, ToolExecutionStatus
@@ -312,11 +312,30 @@ def validate_attempt(attempt: ToolCallAttempt) -> None:
         raise ValueError("only a replay references an original entry")
 
 
+# SQLSTATEs that mean "the server dropped this connection" (admin/crash
+# shutdown, cannot connect now); class 08 is connection exceptions.
+_DISCONNECT_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
+
+
+def _is_disconnect(exc: Exception) -> bool:
+    """True only for a lost/dead connection, never for a pool or statement timeout.
+
+    `PoolTimeout` and `QueryCanceled` are `OperationalError` subclasses too;
+    retrying them would only double the worst-case wait when the database is
+    down or slow (they still fail closed on the first raise).
+    """
+    if isinstance(exc, PoolTimeout | _pg_errors.QueryCanceled):
+        return False
+    state = getattr(exc, "sqlstate", None)
+    return state is None or state.startswith("08") or state in _DISCONNECT_SQLSTATES
+
+
 def _retry_once_on_disconnect(fn: Callable[..., Any]) -> Callable[..., Any]:
     """Run once more after a dead pooled connection (Neon cold start).
 
-    Only `psycopg.OperationalError` (connection-level) is retried, exactly
-    once, never other errors. The jti claim is INSERT ... ON CONFLICT DO
+    Only a connection-level `psycopg.OperationalError` (see `_is_disconnect`)
+    is retried, exactly once; pool/statement timeouts and all other errors
+    are raised unchanged. The jti claim is INSERT ... ON CONFLICT DO
     NOTHING, so a retry after a committed first attempt sees the conflict
     (replay: fail closed, never double-executes). A retried attempt INSERT
     can, in the commit-then-drop edge, leave a duplicate attempt row:
@@ -327,7 +346,9 @@ def _retry_once_on_disconnect(fn: Callable[..., Any]) -> Callable[..., Any]:
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return fn(*args, **kwargs)
-        except _pg_errors.OperationalError:
+        except _pg_errors.OperationalError as exc:
+            if not _is_disconnect(exc):
+                raise
             return fn(*args, **kwargs)
 
     return wrapper

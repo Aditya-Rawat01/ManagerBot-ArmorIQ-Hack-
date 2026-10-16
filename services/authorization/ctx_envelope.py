@@ -57,6 +57,17 @@ class ExpiredContext(CtxError):
     """``exp`` has passed (beyond the skew leeway)."""
 
 
+class LifetimeTooLong(CtxError):
+    """``exp - iat`` exceeds :data:`MAX_CTX_LIFETIME_S` (rejected as invalid)."""
+
+
+# Upper bound on a token's validity window. The gateway mints 300 s tokens
+# (armoriq_gateway.CTX_TTL_S); anything far longer is not one of ours and must
+# not stay replayable-by-capture for hours. Generous headroom over 300 s keeps
+# clock-skewed or test-minted tokens working.
+MAX_CTX_LIFETIME_S = 900.0
+
+
 class CtxEnvelope(BaseModel):
     """Identity envelope the backend signs per tool call (D-04/ADR-020)."""
 
@@ -150,6 +161,9 @@ def verify_ctx(
         raise NotYetValid("context used before iat")
     if current > envelope.exp + leeway_s:
         raise ExpiredContext("context expired")
+    # After the time checks, so an expired token still reports "expired".
+    if envelope.exp - envelope.iat > MAX_CTX_LIFETIME_S:
+        raise LifetimeTooLong("context lifetime exceeds the maximum")
     return envelope
 
 
