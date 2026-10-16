@@ -24,10 +24,23 @@ from services.contracts import (
     RequestContext,
     ToolName,
 )
+from tests.api.conftest import make_settings
 from tests.api.test_delivery_channel import AuditSim
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
-CONSOLE = "https://platform.armoriq.ai"
+# Test-only console URL: proves the link comes from settings (never a
+# hardcoded default in delivery.py).
+CONSOLE = "https://console.example.test/armoriq"
+
+
+@pytest.fixture(autouse=True)
+def _console_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic settings: never a developer's environment or `.env` file."""
+    monkeypatch.setattr(
+        "apps.api.delivery.get_settings",
+        lambda: make_settings(armoriq_console_url=CONSOLE),
+        raising=False,
+    )
 
 
 class FakeSender:
@@ -129,7 +142,7 @@ def test__offline_fake_slack_hold_text_is_allowlisted() -> None:
     assert "sam" in text  # requester persona
     assert "knowledge_search_confidential" in text  # tool name
     assert "req-7" in text  # request ID
-    assert CONSOLE in text  # console base URL
+    assert CONSOLE in text  # console link from settings
 
 
 def test__offline_fake_slack_hold_text_has_no_protected_content() -> None:
@@ -154,7 +167,7 @@ def test__offline_fake_slack_hold_has_no_approval_affordance() -> None:
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     (_, text) = sender.dms[0]
     assert "Approve" not in text and "Reject" not in text and "button" not in text
-    assert text.count("http") == 1  # exactly the console base URL, no deep link
+    assert text.count("http") == 1  # exactly the configured console URL, no deep link
 
 
 def test__offline_fake_slack_hold_links_base_only_pending_d22() -> None:
@@ -272,3 +285,71 @@ def test__offline_fake_slack_hold_audit_fails_after_dm_raises_distinct_error() -
     assert raised.value.record.status == "delivered"
     assert raised.value.record.error_class == "audit_failed"
     assert len(sender.dms) == 1  # sent once; P3-04 must not re-send
+
+
+# --- I4: console link from settings, validated, never hardcoded -------------
+
+_HOLD_HEAD = (
+    "ProxyLead needs your review.\n"
+    "Request req-7 from sam needs a decision on knowledge_search_confidential.\n"
+)
+
+
+def test__offline_fake_slack_hold_text_exact_with_settings_link() -> None:
+    sender, db = FakeSender(), AuditSim()
+    settings = make_settings(armoriq_console_url="https://console.example.test/x")
+    notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members(), settings=settings)
+    assert sender.dms == [
+        (
+            "U-maya",
+            _HOLD_HEAD + "Review pending approvals in the ArmorIQ console: "
+            "https://console.example.test/x",
+        )
+    ]
+
+
+def test__offline_fake_slack_hold_link_defaults_to_get_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "apps.api.delivery.get_settings",
+        lambda: make_settings(armoriq_console_url="https://from-settings.example.test"),
+    )
+    sender, db = FakeSender(), AuditSim()
+    notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    (_, text) = sender.dms[0]
+    assert text.endswith("console: https://from-settings.example.test")
+    assert "platform.armoriq.ai" not in text  # no hardcoded fallback
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "",
+        "http://console.example.test",  # not https
+        "https://console.example.test/?q=1",  # query
+        "https://console.example.test/?",  # empty query
+        "https://console.example.test/#frag",  # fragment
+        "https://user:pw@console.example.test",  # credentials
+        "https://",  # no host
+        "https:///path",  # no host
+        "javascript:alert(1)",
+        "ftp://console.example.test",
+        "console.example.test",  # no scheme
+        "https://console.example.test/<!channel>",  # Slack control sequence
+        "https://console.example.test|click me",  # Slack link label
+        "https://console.example.test/a b",  # whitespace
+        "https://console.example.test:99999",  # malformed port
+    ],
+)
+def test__offline_fake_slack_hold_invalid_console_url_omits_link(bad_url: str) -> None:
+    sender, db = FakeSender(), AuditSim()
+    settings = make_settings(armoriq_console_url=bad_url)
+    record = notify_hold(
+        _ctx(), _approval(), sender=sender, db=db, members=_members(), settings=settings
+    )
+    assert record.status == "delivered"  # the HOLD is still announced ...
+    # ... with neutral wording and no link at all (never a hardcoded URL).
+    assert sender.dms == [
+        ("U-maya", _HOLD_HEAD + "Review pending approvals in the ArmorIQ console.")
+    ]

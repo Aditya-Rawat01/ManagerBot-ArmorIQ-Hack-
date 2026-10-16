@@ -34,10 +34,13 @@ carries ``purpose`` / ``channel`` / ``recipient_member_id`` / ``status`` /
 delivered.
 
 HOLD notification (R-40, R-44): DM to Maya's mapped Slack ID only, strict
-metadata allowlist (requester persona, tool name, request ID, console base
-URL). No approve/reject buttons, no approval actions, no protected content.
-D-22 (exact console page) is OPEN: the DM links only the FIXED console base
-URL, never a fabricated deep link; final link acceptance stays pending.
+metadata allowlist (requester persona, tool name, request ID, console link).
+No approve/reject buttons, no approval actions, no protected content. The
+link is ``ARMORIQ_CONSOLE_URL`` from settings (task §7), used verbatim only
+if it is an ``https`` URL with a host and no credentials, query, or fragment;
+otherwise the DM omits the link (neutral wording) — this module never
+hardcodes a console URL. D-22 (exact console page) is OPEN and decided by E4:
+until then the configured URL is linked as-is, never a fabricated deep link.
 """
 
 import uuid
@@ -46,7 +49,9 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Literal, Protocol
+from urllib.parse import urlsplit
 
+from apps.api.core.config import Settings, get_settings
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord
 from services.audit.errors import AuditError
@@ -72,7 +77,6 @@ DM_FAILURE_NOTICE = "I couldn't deliver that privately. Please send me a direct 
 NoticePurpose = Literal["private_response_notice", "dm_failure_notice", "hold_notice"]
 NoticeStatus = Literal["pending", "sent", "failed"]
 
-CONSOLE_BASE_URL_DEFAULT = "https://platform.armoriq.ai"  # FIXED base (D-22: page TBD)
 _MAYA_MEMBER_ID = "m-maya"  # stable D-20/ADR-021 format, used only if unresolvable
 
 
@@ -497,6 +501,51 @@ def _maya_slack_id(
     return (record.member_id, record.slack_user_id or "")
 
 
+# Characters that would let a configured URL break out of a Slack link or
+# message (``<url|label>``, mentions) or hide extra text.
+_URL_FORBIDDEN = frozenset("<>|\"'`\\")
+
+
+def _console_link(settings: Settings) -> str | None:
+    """``ARMORIQ_CONSOLE_URL`` if it is a safe https link, else None.
+
+    Required: ``https`` scheme, a host, no credentials, no query, no
+    fragment, no whitespace/control or Slack-markup characters. Anything
+    else (including unset/empty) yields None and the HOLD DM omits the link;
+    there is deliberately no hardcoded fallback URL.
+    """
+    raw = settings.armoriq_console_url
+    if not isinstance(raw, str) or not raw:
+        return None
+    if any(ch.isspace() or not ch.isprintable() or ch in _URL_FORBIDDEN for ch in raw):
+        return None
+    if "?" in raw or "#" in raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+        _ = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or not parts.hostname or "@" in parts.netloc:
+        return None
+    return raw
+
+
+def _hold_text(ctx: RequestContext, approval: ApprovalStatus, link: str | None) -> str:
+    """The HOLD DM: allowlisted metadata only (persona, tool, request ID, link)."""
+    console = (
+        f"Review pending approvals in the ArmorIQ console: {link}"
+        if link
+        else "Review pending approvals in the ArmorIQ console."
+    )
+    return (
+        "ProxyLead needs your review.\n"
+        f"Request {ctx.request_id} from {ctx.requester.persona.value} "
+        f"needs a decision on {approval.tool.value}.\n"
+        f"{console}"
+    )
+
+
 def notify_hold(
     ctx: RequestContext,
     approval: ApprovalStatus,
@@ -504,27 +553,23 @@ def notify_hold(
     sender: SlackSender | None = None,
     db: AuditDatabase | None = None,
     members: dict[PersonaKey, MemberRecord] | None = None,
-    console_base_url: str = CONSOLE_BASE_URL_DEFAULT,
+    settings: Settings | None = None,
 ) -> DeliveryRecord:
     """DM Maya a minimal HOLD notice (SHARED_INTERFACES §11, R-44).
 
     Strict metadata allowlist: requester persona, tool name, request ID, and
-    the FIXED console base URL. No query text, excerpts, answers, titles,
-    emails, tokens, approve buttons, or deep links (D-22 open — the exact
-    console page stays pending, so only the base URL is linked).
+    the console link from ``settings.armoriq_console_url`` (default
+    :func:`get_settings`), only if it passes :func:`_console_link`; otherwise
+    the DM says to use the ArmorIQ console without a link. No query text,
+    excerpts, answers, titles, emails, tokens, approve buttons, or
+    fabricated deep links (D-22 open, decided by E4).
     The recorded tier is ``team``: the DM carries metadata only, never
     content of the held tool's tier (the held tool is on the HOLD record).
     """
     if db is None:
         raise DeliveryError("no audit store: refusing undocumented delivery")
     maya_member_id, maya_slack_id = _maya_slack_id(members)
-    text = (
-        "ProxyLead needs your review.\n"
-        f"Request {ctx.request_id} from {ctx.requester.persona.value} "
-        f"needs a decision on {approval.tool.value}.\n"
-        "Review pending approvals in the ArmorIQ console: "
-        f"{console_base_url}"
-    )
+    text = _hold_text(ctx, approval, _console_link(settings or get_settings()))
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
     if sender is not None:
