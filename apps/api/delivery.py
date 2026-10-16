@@ -340,7 +340,11 @@ def _post_thread_notice(
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
     if sender is not None:
-        if ctx.entry_point is EntryPoint.SLACK_MENTION and ctx.slack_channel_id:
+        if (
+            ctx.entry_point is EntryPoint.SLACK_MENTION
+            and ctx.slack_channel_id
+            and ctx.slack_thread_ts
+        ):
             send = partial(sender.post_in_thread, ctx.slack_channel_id, ctx.slack_thread_ts, text)
         else:
             unavailable = "no_thread_context"
@@ -381,6 +385,12 @@ def deliver(
         raise DeliveryError("answer must be a ResponderOutput")
     if answer.request_id != ctx.request_id:
         raise DeliveryError("answer belongs to another request: refusing to deliver")
+    if answer.abstain_reason == "error":
+        # §12.1: P3-04 maps a generator error to the ERROR outcome, never to
+        # a delivered message.
+        raise DeliveryError("an error outcome is not deliverable")
+    if not answer.answer_text.strip():
+        raise DeliveryError("empty answer text: refusing to deliver")
     if not isinstance(highest_tier, DataTier):
         # Fail closed: an unknown/missing tier must never reach a shared thread.
         raise DeliveryError("highest_tier must be a DataTier: refusing to route")
@@ -461,7 +471,9 @@ def _deliver_thread(
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
     if sender is not None:
-        if ctx.slack_channel_id:
+        # A mention without its thread reference fails closed: never a
+        # top-level channel post, never a fallback destination (§9.1, R-64).
+        if ctx.slack_channel_id and ctx.slack_thread_ts:
             send = partial(sender.post_in_thread, ctx.slack_channel_id, ctx.slack_thread_ts, text)
         else:
             unavailable = "no_thread_context"

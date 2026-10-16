@@ -197,6 +197,7 @@ def _requester(slack_id: str | None = "U-sam") -> AuthenticatedUser:
 def _ctx(
     entry: EntryPoint = EntryPoint.SLACK_MENTION,
     slack_id: str | None = "U-sam",
+    thread_ts: str | None = "1700000000.0001",
 ) -> RequestContext:
     refs: dict[str, object] = (
         {}
@@ -205,7 +206,7 @@ def _ctx(
             "slack_team_id": "T1",
             "slack_channel_id": "C1",
             "slack_event_id": "E1",
-            "slack_thread_ts": "1700000000.0001",
+            "slack_thread_ts": thread_ts,
         }
     )
     return RequestContext(
@@ -601,3 +602,65 @@ def test__offline_fake_slack_fixed_notice_stays_literal() -> None:
     deliver(_ctx(), _answer(_INJECTION), DataTier.CONFIDENTIAL, sender=sender, db=db)
     assert sender.thread_posts == [("C1", "1700000000.0001", GENERIC_THREAD_NOTICE)]
     assert sender.dms == [("U-sam", _ESCAPED)]
+
+
+# --- minor: missing thread reference, empty and error answers fail closed ---
+
+
+def test__offline_fake_slack_mention_without_thread_ts_never_posts_top_level() -> None:
+    sender, db = FakeSender(), AuditSim()
+    record = deliver(
+        _ctx(thread_ts=None), _answer("team update"), DataTier.TEAM, sender=sender, db=db
+    )
+    assert record.status == "failed"
+    assert record.error_class == "no_thread_context"
+    assert sender.thread_posts == [] and sender.dms == []  # no top-level post, no fallback
+    assert db.row_statuses() == [("slack_thread", "failed")]
+
+
+def test__offline_fake_slack_elevated_without_thread_ts_skips_and_records_notice() -> None:
+    sender, db = FakeSender(), AuditSim()
+    record = deliver(
+        _ctx(thread_ts=None), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db
+    )
+    assert record.status == "delivered"  # the private DM still goes out
+    assert record.notice_posted is False
+    assert sender.thread_posts == []
+    (notice,) = db.attempts("private_response_notice")
+    assert (notice["status"], notice["error_class"]) == ("failed", "no_thread_context")
+
+
+@pytest.mark.parametrize("entry", list(EntryPoint))
+@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
+def test__offline_fake_slack_empty_answer_refuses(entry: EntryPoint, text: str) -> None:
+    sender, db = FakeSender(), AuditSim()
+    with pytest.raises(DeliveryError):
+        deliver(_ctx(entry), _answer(text), DataTier.TEAM, sender=sender, db=db)
+    assert sender.thread_posts == [] and sender.dms == [] and db.statements == []
+
+
+@pytest.mark.parametrize("entry", list(EntryPoint))
+def test__offline_fake_slack_error_outcome_is_not_delivered(entry: EntryPoint) -> None:
+    sender, db = FakeSender(), AuditSim()
+    error = ResponderOutput(
+        request_id="req-1",
+        answer_text="Something went wrong.",
+        abstained=True,
+        abstain_reason="error",
+    )
+    with pytest.raises(DeliveryError):
+        deliver(_ctx(entry), error, DataTier.TEAM, sender=sender, db=db)
+    assert sender.thread_posts == [] and sender.dms == [] and db.statements == []
+
+
+def test__offline_fake_slack_ordinary_abstention_is_delivered() -> None:
+    sender, db = FakeSender(), AuditSim()
+    abstain = ResponderOutput(
+        request_id="req-1",
+        answer_text="I don't have a vetted answer; I've queued this for Maya.",
+        abstained=True,
+        abstain_reason="no_evidence",
+    )
+    record = deliver(_ctx(), abstain, DataTier.TEAM, sender=sender, db=db)
+    assert record.status == "delivered"
+    assert len(sender.thread_posts) == 1
