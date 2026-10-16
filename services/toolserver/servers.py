@@ -331,11 +331,17 @@ class GuardedDispatch(Extension):
         try:
             result_model = await spec.handler(verified, args, runtime)
         except NotFound:
-            # Authorized lookup, nothing visible: an executed empty lookup.
+            # Authorized lookup, nothing visible: an executed empty lookup
+            # (SHARED_INTERFACES §4: the gateway maps it to EXECUTED with no
+            # evidence, not to a tool-server block). Like a success, it is
+            # never reported without its stored row.
             entry_id = await _record(
                 runtime,
                 _ledger_entry(verified, ACCEPTED, ToolExecutionStatus.EXECUTED, None),
             )
+            if entry_id is None:
+                return error_result(INTERNAL)
+            logger.info("executed %s: not_found (entry %s)", tool.value, entry_id.value)
             return error_result(NOT_FOUND, ledger_entry_id=entry_id)
         except Exception as exc:
             logger.error("tool %s failed (%s)", tool.value, type(exc).__name__)

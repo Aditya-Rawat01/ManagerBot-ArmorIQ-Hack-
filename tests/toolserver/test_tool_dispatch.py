@@ -40,6 +40,7 @@ from services.toolserver.ledger import (
     validate_entry,
 )
 from services.toolserver.main import create_app
+from services.toolserver.schemas import NotFound
 from services.toolserver.tools_memory import PRODUCT_TOOLS, ProductTool
 
 from .conftest import MEMORY_TOKEN, WORKSPACE_TOKEN, auth, make_settings
@@ -531,6 +532,51 @@ def test_tier_ceiling_denies_before_the_handler(monkeypatch: pytest.MonkeyPatch)
     assert result_meta(message) == {"ledger_entry_id": str(entry_id)}
     assert entry.validation_outcome == "out_of_scope"
     assert entry.execution_status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+
+
+async def _nothing_visible(verified: Any, args: Any, runtime: Any) -> Any:
+    raise NotFound("no visible source: secret-detail-zzz")
+
+
+def test_not_found_is_an_executed_lookup_with_its_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-11 `not_found`: the authorized lookup ran (accepted/executed row,
+    referenced in `_meta`) and found nothing; fixed body, no exception text."""
+    tool = ToolName.KNOWLEDGE_GET_SOURCE_TEAM
+    install_handler(monkeypatch, _nothing_visible, tool)
+    ledger = FakeLedger()
+    jti = f"jti-nf-{uuid.uuid4().hex}"
+    with fake_ledger_client(monkeypatch, ledger) as client:
+        message = call(
+            client,
+            {"source_ref": "no-such-source", "_ctx": make_ctx(jti=jti, tool=tool.value)},
+            tool=tool.value,
+        )
+    assert result_text(message) == {"code": "not_found", "message": "No matching source found."}
+    assert "secret-detail-zzz" not in json.dumps(message)
+    [(entry_id, entry)] = ledger.rows(jti)
+    assert result_meta(message) == {"ledger_entry_id": str(entry_id)}
+    assert entry.validation_outcome == "accepted"
+    assert entry.execution_status is ToolExecutionStatus.EXECUTED
+    assert entry.error_class is None
+
+
+def test_unstored_not_found_is_internal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A not_found whose ledger row could not be stored is never reported as
+    an executed lookup: `internal`, no `_meta`."""
+    tool = ToolName.KNOWLEDGE_GET_SOURCE_TEAM
+    install_handler(monkeypatch, _nothing_visible, tool)
+    ledger = FakeLedger(fail={"append": ValueError("entry rejected")})
+    with caplog.at_level(logging.ERROR), fake_ledger_client(monkeypatch, ledger) as client:
+        message = call(
+            client,
+            {"source_ref": "no-such-source", "_ctx": make_ctx(tool=tool.value)},
+            tool=tool.value,
+        )
+    assert result_text(message)["code"] == "internal"
+    assert result_meta(message) == {}
+    assert any(r.levelno >= logging.ERROR and "ledger" in r.getMessage() for r in caplog.records)
 
 
 def test_unstored_execution_is_never_reported_as_success(

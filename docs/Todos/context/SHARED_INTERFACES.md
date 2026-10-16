@@ -129,6 +129,7 @@ source (`unknown` if the layer cannot be determined). Never `allow`.
 | `knowledge_get_source_*` / `read_source_*` results | **PROPOSED** (P2-02) | Bounded record with source ID, tier, and provenance; `read_source_*` returns rows only from named approved views (names PROPOSED by P2-01/P2-08) |
 | MCP result framing | **FIXED**: JSON-RPC 2.0, SSE, required text content shape (Arch §5.1). **PROPOSED** (P2-06, shape below): the text content carries the JSON of the P2-02 result model; the ledger reference travels in the result's `_meta` | |
 | Tool-server rejection | **PROPOSED** (P1-04/P2-06, shape below) | MCP error result (`isError: true`) whose text block is `{code, message}` with codes `unauthenticated`, `invalid_context`, `context_expired`, `replay`, `invalid_arguments`, `out_of_scope`, `precondition_failed`, `internal`. Gateway maps it to `ToolInvocationResult(status=rejected_by_tool_server)` + `DecisionSource.TOOL_SERVER_RULE`, never ALLOW. No protected detail in messages |
+| `not_found` | **FIXED** (D-11, approved 16 Oct 2026) | Same `isError` framing, but an executed empty lookup, not a rejection: own `accepted`/`executed` ledger row in `_meta`; gateway maps it to EXECUTED with no result and keeps the ArmorIQ decision (mapping below). Byte-identical body for missing / wrong-tier / inactive sources |
 
 Tool result shape (P2-06 emits it, `services/toolserver/schemas.py`; the
 gateway, P1-02, parses it in `ArmorIQGateway._map_success`). The payload is
@@ -149,17 +150,43 @@ the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`
                                              // failure (code internal, execution_status=error)
 // replay: "_meta": {"original_entry_id": "<id>"} when the original call's row exists
 // no row (invalid_context, context_expired, unknown tool, no ledger, ...): no "_meta"
+
+// not_found (D-11): an executed empty lookup, NOT a rejection. Its own row is
+// validation_outcome=accepted, execution_status=executed, and is always present
+// (if that row cannot be stored the tool server answers `internal` instead).
+{"content": [{"type": "text", "text": "{\"code\": \"not_found\", \"message\": \"No matching source found.\"}"}],
+ "isError": true,
+ "_meta": {"ledger_entry_id": "<id>"}}
 ```
+
+`not_found` mapping (**FIXED**, D-11, approved 16 Oct 2026). Emitted only by
+an authorized lookup (`knowledge_get_source_*`) that found nothing visible:
+missing, wrong-tier, and inactive/non-authoritative sources share this exact
+body (byte-identical; only the `_meta` row id differs per call, by design for
+auditability). The gateway (`ArmorIQGateway._map_not_found`) maps it to:
+
+| Field | Value |
+|---|---|
+| `ToolInvocationResult.status` | `executed` (`tool_server_reached=True`, `ledger_entry_id` from `_meta`) |
+| `ToolInvocationResult.result` / `error_code` | `None` (no evidence can be built from it) / `"not_found"` |
+| `StepOutcome.decision` | the ArmorIQ decision stands (`allow`, `armoriq_policy_decision`); never converted into a `tool_server_rule` block |
+| `not_found` without `_meta.ledger_entry_id` | unprovable: mapped to `internal` (`rejected_by_tool_server`, `tool_server_rule`, BLOCK) |
+
+Every other `isError` code stays a rejection (BLOCK). P3-04 treats a
+`not_found` step as an empty lookup: no evidence, no citation, no disclosure of
+why nothing was found.
 
 - `_meta` is the only place for correlation data: the text block of a success
   is the bare result model (consumers parse it with the P2-02 models), and
   `mcp==2.3.0`'s wire `CallToolResult` model ignores unknown top-level keys.
 - Gateway rules: `isError` (or the SDK's `status == "error"`) is always a
-  rejection; the code comes from the text block and anything outside the §4
-  set becomes `internal`; EXECUTED requires `_meta.ledger_entry_id`, otherwise
-  the status stays `unknown`. A rejection's `ledger_entry_id` is its own row,
-  or on replay the original entry. Top-level `ledger_entry_id`/`error_code`
-  keys (the earlier provisional reading) are still accepted.
+  rejection, except `not_found` (above); the code comes from the text block
+  and anything outside the §4 set becomes `internal`; EXECUTED requires
+  `_meta.ledger_entry_id`, otherwise the status stays `unknown` (a row-less
+  `not_found` becomes `internal`). A rejection's `ledger_entry_id` is its own
+  row, or on replay only the original entry. Top-level
+  `ledger_entry_id`/`error_code` keys (the earlier provisional reading) are
+  still accepted.
 - Whether `_meta` survives the ArmorIQ proxy is unverified until E1 (P1-06);
   without it a success degrades to `unknown`, never to a false EXECUTED.
 - `tools/list` advertises the enforced argument model (`model_json_schema()`:

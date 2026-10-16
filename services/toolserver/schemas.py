@@ -8,9 +8,14 @@ Canonical shape (what the gateway, P1-02, parses):
 - Rejection or failure: ``CallToolResult(isError=true)`` with one text block
   carrying ``{"code", "message"}`` (codes from SHARED_INTERFACES §4).
   ``_meta.ledger_entry_id`` is present when this call has its own ledger row
-  (``invalid_arguments``, ``out_of_scope``, handler errors);
+  (``invalid_arguments``, ``out_of_scope``, handler errors, ``not_found``);
   ``_meta.original_entry_id`` is present on ``replay`` when the original
   call's ledger row exists.
+- ``not_found`` is the one ``isError`` result that is NOT a rejection: the
+  authorized lookup executed (ledger row ``accepted``/``executed``, always
+  present in ``_meta``) and found nothing visible. Missing, wrong-tier, and
+  inactive lookups share its body byte for byte (D-11). The gateway maps it to
+  an executed lookup with no evidence (SHARED_INTERFACES §4).
 
 Messages are fixed per code: they never echo argument values, exception text,
 or protected details.
@@ -90,7 +95,8 @@ class NotFound(Exception):
     """Authorized lookup with no visible result (maps to `not_found`).
 
     Missing, wrong-tier, and inactive sources share this response byte for
-    byte: existence is never disclosed (R-55).
+    byte: existence is never disclosed (R-55). The exception text is never
+    sent to the client (the body is the fixed §4 message).
     """
 
 
