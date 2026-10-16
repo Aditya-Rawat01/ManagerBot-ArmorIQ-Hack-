@@ -42,12 +42,25 @@ def test_tools_list_exposes_only_this_endpoints_diagnostic_tool(
     client: TestClient, path: str, token: str, _server: str, tool: str
 ) -> None:
     # Stateless transport: no session or prior initialize is required.
-    # memory-mcp additionally lists the product tool (P2-06).
+    # memory-mcp additionally lists the product tools (P2-06, P2-08).
     tools = rpc(client, path, token, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = [t["name"] for t in tools["result"]["tools"]]
     assert tool in names
     if path == "/memory/mcp":
-        assert sorted(names) == sorted([tool, "knowledge_search_team"])
+        assert sorted(names) == sorted(
+            [
+                tool,
+                "knowledge_search_team",
+                "knowledge_search_confidential",
+                "knowledge_search_restricted",
+                "knowledge_get_source_team",
+                "knowledge_get_source_confidential",
+                "knowledge_get_source_restricted",
+                "read_source_team",
+                "read_source_confidential",
+                "read_source_restricted",
+            ]
+        )
     else:
         assert names == [tool]
 
@@ -93,7 +106,17 @@ def test_diagnostic_tools_can_be_disabled() -> None:
             client, "/memory/mcp", MEMORY_TOKEN, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}
         )
         # Product tools are always registered; only diagnostics are gated.
-        assert [t["name"] for t in tools["result"]["tools"]] == ["knowledge_search_team"]
+        assert [t["name"] for t in tools["result"]["tools"]] == [
+            "knowledge_search_team",
+            "knowledge_search_confidential",
+            "knowledge_search_restricted",
+            "knowledge_get_source_team",
+            "knowledge_get_source_confidential",
+            "knowledge_get_source_restricted",
+            "read_source_team",
+            "read_source_confidential",
+            "read_source_restricted",
+        ]
 
 
 def test_unlisted_host_header_is_rejected(client: TestClient) -> None:
