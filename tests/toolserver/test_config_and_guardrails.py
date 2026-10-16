@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from services.contracts import ToolName
+from services.contracts import McpEndpoint, ToolName
 from services.toolserver.config import Settings
 
 from .conftest import make_settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-# Tool-server code plus the retrieval package only it may call (ADR-003).
+# Tool-server code plus the retrieval package only it may call (import boundary).
 TOOLSERVER_DIRS = (REPO_ROOT / "services" / "toolserver", REPO_ROOT / "services" / "knowledge")
 
 
@@ -41,6 +41,36 @@ def test_tokens_are_not_exposed_in_repr() -> None:
 def test_diagnostic_tool_names_never_collide_with_product_tools() -> None:
     product = {name.value for name in ToolName}
     assert {"memory_scaffold_ping", "workspace_scaffold_ping"}.isdisjoint(product)
+
+
+@pytest.mark.parametrize("endpoint", list(McpEndpoint))
+def test_every_product_tool_goes_through_dispatch(endpoint: McpEndpoint) -> None:
+    """Catalog tools are exposed only when implemented behind guarded dispatch.
+
+    On both endpoints: every listed ToolName is in that endpoint's dispatch
+    table, and every dispatch-table tool is listed; catalog tools with no
+    implementation are never listed. (Calls to ToolNames that are not in the
+    table are refused, never forwarded: test_tool_dispatch.)
+    """
+    import anyio
+
+    from services.contracts import tool_spec
+    from services.toolserver.servers import build_server, dispatch_table
+    from services.toolserver.tools_memory import PRODUCT_TOOLS
+
+    server = build_server(endpoint, enable_diagnostic_tools=True, holder={})
+    listed = {tool.name for tool in anyio.run(server.list_tools)}
+    table = dispatch_table(endpoint)
+    assert f"{endpoint.value.removesuffix('-mcp')}_scaffold_ping" in listed
+    tool_values = {name.value for name in ToolName}
+    product_listed = {ToolName(name) for name in listed if name in tool_values}
+    assert product_listed == set(table), "every registered ToolName must be dispatched"
+    for name in ToolName:
+        served_here = tool_spec(name).endpoint is endpoint
+        if served_here and name in PRODUCT_TOOLS:
+            assert name in table, f"{name.value} implemented but not dispatched"
+        else:
+            assert name.value not in listed, f"{name.value} listed without dispatch"
 
 
 def test_mcp_server_never_imports_armoriq_sdk() -> None:

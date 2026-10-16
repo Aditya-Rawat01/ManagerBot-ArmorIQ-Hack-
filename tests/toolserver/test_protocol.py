@@ -42,8 +42,14 @@ def test_tools_list_exposes_only_this_endpoints_diagnostic_tool(
     client: TestClient, path: str, token: str, _server: str, tool: str
 ) -> None:
     # Stateless transport: no session or prior initialize is required.
+    # memory-mcp additionally lists the product tool (P2-06).
     tools = rpc(client, path, token, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-    assert [t["name"] for t in tools["result"]["tools"]] == [tool]
+    names = [t["name"] for t in tools["result"]["tools"]]
+    assert tool in names
+    if path == "/memory/mcp":
+        assert sorted(names) == sorted([tool, "knowledge_search_team"])
+    else:
+        assert names == [tool]
 
 
 @pytest.mark.parametrize(("path", "token", "server_name", "tool"), ENDPOINTS)
@@ -73,10 +79,10 @@ def test_unknown_tool_is_reported_as_error(client: TestClient) -> None:
         "jsonrpc": "2.0",
         "id": 4,
         "method": "tools/call",
-        "params": {"name": "knowledge_search_team", "arguments": {}},
+        "params": {"name": "no_such_tool", "arguments": {}},
     }
     message = rpc(client, "/memory/mcp", MEMORY_TOKEN, call)
-    # Product tools are not implemented yet; the SDK reports the failure either
+    # Unknown names never reach dispatch; the SDK reports the failure either
     # as a JSON-RPC error or as a tool result with isError=true.
     assert "error" in message or message["result"]["isError"] is True
 
@@ -86,7 +92,8 @@ def test_diagnostic_tools_can_be_disabled() -> None:
         tools = rpc(
             client, "/memory/mcp", MEMORY_TOKEN, {"jsonrpc": "2.0", "id": 5, "method": "tools/list"}
         )
-        assert tools["result"]["tools"] == []
+        # Product tools are always registered; only diagnostics are gated.
+        assert [t["name"] for t in tools["result"]["tools"]] == ["knowledge_search_team"]
 
 
 def test_unlisted_host_header_is_rejected(client: TestClient) -> None:
@@ -112,3 +119,29 @@ def test_json_only_accept_header_is_not_acceptable(client: TestClient) -> None:
         "Authorization": f"Bearer {MEMORY_TOKEN}",
     }
     assert client.post("/memory/mcp", json=INITIALIZE, headers=headers).status_code == 406
+
+
+def test_product_tool_end_to_end_over_sse() -> None:
+    """initialize → list → call with a signed _ctx (P2-06 §9-step-5).
+
+    Needs a LOCAL DATABASE_URL_TOOLSERVER with seeded data and
+    PROXYLEAD_DB_WRITE_TESTS=1 (the call writes permanent rows); skips otherwise.
+    """
+    import json as _json
+
+    from .test_tool_dispatch import LIVE_DSN, TOOL, call, live_client, make_ctx
+
+    if not LIVE_DSN:
+        pytest.skip("needs DATABASE_URL_TOOLSERVER and PROXYLEAD_DB_WRITE_TESTS=1")
+    with live_client() as client:
+        initialized = rpc(client, "/memory/mcp", MEMORY_TOKEN, INITIALIZE)
+        assert initialized["result"]["serverInfo"]["name"] == "memory-mcp"
+        listed = rpc(
+            client, "/memory/mcp", MEMORY_TOKEN, {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}
+        )
+        assert TOOL in [t["name"] for t in listed["result"]["tools"]]
+        message = call(client, {"query": "quokka", "limit": 3, "_ctx": make_ctx()})
+    assert message["result"]["isError"] is False
+    body = _json.loads(message["result"]["content"][0]["text"])
+    assert body["tool"] == TOOL and body["tier"] == "team" and body["hits"]
+    assert message["result"]["_meta"]["ledger_entry_id"].isdigit()

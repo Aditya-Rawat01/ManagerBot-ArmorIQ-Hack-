@@ -124,6 +124,22 @@ def test_create_pool_is_compatible_with_a_transaction_pooler(
     assert connect_kwargs["prepare_threshold"] is None
 
 
+def test_create_pool_bounds_the_connection_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A database outage must fail a checkout within seconds, not psycopg_pool's
+    30 s default, so tool calls cannot park the worker threads /health shares."""
+    captured: dict[str, object] = {}
+
+    def fake_pool(dsn: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(db, "ConnectionPool", fake_pool)
+    db.create_pool("postgresql://fake")
+    assert captured.get("timeout") == 5.0
+    db.create_pool("postgresql://fake", timeout_s=1.5)
+    assert captured.get("timeout") == 1.5
+
+
 def test_transaction_sets_local_statement_timeout_and_commits() -> None:
     pool = FakePool()
     with db.transaction(pool) as conn:
