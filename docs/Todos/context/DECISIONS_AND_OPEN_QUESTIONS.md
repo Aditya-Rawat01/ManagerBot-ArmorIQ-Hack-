@@ -300,6 +300,8 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
 
 ### D-27 — Where the Socket Mode client runs
 
+**RESOLVED 17 Oct 2026 by `VTCodeCraft` ([issue #26](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/26); no ADR):** inside the API process. The FastAPI lifespan starts and stops the Slack Socket Mode client (same process and Render service as the API, sharing settings and the backend database pool), with a single uvicorn worker. It is disabled cleanly when the Slack tokens (or the P3-04 orchestrator handle) are missing, and API startup and `/health` never depend on it: any start failure is logged by exception class and the API keeps serving HTTP. Implemented in P3-05 (PR #78, `services/slack_socket/app.py`, `apps/api/main.py`). The live smoke test (mention + DM reply, duplicate processed once, confidential → DM only) is part of CP-5 (#44).
+
 - Arch §2: "One modular FastAPI backend". Socket Mode keeps a long-lived
   websocket, which affects hosting (D-07).
 - PROPOSED default: inside the API process lifespan.
