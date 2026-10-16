@@ -23,6 +23,7 @@ from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord
 from services.contracts import PersonaKey
 from services.slack_socket import events as slack_events
+from services.slack_socket.sender import SlackSender
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def build_app(
     handle: slack_events.OrchestratorHandle | None,
     loop: asyncio.AbstractEventLoop | None = None,
     app: Any | None = None,
+    sender: slack_events.RefusalSender | None = None,
 ) -> Any:
     """Create the Bolt app with mention/DM listeners (no connection yet).
 
@@ -67,12 +69,16 @@ def build_app(
     the work continues asynchronously). A per-event ``asyncio.run`` would
     cancel those tasks the moment ``handle`` returned.
 
+    ``sender`` posts the fixed polite refusal to unmapped senders; it
+    defaults to a :class:`SlackSender` over the Bolt app's own Web API client.
     Pass ``app`` in tests to avoid Bolt's startup ``auth.test`` network call.
     """
     from slack_bolt import App
 
     if app is None:
         app = App(token=bot_token)
+    if sender is None:
+        sender = SlackSender(app.client)
     # Each listener gets exactly the keyword arguments it accepts: DMs have no
     # channel allowlist (passing one raised TypeError on every DM).
     dm_deps: dict[str, Any] = {
@@ -80,6 +86,7 @@ def build_app(
         "expected_team_id": expected_team_id,
         "workspace_id": workspace_id,
         "db": db,
+        "sender": sender,
     }
     mention_deps: dict[str, Any] = {**dm_deps, "allowed_channels": allowed_channels}
 

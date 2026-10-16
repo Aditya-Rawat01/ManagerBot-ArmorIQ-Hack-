@@ -134,7 +134,9 @@ def fake_web_client(
             headers: dict[str, Any] | None = None,
             auth: dict[str, Any] | None = None,
         ) -> SlackResponse:
-            args = {**(params or {}), **(json or {}), **(data or {})}
+            merged = {**(params or {}), **(json or {}), **(data or {})}
+            # slack_sdk drops None-valued arguments before sending; so do we.
+            args = {key: value for key, value in merged.items() if value is not None}
             self.calls.append((api_method, args))
             error = self.errors.get(api_method)
             if error is not None:

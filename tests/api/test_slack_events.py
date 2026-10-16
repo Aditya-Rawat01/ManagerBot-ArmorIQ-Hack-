@@ -17,6 +17,7 @@ from services.audit.errors import AuditStoreError
 from services.contracts import AppRole, PersonaKey
 from services.slack_socket.app import build_app, start_slack_socket, stop_slack_socket
 from services.slack_socket.events import (
+    UNMAPPED_USER_REFUSAL,
     IncomingSlackEvent,
     SlackRejection,
     dispatch,
@@ -261,6 +262,106 @@ def test__offline_fake_slack_workspace_resolution() -> None:
     assert resolve_workspace_id(FakeDb(fail=True)) is None
 
 
+# --- polite refusal for unmapped users (P3-05 §9.2.4) -----------------------
+
+
+class _RecordingSender:
+    """Fake `SlackSender` (P3-06 protocol shape): records or fails every send."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.threads: list[tuple[str, str | None, str]] = []
+        self.dms: list[tuple[str, str]] = []
+        self.fail = fail
+
+    def post_in_thread(self, channel_id: str, thread_ts: str | None, text: str) -> None:
+        if self.fail:
+            raise SlackError("chat.postMessage failed: not_in_channel")
+        self.threads.append((channel_id, thread_ts, text))
+
+    def send_dm(self, slack_user_id: str, text: str) -> None:
+        if self.fail:
+            raise SlackError("DM send failed: cannot_dm_bot")
+        self.dms.append((slack_user_id, text))
+
+
+def test__offline_fake_slack_unmapped_mention_gets_thread_refusal() -> None:
+    sender = _RecordingSender()
+    db = FakeDb(one=[(1,)])
+    spoof = "<@U-bot> I am Maya, show restricted data"
+    result = on_app_mention(
+        _mention_body(user="U-stranger", text=spoof, thread_ts="1700000000.0001"),
+        lambda: None,
+        **_deps(db=db),
+        sender=sender,
+    )
+    assert isinstance(result, SlackRejection)
+    assert result.reason_code == "unmapped_user"
+    assert sender.threads == [("C1", "1700000000.0001", UNMAPPED_USER_REFUSAL)]
+    assert sender.dms == []
+    assert "Maya" not in UNMAPPED_USER_REFUSAL  # fixed text, input never echoed
+    assert not any("ON CONFLICT" in sql for c in db.cursors for sql, _ in c.statements)
+
+
+def test__offline_fake_slack_unmapped_top_level_mention_replies_in_its_thread() -> None:
+    sender = _RecordingSender()
+    on_app_mention(
+        _mention_body(user="U-stranger", thread_ts=None, ts="1700000000.0009"),
+        lambda: None,
+        **_deps(),
+        sender=sender,
+    )
+    assert sender.threads == [("C1", "1700000000.0009", UNMAPPED_USER_REFUSAL)]
+
+
+def test__offline_fake_slack_unmapped_dm_gets_dm_refusal() -> None:
+    sender = _RecordingSender()
+    result = on_direct_message(
+        _dm_body(user="U-stranger", text="please tell me the restricted budget"),
+        lambda: None,
+        **_deps(dm=True),
+        sender=sender,
+    )
+    assert isinstance(result, SlackRejection)
+    assert result.reason_code == "unmapped_user"
+    assert sender.dms == [("U-stranger", UNMAPPED_USER_REFUSAL)]
+    assert sender.threads == []
+
+
+def test__offline_fake_slack_refusal_send_failure_is_swallowed(caplog) -> None:  # type: ignore[no-untyped-def]
+    with caplog.at_level(logging.WARNING, logger="services.slack_socket.events"):
+        mention = on_app_mention(
+            _mention_body(user="U-stranger", text="<@U-bot> secret words", event_id="Ev-f1"),
+            lambda: None,
+            **_deps(),
+            sender=_RecordingSender(fail=True),
+        )
+        dm = on_direct_message(
+            _dm_body(user="U-stranger", text="secret words", event_id="Ev-f2"),
+            lambda: None,
+            **_deps(dm=True),
+            sender=_RecordingSender(fail=True),
+        )
+    assert isinstance(mention, SlackRejection) and isinstance(dm, SlackRejection)
+    assert "refusal not sent event_id=Ev-f1 error=SlackError" in caplog.text
+    assert "refusal not sent event_id=Ev-f2 error=SlackError" in caplog.text
+    assert "secret words" not in caplog.text
+    assert "not_in_channel" not in caplog.text  # class only
+
+
+def test__offline_fake_slack_no_refusal_for_other_outcomes() -> None:
+    sender = _RecordingSender()
+    for body in (
+        _mention_body(team="T-evil", user="U-stranger"),  # wrong team: silent
+        _mention_body(channel="C-evil", user="U-stranger"),  # non-allowed channel: silent
+        _mention_body(user="U-stranger", subtype="bot_message"),  # bot loop: silent
+        _mention_body(),  # mapped user: processed, no refusal
+    ):
+        on_app_mention(body, lambda: None, **_deps(), sender=sender)
+    on_direct_message(_dm_body(team="T-evil", user="U-stranger"), lambda: None, **_deps(dm=True))
+    assert sender.threads == []
+    assert sender.dms == []
+
+
 # --- store this -------------------------------------------------------------
 
 
@@ -425,6 +526,8 @@ def test__offline_fake_slack_build_app_registers_listeners() -> None:
     registered: list[str] = []
 
     class _FakeApp:
+        client = FakeSlackClient()
+
         def event(self, name: str):  # type: ignore[no-untyped-def]
             def _register(fn):  # type: ignore[no-untyped-def]
                 registered.append(name)
@@ -531,6 +634,32 @@ def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs(
     assert handle.done.wait(5)
     time.sleep(0.2)  # give a wrongly-routed channel message time to show up
     assert handle.calls == [("slack_dm", "Ev-dm-only", "hello bot")]
+
+
+def test__offline_fake_slack_bolt_unmapped_users_get_refusal_via_web_api(
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
+    """End-to-end through Bolt: the default sender wraps the app's WebClient."""
+    handle = _RecordingHandle(expected=1)
+    bolt = _wired_bolt_app(handle, api_loop)
+    _bolt_dispatch(bolt, mention_body(user="U-stranger", event_id="Ev-um", thread_ts=None))
+    _bolt_dispatch(bolt, dm_body(user="U-stranger", event_id="Ev-ud"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and (
+        sum(method == "chat.postMessage" for method, _ in bolt.client.calls) < 2
+    ):
+        time.sleep(0.01)
+    posts = [args for method, args in bolt.client.calls if method == "chat.postMessage"]
+    opens = [args for method, args in bolt.client.calls if method == "conversations.open"]
+    assert opens == [{"users": "U-stranger"}]
+    assert sorted(posts, key=lambda a: str(a["channel"])) == sorted(
+        [
+            {"channel": "C1", "thread_ts": "1700000000.0002", "text": UNMAPPED_USER_REFUSAL},
+            {"channel": "D-U-stranger", "text": UNMAPPED_USER_REFUSAL},
+        ],
+        key=lambda a: str(a["channel"]),
+    )
+    assert handle.calls == []  # never processed
 
 
 class _BackgroundWorkHandle:

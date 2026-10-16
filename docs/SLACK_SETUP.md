@@ -85,8 +85,11 @@ uvicorn apps.api.main:create_app --factory --port 8000
 2. DM the bot directly → expect a DM reply.
 3. Send the same event twice (Slack retries `event_id`) → second is dropped;
    `slack_events` keeps one `received` → `processed` row.
-4. As an unmapped user, or from another team/channel → polite refusal, audit
-   row, no processing.
+4. As an unmapped user → a fixed polite refusal (a thread reply for a
+   mention in an allowed channel, a DM for a DM; your text is never echoed),
+   a `slack_event_rejected` audit row, no processing. From another team or a
+   non-allowed channel → no reply at all (the bot stays silent there), an
+   audit row, no processing.
 5. `@ProxyLead store this Friday deployment is frozen` → one
    `knowledge_save_team_note` plan, author = your mapped identity.
 

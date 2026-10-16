@@ -31,7 +31,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord, resolve_slack_user
@@ -49,6 +49,20 @@ _BOT_SUBTYPES = frozenset({"bot_message", "message_changed", "message_deleted"})
 
 OrchestratorHandle = Callable[[RequestContext, str], Awaitable[str]]
 """P3-04 entry point (fake until merged): returns the request ID it accepted."""
+
+UNMAPPED_USER_REFUSAL = (
+    "Sorry, I can only help members of this team who are set up in ProxyLead. "
+    "If you think you should have access, please ask your manager."
+)
+"""Fixed polite refusal for unmapped senders (P3-05 §9.2.4). Never echoes input."""
+
+
+class RefusalSender(Protocol):
+    """The part of ``SlackSender`` (P3-06 protocol shape) the adapter uses."""
+
+    def post_in_thread(self, channel_id: str, thread_ts: str | None, text: str) -> None: ...
+
+    def send_dm(self, slack_user_id: str, text: str) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -298,6 +312,44 @@ def process_event(
     )
 
 
+def _refuse_unmapped(
+    sender: RefusalSender | None,
+    event: MappingEvent,
+    *,
+    entry_point: Literal["slack_mention", "slack_dm"],
+    event_id: str,
+) -> None:
+    """Send the fixed polite refusal to an unmapped sender. Never raises.
+
+    Mentions get a thread reply (the channel already passed the allowlist,
+    which is checked before the user); DMs get a DM to the sender's Slack ID.
+    The text is a constant: nothing from the event is echoed back. A send
+    failure is logged by exception class only.
+    """
+    if sender is None:
+        return
+    try:
+        if entry_point == "slack_mention":
+            channel_id = event.get("channel")
+            if not isinstance(channel_id, str) or not channel_id:
+                return
+            thread_ts = event.get("thread_ts") or event.get("ts")
+            sender.post_in_thread(
+                channel_id, thread_ts if isinstance(thread_ts, str) else None, UNMAPPED_USER_REFUSAL
+            )
+        else:
+            user_id = event.get("user")
+            if not isinstance(user_id, str) or not user_id:
+                return
+            sender.send_dm(user_id, UNMAPPED_USER_REFUSAL)
+    except Exception as exc:
+        logger.warning(
+            "slack unmapped-user refusal not sent event_id=%s error=%s",
+            event_id,
+            type(exc).__name__,
+        )
+
+
 def on_app_mention(
     body: dict[str, Any],
     ack: Callable[[], None],
@@ -307,13 +359,18 @@ def on_app_mention(
     allowed_channels: set[str],
     workspace_id: str | None,
     db: AuditDatabase | None,
+    sender: RefusalSender | None = None,
 ) -> IncomingSlackEvent | SlackRejection:
-    """Bolt `app_mention` listener: ack immediately, then validate."""
+    """Bolt `app_mention` listener: ack immediately, then validate.
+
+    An unmapped sender in an allowed channel gets the fixed polite refusal
+    as a thread reply (via ``sender``); the event is audited, never processed.
+    """
     ack()
     event = body.get("event") if isinstance(body, dict) else None
     if not isinstance(event, dict):
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
-    return process_event(
+    result = process_event(
         event,
         event_id=body.get("event_id"),
         team_id=body.get("team_id"),
@@ -324,6 +381,9 @@ def on_app_mention(
         workspace_id=workspace_id,
         db=db,
     )
+    if isinstance(result, SlackRejection) and result.reason_code == "unmapped_user":
+        _refuse_unmapped(sender, event, entry_point="slack_mention", event_id=result.event_id)
+    return result
 
 
 def on_direct_message(
@@ -334,13 +394,18 @@ def on_direct_message(
     expected_team_id: str | None,
     workspace_id: str | None,
     db: AuditDatabase | None,
+    sender: RefusalSender | None = None,
 ) -> IncomingSlackEvent | SlackRejection:
-    """Bolt `message` listener for DMs: ack immediately, then validate."""
+    """Bolt `message` listener for DMs: ack immediately, then validate.
+
+    An unmapped sender gets the fixed polite refusal by DM (via ``sender``);
+    the event is audited, never processed.
+    """
     ack()
     event = body.get("event") if isinstance(body, dict) else None
     if not isinstance(event, dict):
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
-    return process_event(
+    result = process_event(
         event,
         event_id=body.get("event_id"),
         team_id=body.get("team_id") or event.get("team"),
@@ -351,6 +416,9 @@ def on_direct_message(
         workspace_id=workspace_id,
         db=db,
     )
+    if isinstance(result, SlackRejection) and result.reason_code == "unmapped_user":
+        _refuse_unmapped(sender, event, entry_point="slack_dm", event_id=result.event_id)
+    return result
 
 
 async def dispatch(
@@ -371,8 +439,10 @@ async def dispatch(
 
 
 __all__ = [
+    "UNMAPPED_USER_REFUSAL",
     "IncomingSlackEvent",
     "OrchestratorHandle",
+    "RefusalSender",
     "SlackRejection",
     "dispatch",
     "mark_processed",
