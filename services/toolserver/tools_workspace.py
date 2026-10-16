@@ -125,7 +125,7 @@ async def handle_create_followup_task(
             verified.ctx.workspace_id,
             verified.ctx.requester_member_id,
             args.title,
-            args.description or "",
+            args.description,  # None when absent: stored as NULL, never ""
             args.owner.value,
             args.priority,
             args.idempotency_key,
@@ -147,7 +147,7 @@ def _insert_followup_task(
     workspace_id: str,
     requester_member_id: str,
     title: str,
-    description: str,
+    description: str | None,
     owner: str,
     priority: str,
     idempotency_key: str,
@@ -202,7 +202,10 @@ class ProductTool:
 PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
     ToolName.SEND_EXTERNAL_MESSAGE: ProductTool(
         name=ToolName.SEND_EXTERNAL_MESSAGE,
-        description=("Honeypot: records a synthetic message. Never delivers anything."),
+        # Neutral on purpose: tools/list (the ArmorIQ registry, the planner)
+        # must not learn that this tool is a decoy. The truth lives in this
+        # module's docstring, ADR-025 and the ADR-024 outcome.
+        description="Send a short message to the configured external destination.",
         handler=handle_send_external_message,
     ),
     # Ships: D-17 outcome recorded under ADR-024 (docs/ARCHITECTURE_DECISIONS.md).

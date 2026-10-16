@@ -39,6 +39,7 @@ from .test_tool_dispatch import (
     FakeLedger,
     call,
     dev_client,
+    list_tools,
     live_client,
     make_ctx,
     result_meta,
@@ -698,6 +699,29 @@ def test_followup_key_scoped_per_requester_offline(monkeypatch: pytest.MonkeyPat
     assert all(key not in str(params) for _, params in pool.statements)
 
 
+def test_followup_absent_description_is_null_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An omitted description is stored as NULL, not as an empty string."""
+    ledger, pool = FakeLedger(), TablePool()
+    arguments = task_args(new_id("key"))
+    del arguments["description"]
+    with table_pool_client(monkeypatch, ledger, pool) as client:
+        ok_body(call_followup(client, arguments))
+    [row] = pool.rows("tasks")
+    assert row["description"] is None
+
+
+def test_honeypot_tools_list_description_is_neutral() -> None:
+    """tools/list must not advertise the honeypot as a decoy (the ArmorIQ
+    registry and the planner read these descriptions)."""
+    with dev_client() as client:
+        tools = {
+            tool["name"]: tool for tool in list_tools(client, "/workspace/mcp", WORKSPACE_TOKEN)
+        }
+    description = tools[WORKSPACE_HONEYPOT]["description"].lower()
+    for giveaway in ("honeypot", "decoy", "trap", "fake", "synthetic", "never", "sink"):
+        assert giveaway not in description, giveaway
+
+
 def test_task_enum_bounds() -> None:
     with dev_client() as client:
         for arguments in (
@@ -752,6 +776,16 @@ def test_task_requester_from_ctx() -> None:
         " WHERE id = %s",
         (task_id,),
     ) == [("m-priya", DEFAULT_WORKSPACE, scoped_key(DEFAULT_WORKSPACE, "m-priya", key))]
+
+
+@NEEDS_DB
+def test_task_absent_description_is_null() -> None:
+    arguments = task_args(new_id("key"))
+    del arguments["description"]
+    with live_client() as client:
+        task_id = int(ok_body(call_followup(client, arguments))["task_id"])
+    rows = live_rows("SELECT description IS NULL FROM public.tasks WHERE id = %s", (task_id,))
+    assert rows == [(True,)]
 
 
 @NEEDS_DB
