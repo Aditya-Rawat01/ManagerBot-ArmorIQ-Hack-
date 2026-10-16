@@ -653,11 +653,16 @@ class _FakeClient:
     """Fake ArmorIQ SDK client: returns `result` or raises `raises` on invoke."""
 
     def __init__(
-        self, calls: list, result: object = None, raises: BaseException | None = None
+        self,
+        calls: list,
+        result: object = None,
+        raises: BaseException | None = None,
+        hold_delegation_id: str | None = None,
     ) -> None:
         self.calls = calls
         self.result = EXECUTED_RESULT if result is None else result
         self.raises = raises
+        self.hold_delegation_id = hold_delegation_id
 
     def for_user(self, email: str) -> _FakeScope:
         self.calls.append(("for_user", email))
@@ -674,6 +679,9 @@ class _FakeClient:
         self.calls.append(("invoke", mcp, action, dict(params or {})))
         if self.raises is not None:
             raise self.raises
+        if self.hold_delegation_id is not None:
+            # SDK waited path: on_hold fires, then the approved call returns.
+            options.on_hold(SimpleNamespace(delegation_id=self.hold_delegation_id))  # type: ignore[attr-defined]
         return SimpleNamespace(result=self.result, status="success", verified=True)
 
 
@@ -750,6 +758,7 @@ def _run_probe_offline(
     raises: BaseException | None = None,
     ledger_overrides: dict[str, object] | None = None,
     ledger_dsn: str | None = FAKE_DSN,
+    hold_delegation_id: str | None = None,
 ) -> tuple[int, str, _CtxLedgerLookup, list]:
     """`probe.run_probe` over the real gateway with a fake SDK and fake ledger."""
     from services.authorization.armoriq_gateway import ArmorIQGateway
@@ -757,7 +766,7 @@ def _run_probe_offline(
     settings = _probe_settings()
     calls: list = []
     signer = _Signer()
-    client = _FakeClient(calls, result=result, raises=raises)
+    client = _FakeClient(calls, result=result, raises=raises, hold_delegation_id=hold_delegation_id)
     gateway = ArmorIQGateway(settings, client_factory=lambda member_id: client, ctx_signer=signer)
     lookup = _CtxLedgerLookup(signer, **(ledger_overrides or {}))
     code, record = asyncio.run(
@@ -916,6 +925,19 @@ def test_main_returns_the_probe_exit_code__offline_fake_sdk(
     code, _ = _main_with_offline_probe(monkeypatch, ledger_overrides={"jti": "someone-else"})
     assert code == probe.EXIT_NOT_PASS
     assert "PASS candidate (EXECUTED and correlated): no" in capsys.readouterr().out
+
+
+def test_hold_adds_the_ctx_expiry_note__offline_fake_sdk_and_ledger() -> None:
+    """M6: a HOLD waits up to 900 s but `_ctx` lives 300 s; the record says so."""
+    _, record, _, _ = _run_probe_offline(hold_delegation_id="dlg-1")
+    assert "HOLD observed: the SDK waits up to 900 s for approval" in record
+    assert "`_ctx` expires 300 s after signing" in record
+    assert "context_expired" in record
+
+
+def test_no_hold_no_note__offline_fake_sdk_and_ledger() -> None:
+    _, record, _, _ = _run_probe_offline()
+    assert "HOLD observed" not in record
 
 
 def test_build_maya_request_uses_the_trusted_maya_identity() -> None:

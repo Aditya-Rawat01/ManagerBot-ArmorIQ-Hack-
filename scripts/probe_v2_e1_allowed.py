@@ -27,6 +27,12 @@ Exit codes:
        required value unset (names only, never values)
     3  the probe ran, but the result is not EXECUTED + correlated (includes
        a run without DATABASE_URL_TOOLSERVER); read the record
+
+HOLD note: Maya's plan is expected to ALLOW. If it HOLDs, the SDK waits up
+to APPROVAL_TIMEOUT_MS (900 s by default) for the console decision, but the
+signed `_ctx` expires CTX_TTL_S (300 s) after signing and is not re-signed
+on resume: an approval later than about 5 minutes reaches the tool server
+as `context_expired`. Approve within 5 minutes or re-run.
 """
 
 from __future__ import annotations
@@ -288,6 +294,8 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
         "decision_outcome": decision.outcome.value,
         "decision_source": decision.source.value,
         "decision_reason": mask_emails(decision.reason),
+        "hold_observed": getattr(outcome, "approval", None) is not None
+        or bool(getattr(decision, "delegation_id", None)),
         "tool_server_reached": None,
         "invocation_status": None,
         "ledger_entry_id": None,
@@ -558,6 +566,18 @@ def probe_exit_code(described: Mapping[str, Any], ledger: Mapping[str, Any]) -> 
     return EXIT_PASS_CANDIDATE if pass_candidate(described, ledger) else EXIT_NOT_PASS
 
 
+def hold_note(approval_timeout_ms: int) -> str:
+    """Why a late approval fails: the SDK wait outlasts the `_ctx` lifetime."""
+    from services.authorization.armoriq_gateway import CTX_TTL_S
+
+    return (
+        f"HOLD observed: the SDK waits up to {approval_timeout_ms // 1000} s for approval, "
+        f"but `_ctx` expires {CTX_TTL_S} s after signing and is not re-signed on resume; "
+        f"an approval later than about {CTX_TTL_S // 60} minutes reaches the tool server "
+        "as `context_expired` (approve sooner or re-run; not a D-05 finding)"
+    )
+
+
 def build_record(
     *,
     run_at: str,
@@ -572,6 +592,7 @@ def build_record(
     described: dict[str, Any],
     payload: Any,
     ledger: dict[str, Any],
+    approval_timeout_ms: int = 900_000,
 ) -> str:
     """Render the E1 record in the `docs/EXPERIMENTS.md` template format."""
     meta_answer, meta_reason = meta_present(payload, described)
@@ -617,6 +638,7 @@ def build_record(
         "- `_ctx` arrival detail: deployed tool-server log (verified tool call vs "
         "invalid_context/context_expired/replay; names of `_` keys only)",
         f"- Assessment: {described['assessment']}",
+        *([f"- Note: {hold_note(approval_timeout_ms)}"] if described.get("hold_observed") else []),
         "- Outcome: operator-assigned in docs/EXPERIMENTS.md (PASS needs EXECUTED, "
         "a correlated ledger row, and the matching Render request log)",
         "- Evidence: Render request log excerpt; Neon ledger/attempt rows "
@@ -730,6 +752,7 @@ async def run_probe(
         described=described,
         payload=payload,
         ledger=ledger,
+        approval_timeout_ms=int(settings.approval_timeout_ms),
     )
     return probe_exit_code(described, ledger), record
 
