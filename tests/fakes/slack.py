@@ -100,4 +100,84 @@ def dm_body(
     return envelope(event, event_id=event_id, team_id=team, bot_user_id=bot_user_id)
 
 
-__all__ = ["BOT_USER_ID", "TEAM_ID", "dm_body", "envelope", "mention_body"]
+def fake_web_client(
+    *,
+    errors: dict[str, str] | None = None,
+    bot_user_id: str = BOT_USER_ID,
+    team_id: str = TEAM_ID,
+) -> Any:
+    """A real ``slack_sdk.WebClient`` whose transport is replaced (no network).
+
+    Every Web API call returns a genuine ``SlackResponse`` (``.validate()``
+    raises a genuine ``SlackApiError`` for methods listed in ``errors``, e.g.
+    ``{"chat.postMessage": "not_in_channel"}``), so Bolt's ``auth.test``,
+    the sender and error-code extraction run their production code paths.
+    Calls are recorded in ``client.calls`` as ``(api_method, args)``.
+    """
+    from slack_sdk.web import SlackResponse, WebClient
+
+    class _FakeWebClient(WebClient):
+        def __init__(self) -> None:
+            super().__init__(token="xoxb-offline-fake", base_url="http://127.0.0.1:9/api/")
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+            self.errors = dict(errors or {})
+
+        def api_call(  # type: ignore[override]
+            self,
+            api_method: str,
+            *,
+            http_verb: str = "POST",
+            files: dict[str, Any] | None = None,
+            data: dict[str, Any] | None = None,
+            params: dict[str, Any] | None = None,
+            json: dict[str, Any] | None = None,
+            headers: dict[str, Any] | None = None,
+            auth: dict[str, Any] | None = None,
+        ) -> SlackResponse:
+            args = {**(params or {}), **(json or {}), **(data or {})}
+            self.calls.append((api_method, args))
+            error = self.errors.get(api_method)
+            if error is not None:
+                payload: dict[str, Any] = {"ok": False, "error": error}
+            elif api_method == "auth.test":
+                payload = {
+                    "ok": True,
+                    "user_id": bot_user_id,
+                    "bot_id": "B-bot",
+                    "team_id": team_id,
+                    "team": "Fake Team",
+                    "url": "https://fake.invalid/",
+                }
+            elif api_method == "conversations.open":
+                payload = {"ok": True, "channel": {"id": f"D-{args.get('users', 'x')}"}}
+            else:
+                payload = {"ok": True, "ts": "1700000009.0001"}
+            return SlackResponse(
+                client=self,
+                http_verb=http_verb,
+                api_url=f"{self.base_url}{api_method}",
+                req_args={"params": params, "json": json},
+                data=payload,
+                headers={},
+                status_code=200,
+            ).validate()
+
+    return _FakeWebClient()
+
+
+def offline_bolt_app(client: Any | None = None) -> Any:
+    """A real Bolt ``App`` wired to :func:`fake_web_client` (auth.test is faked)."""
+    from slack_bolt import App
+
+    return App(client=client if client is not None else fake_web_client())
+
+
+__all__ = [
+    "BOT_USER_ID",
+    "TEAM_ID",
+    "dm_body",
+    "envelope",
+    "fake_web_client",
+    "mention_body",
+    "offline_bolt_app",
+]

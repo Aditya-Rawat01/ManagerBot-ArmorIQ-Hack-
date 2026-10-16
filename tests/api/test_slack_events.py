@@ -7,6 +7,8 @@ Offline: `__offline_fake_slack` transport, fake member table, fake database
 import asyncio
 import inspect
 import logging
+import threading
+import time
 
 import pytest
 
@@ -442,6 +444,76 @@ def test__offline_fake_slack_build_app_registers_listeners() -> None:
     )
     assert app is not None
     assert registered == ["app_mention", "message"]
+
+
+# --- registered listeners through Bolt's own dispatch (offline) -------------
+
+
+class _RecordingHandle:
+    """Fake P3-04 `handle`: records calls, signals when `expected` arrived."""
+
+    def __init__(self, expected: int) -> None:
+        self.calls: list[tuple[str, str | None, str]] = []
+        self.expected = expected
+        self.done = threading.Event()
+
+    async def __call__(self, ctx, message):  # type: ignore[no-untyped-def]
+        self.calls.append((ctx.entry_point.value, ctx.slack_event_id, message))
+        if len(self.calls) >= self.expected:
+            self.done.set()
+        return f"req-{len(self.calls)}"
+
+
+def _wired_bolt_app(handle, db=None, **overrides):  # type: ignore[no-untyped-def]
+    from tests.fakes.slack import offline_bolt_app
+
+    bolt = offline_bolt_app()
+    args = {
+        "bot_token": "xoxb-fake",
+        "members": _members(),
+        "expected_team_id": "T1",
+        "allowed_channels": {"C1"},
+        "workspace_id": "ws-1",
+        "db": db if db is not None else FakeDb(one=[(1,)]),
+        "handle": handle,
+        "app": bolt,
+    }
+    args.update(overrides)
+    build_app(**args)
+    return bolt
+
+
+def _bolt_dispatch(bolt, body):  # type: ignore[no-untyped-def]
+    from slack_bolt.request import BoltRequest
+
+    return bolt.dispatch(BoltRequest(body=body, mode="socket_mode"))
+
+
+def test__offline_fake_slack_bolt_dispatches_mention_and_dm_to_handle() -> None:
+    """B2: both registered listeners run end-to-end on real-shaped bodies."""
+    handle = _RecordingHandle(expected=2)
+    bolt = _wired_bolt_app(handle)
+    for body in (mention_body(event_id="Ev-m"), dm_body(event_id="Ev-d")):
+        response = _bolt_dispatch(bolt, body)
+        assert response is not None and response.status == 200
+    assert handle.done.wait(5), f"handle calls: {handle.calls}"
+    assert sorted(handle.calls) == [
+        ("slack_dm", "Ev-d", "hello bot"),
+        ("slack_mention", "Ev-m", "atlas budget?"),
+    ]
+
+
+def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs() -> None:
+    """A DM alone (no mention) reaches `handle` once; channel messages do not."""
+    handle = _RecordingHandle(expected=1)
+    bolt = _wired_bolt_app(handle)
+    channel_message = dm_body(event_id="Ev-chan", channel="C1")
+    channel_message["event"]["channel_type"] = "channel"
+    _bolt_dispatch(bolt, channel_message)
+    _bolt_dispatch(bolt, dm_body(event_id="Ev-dm-only"))
+    assert handle.done.wait(5)
+    time.sleep(0.2)  # give a wrongly-routed channel message time to show up
+    assert handle.calls == [("slack_dm", "Ev-dm-only", "hello bot")]
 
 
 def test__offline_fake_slack_api_health_without_slack() -> None:

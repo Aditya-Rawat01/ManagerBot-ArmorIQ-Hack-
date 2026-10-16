@@ -63,17 +63,19 @@ def build_app(
 
     if app is None:
         app = App(token=bot_token)
-    deps = {
+    # Each listener gets exactly the keyword arguments it accepts: DMs have no
+    # channel allowlist (passing one raised TypeError on every DM).
+    dm_deps: dict[str, Any] = {
         "members": members,
         "expected_team_id": expected_team_id,
-        "allowed_channels": allowed_channels,
         "workspace_id": workspace_id,
         "db": db,
     }
+    mention_deps: dict[str, Any] = {**dm_deps, "allowed_channels": allowed_channels}
 
     @app.event("app_mention")
     def _on_mention(body: dict[str, Any], ack: Any) -> None:
-        incoming = slack_events.on_app_mention(body, ack, **deps)
+        incoming = slack_events.on_app_mention(body, ack, **mention_deps)
         if (
             isinstance(incoming, slack_events.IncomingSlackEvent)
             and handle is not None
@@ -87,7 +89,7 @@ def build_app(
         if not isinstance(event, dict) or event.get("channel_type") != "im":
             ack()
             return
-        incoming = slack_events.on_direct_message(body, ack, **deps)
+        incoming = slack_events.on_direct_message(body, ack, **dm_deps)
         if (
             isinstance(incoming, slack_events.IncomingSlackEvent)
             and handle is not None
