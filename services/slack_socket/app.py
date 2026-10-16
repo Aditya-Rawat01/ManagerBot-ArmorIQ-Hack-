@@ -178,10 +178,20 @@ def start_slack_socket(
         loop=loop,
     )
     handler = SocketModeHandler(app, app_token)
-    thread = threading.Thread(target=handler.connect, name="slack-socket-mode", daemon=True)
+    thread = threading.Thread(
+        target=_connect_quietly, args=(handler,), name="slack-socket-mode", daemon=True
+    )
     thread.start()
     logger.info("slack socket mode started")
     return SlackRuntime(handler=handler, thread=thread)
+
+
+def _connect_quietly(handler: Any) -> None:
+    """Open the websocket; a failure is logged by class only (never a token)."""
+    try:
+        handler.connect()
+    except Exception as exc:
+        logger.error("slack socket mode connect failed error=%s", type(exc).__name__)
 
 
 def stop_slack_socket(runtime: SlackRuntime | None) -> None:

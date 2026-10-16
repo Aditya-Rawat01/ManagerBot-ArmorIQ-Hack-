@@ -632,6 +632,113 @@ def test__offline_fake_slack_api_health_without_slack() -> None:
         assert client.get("/api/v1/health").status_code == 200
 
 
+def _slack_settings(**overrides: object):  # type: ignore[no-untyped-def]
+    from tests.api.conftest import make_settings
+
+    values: dict[str, object] = {
+        "slack_bot_token": "xoxb-offline-fake-token",
+        "slack_app_token": "xapp-offline-fake-token",
+        "slack_team_id": "T1",
+        "slack_allowed_channels": "C1",
+    }
+    values.update(overrides)
+    return make_settings(**values)
+
+
+async def _noop_handle(ctx, message):  # type: ignore[no-untyped-def]
+    return "req-noop"
+
+
+def test__offline_fake_slack_start_exception_never_breaks_api_startup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """I4: anything raised while starting Slack leaves the API (and /health) up."""
+    from fastapi.testclient import TestClient
+
+    import services.slack_socket.app as slack_app
+    from apps.api.main import create_app
+
+    def _explode(**kwargs: object) -> None:
+        raise RuntimeError("slack exploded xoxb-offline-fake-token")
+
+    monkeypatch.setattr(slack_app, "start_slack_socket", _explode)
+    monkeypatch.setattr("apps.api.main.configure_logging", lambda level: None)
+    app = create_app(_slack_settings())
+    app.state.orchestrator_handle = _noop_handle
+    with caplog.at_level(logging.ERROR, logger="apps.api.main"), TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/api/v1/health").status_code == 200
+    assert "failed to start" in caplog.text
+    assert "error=RuntimeError" in caplog.text
+    assert "xoxb" not in caplog.text
+
+
+def test__offline_fake_slack_invalid_token_constructor_never_breaks_startup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Bolt's `App(token=...)` runs auth.test; invalid_auth must not kill the API."""
+    from fastapi.testclient import TestClient
+    from slack_bolt.error import BoltError
+
+    from apps.api.main import create_app
+
+    class _RevokedTokenApp:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise BoltError("auth.test failed: invalid_auth")
+
+    monkeypatch.setattr("slack_bolt.App", _RevokedTokenApp)
+    monkeypatch.setattr("apps.api.main.configure_logging", lambda level: None)
+    app = create_app(_slack_settings())
+    app.state.orchestrator_handle = _noop_handle
+    with caplog.at_level(logging.ERROR, logger="apps.api.main"), TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    assert "error=BoltError" in caplog.text
+    assert "offline-fake-token" not in caplog.text
+
+
+def test__offline_fake_slack_connect_failure_logged_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
+    from tests.fakes.slack import offline_bolt_app
+
+    class _RefusingHandler:
+        def __init__(self, app: object, app_token: str) -> None:
+            self.closed = False
+
+        def connect(self) -> None:
+            raise ConnectionError("refused for xapp-offline-fake-token")
+
+        def disconnect(self) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    bolt = offline_bolt_app()
+    monkeypatch.setattr("slack_bolt.App", lambda token: bolt)
+    monkeypatch.setattr("slack_bolt.adapter.socket_mode.SocketModeHandler", _RefusingHandler)
+    with caplog.at_level(logging.ERROR, logger="services.slack_socket.app"):
+        runtime = start_slack_socket(
+            bot_token="xoxb-offline-fake-token",
+            app_token="xapp-offline-fake-token",
+            members=_members(),
+            expected_team_id="T1",
+            allowed_channels={"C1"},
+            workspace_id="ws-1",
+            db=FakeDb(),
+            handle=_noop_handle,
+            loop=api_loop,
+        )
+        assert runtime is not None
+        runtime.thread.join(5)
+    assert "slack socket mode connect failed error=ConnectionError" in caplog.text
+    assert "offline-fake-token" not in caplog.text
+    stop_slack_socket(runtime)
+    assert runtime.handler.closed
+
+
 def test_stop_slack_socket_none_is_noop() -> None:
 
     stop_slack_socket(None)

@@ -9,8 +9,10 @@ tests build apps with explicit settings and never read a developer's `.env`.
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,29 +28,53 @@ from apps.api.routes.router import api_v1_router
 API_V1_PREFIX = "/api/v1"
 
 
+logger = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown hooks. Slack Socket Mode is P3-05-owned, D-27 pending.
 
     The adapter starts only with tokens configured AND an orchestrator handle
-    (P3-04, not merged): otherwise the API serves HTTP only and `/health`
-    stays green. This block must not grow P3-04's lifespan integration.
+    (P3-04, not merged; it sets ``app.state.orchestrator_handle``): otherwise
+    the API serves HTTP only and `/health` stays green. Starting Slack can
+    never fail API startup: any exception (an invalid or revoked token makes
+    Bolt's constructor ``auth.test`` raise; Slack may be unreachable) is
+    logged by exception class and the API continues without Slack.
     """
-    from apps.api.core.db import BackendDatabase, BackendDbNotConfiguredError
-    from apps.api.identity import build_member_table
-    from services.slack_socket.app import start_slack_socket, stop_slack_socket
+    from services.slack_socket.app import stop_slack_socket
 
+    runtime, db = await _start_slack(app)
+    try:
+        yield
+    finally:
+        stop_slack_socket(runtime)
+        if db is not None:
+            db.close()
+
+
+async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
+    """Start the Socket Mode adapter if configured. Never raises.
+
+    Returns ``(runtime, db)``; both are None when Slack is disabled or failed
+    to start. The blocking parts (Bolt's ``auth.test``, the database) run in
+    a worker thread so the event loop is never stalled.
+    """
     settings: Settings = app.state.settings
-    runtime = None
     db = None
     try:
+        from apps.api.core.db import BackendDatabase, BackendDbNotConfiguredError
+        from apps.api.identity import build_member_table
+        from services.slack_socket.app import start_slack_socket
+
         members = build_member_table(settings)
         if settings.database_url_backend is not None:
             try:
                 db = BackendDatabase(settings.database_url_backend.get_secret_value())
             except BackendDbNotConfiguredError:
                 db = None
-        runtime = start_slack_socket(
+        runtime = await asyncio.to_thread(
+            start_slack_socket,
             bot_token=_secret(settings.slack_bot_token),
             app_token=_secret(settings.slack_app_token),
             members=members,
@@ -56,14 +82,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             allowed_channels=set(settings.slack_allowed_channels),
             workspace_id=None,  # resolved by P3-04 wiring; adapter refuses without it
             db=db,
-            handle=None,  # P3-04 provides the orchestrator handle when merged
+            handle=getattr(app.state, "orchestrator_handle", None),  # P3-04 sets it
             loop=asyncio.get_running_loop(),  # Bolt threads dispatch onto this loop
         )
-        yield
-    finally:
-        stop_slack_socket(runtime)
+    except Exception as exc:
+        logger.error(
+            "slack socket mode failed to start; API continues without Slack error=%s",
+            type(exc).__name__,
+        )
         if db is not None:
             db.close()
+        return None, None
+    return runtime, db
 
 
 def _secret(value: object) -> str | None:
