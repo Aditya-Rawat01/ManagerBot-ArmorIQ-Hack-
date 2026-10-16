@@ -357,8 +357,10 @@ def deliver(
         raise DeliveryError("answer must be a ResponderOutput")
     if answer.request_id != ctx.request_id:
         raise DeliveryError("answer belongs to another request: refusing to deliver")
+    if not isinstance(highest_tier, DataTier):
+        # Fail closed: an unknown/missing tier must never reach a shared thread.
+        raise DeliveryError("highest_tier must be a DataTier: refusing to route")
 
-    elevated = highest_tier in (DataTier.CONFIDENTIAL, DataTier.RESTRICTED)
     recipient = ctx.requester.member_id
 
     if ctx.entry_point is EntryPoint.WEB:
@@ -381,16 +383,17 @@ def deliver(
             delivery_ids=(delivery_id,) if delivery_id is not None else (),
         )
 
-    if ctx.entry_point is EntryPoint.SLACK_DM or not elevated:
-        if ctx.entry_point is EntryPoint.SLACK_DM:
-            return _deliver_dm(
-                ctx,
-                answer.answer_text,
-                highest_tier,
-                sender=sender,
-                db=db,
-                recipient=recipient,
-            )
+    if ctx.entry_point is EntryPoint.SLACK_DM:
+        return _deliver_dm(
+            ctx,
+            answer.answer_text,
+            highest_tier,
+            sender=sender,
+            db=db,
+            recipient=recipient,
+        )
+    if highest_tier is DataTier.TEAM:
+        # The shared thread is allowed for team-tier data only (R-62).
         return _deliver_thread(
             ctx,
             answer.answer_text,

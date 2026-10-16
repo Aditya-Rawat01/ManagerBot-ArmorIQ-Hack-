@@ -338,6 +338,19 @@ def test__offline_fake_slack_citations_do_not_drive_routing() -> None:
     assert record.channel is DeliveryChannel.SLACK_THREAD
 
 
+# --- I3: the tier check fails closed ------------------------------------------
+
+
+@pytest.mark.parametrize("entry", list(EntryPoint))
+@pytest.mark.parametrize("bad_tier", [None, "team", "confidential", "", 0, object()])
+def test__offline_fake_slack_non_datatier_refuses(entry: EntryPoint, bad_tier: object) -> None:
+    sender, db = FakeSender(), AuditSim()
+    with pytest.raises(DeliveryError):
+        deliver(_ctx(entry), _answer("secret"), bad_tier, sender=sender, db=db)  # type: ignore[arg-type]
+    assert sender.thread_posts == [] and sender.dms == []
+    assert db.statements == []  # refused before any write
+
+
 # --- failure handling -------------------------------------------------------
 
 
