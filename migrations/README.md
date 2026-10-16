@@ -19,7 +19,7 @@ running services (PRD v2 §8.1).
 | `0009_audit_event_fk_restrict.sql` | `request_events` / `decision_events` / `delivery_events` `plan_id` FKs become `ON DELETE RESTRICT` (were `CASCADE`): the backend's `DELETE` on `plans` can no longer remove append-only audit events (P3-01 follow-up). No new objects, no grant changes |
 | `0010_seed_keys.sql` | Nullable `seed_key` + unique `(workspace_id, seed_key)` index on `decisions`, `manager_guidance`, `team_notes` (P2-03 keyed seed upserts; runtime rows keep NULL). Additive; 0005 grants restated, backend still denied |
 | `0011_approved_views.sql` | Synthetic `company_projects` + per-tier `approved_company_data_*` views with static fixture rows (P2-08 read tools; D-11). Toolserver SELECT only; backend denied |
-| `0012_egress_sink_correlation.sql` | P2-10 follow-up (spec §9.1): nullable `jti` + `requester_member_id` on `egress_sink` (filled from the verified `_ctx` by the honeypot handler), partial unique index on `jti`. Additive; sink grants restated (toolserver SELECT + INSERT only, backend denied) |
+| `0012_egress_sink_correlation.sql` | P2-10 follow-up (spec §9.1): nullable `jti` + `requester_member_id` on `egress_sink` (filled from the verified `_ctx` by the honeypot handler), partial unique index on `jti`. Additive; sink grants restated (toolserver SELECT + INSERT only, backend denied). Least privilege on `tasks`: toolserver `UPDATE`/`DELETE` revoked (its only writer, `create_followup_task`, inserts and selects) |
 
 ## Rules (binding)
 
@@ -94,8 +94,8 @@ still verify numbering, grants, and enum parity.
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
 | `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |
 | `tool_call_attempts` (0008) | — (denied, incl. INSERT) | SELECT + INSERT (append-only) |
-| `tasks` | — (denied) | full CRUD |
-| `egress_sink` | — (denied; PROPOSED count unconfirmed) | SELECT + INSERT |
+| `tasks` | — (denied) | SELECT + INSERT (UPDATE/DELETE revoked in 0012) |
+| `egress_sink` | — (denied; PROPOSED count unconfirmed) | SELECT + INSERT (append-only) |
 | `draft_review_queue` view | SELECT | — (denied) |
 | sequences | — (denied; IDENTITY inserts need no sequence grant) | — (denied) |
 

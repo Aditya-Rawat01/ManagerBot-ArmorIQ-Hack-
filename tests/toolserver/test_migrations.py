@@ -101,6 +101,21 @@ def test_egress_sink_correlation_columns() -> None:
     assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
 
 
+def test_workspace_tables_least_privilege() -> None:
+    """0012: the toolserver never rewrites follow-up tasks or sink rows, and
+    the grant check covers both tables."""
+    text = _sql_text()
+    for table in ("tasks", "egress_sink"):
+        assert f"REVOKE UPDATE, DELETE ON public.{table} FROM proxylead_toolserver" in text
+        assert f"GRANT SELECT, INSERT ON public.{table} TO proxylead_toolserver" in text
+    last_tasks_grant = text.rindex("ON public.tasks TO proxylead_toolserver")
+    assert text[last_tasks_grant - 30 : last_tasks_grant].endswith("GRANT SELECT, INSERT ")
+    assert text.rindex("REVOKE UPDATE, DELETE ON public.tasks FROM proxylead_toolserver") > (
+        text.rindex("GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO proxylead_toolserver")
+    )
+    assert set(verify_script.WORKSPACE_TABLE_INSERTS) == {"tasks", "egress_sink"}
+
+
 def test_ledger_followup_constraints() -> None:
     """0008: no explicit ledger ids; new rows carry a hex digest and no free text."""
     text = _sql_text()

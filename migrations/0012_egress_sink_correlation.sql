@@ -15,6 +15,11 @@
 --   restated below (grants travel with objects): proxylead_toolserver keeps
 --   SELECT + INSERT and never UPDATE/DELETE on the sink (table-level grants
 --   cover the new columns); proxylead_backend keeps NOTHING.
+-- * Least privilege on `tasks`: 0005 granted the toolserver full CRUD, but
+--   the only writer (create_followup_task, P2-10) INSERTs and SELECTs, and no
+--   planned task (P2-09, P3-04, P4-03, P5-03 / D-16 reset) updates or deletes
+--   task rows through the toolserver. UPDATE and DELETE are revoked; a future
+--   task that needs them grants them in its own migration.
 -- Idempotent: re-running this file changes nothing.
 
 ALTER TABLE public.egress_sink
@@ -28,3 +33,8 @@ GRANT SELECT, INSERT ON public.egress_sink TO proxylead_toolserver;
 REVOKE UPDATE, DELETE ON public.egress_sink FROM proxylead_toolserver;
 REVOKE ALL ON public.egress_sink FROM proxylead_backend;
 REVOKE ALL ON public.egress_sink FROM PUBLIC;
+
+GRANT SELECT, INSERT ON public.tasks TO proxylead_toolserver;
+REVOKE UPDATE, DELETE ON public.tasks FROM proxylead_toolserver;
+REVOKE ALL ON public.tasks FROM proxylead_backend;
+REVOKE ALL ON public.tasks FROM PUBLIC;
