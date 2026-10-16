@@ -5,7 +5,8 @@ Run locally (from the repository root):
     uvicorn services.toolserver.main:create_app --factory --port 8100
 
 Endpoints:
-    GET  /health          liveness (public)
+    GET  /health          readiness (public): 200 once the embedding model is
+                          loaded (lifespan warm, P2-05), else 503 `not_ready`
     POST /memory/mcp      memory-mcp    (bearer: TOOLSERVER_BEARER_MEMORY)
     POST /workspace/mcp   workspace-mcp (bearer: TOOLSERVER_BEARER_WORKSPACE)
 
@@ -20,11 +21,14 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from services.authorization.ctx_envelope import InMemoryReplayGuard
-from services.contracts import HealthResponse, McpEndpoint
+from services.contracts import ErrorBody, ErrorResponse, HealthResponse, McpEndpoint
+from services.knowledge import embeddings
+from services.knowledge.embeddings import MODEL_ID
 from services.toolserver import __version__, db
 from services.toolserver.config import Settings, get_settings
 from services.toolserver.ledger import Ledger
@@ -72,7 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     }
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(running: FastAPI) -> AsyncIterator[None]:
         # Mounted sub-app lifespans do not run automatically; start each
         # session manager here (each can run exactly once).
         async with AsyncExitStack() as stack:
@@ -102,6 +106,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         type(exc).__name__,
                     )
             ctx_secret = settings.ctx_secret.get_secret_value() if settings.ctx_secret else None
+            # Embedding model, once per process (P2-05; Settings already
+            # refused any EMBED_MODEL but embeddings.MODEL_ID). A failed warm
+            # keeps /health at 503, and every search fails closed: the request
+            # path never loads the model (no per-request download retries, no
+            # hosted fallback).
+            running.state.embedding_ready = False
+            try:
+                embeddings.warm()
+            except Exception as exc:
+                logging.getLogger(__name__).error(
+                    "embedding model unavailable (%s); /health 503, search fails closed",
+                    type(exc).__name__,
+                )
+            else:
+                running.state.embedding_ready = True
+                logging.getLogger(__name__).info("embedding model ready (%s)", MODEL_ID)
             for endpoint, holder in holders.items():
                 holder["runtime"] = ToolRuntime(
                     endpoint=endpoint,
@@ -126,9 +146,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=None,
     )
     app.state.settings = settings
+    app.state.embedding_ready = False
 
-    @app.get("/health", response_model=HealthResponse)
-    def health() -> HealthResponse:
+    @app.get(
+        "/health",
+        response_model=HealthResponse,
+        responses={503: {"model": ErrorResponse, "description": "Embedding model not loaded"}},
+    )
+    def health() -> HealthResponse | JSONResponse:
+        if not app.state.embedding_ready:
+            body = ErrorResponse(
+                error=ErrorBody(code="not_ready", message="embedding model not loaded")
+            )
+            return JSONResponse(status_code=503, content=body.model_dump(mode="json"))
         return HealthResponse(
             service=settings.service_name, version=__version__, environment=settings.app_env
         )

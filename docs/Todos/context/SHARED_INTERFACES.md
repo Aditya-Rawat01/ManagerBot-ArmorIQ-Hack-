@@ -125,7 +125,7 @@ source (`unknown` if the layer cannot be determined). Never `allow`.
 | `knowledge_save_team_note` arguments | **FIXED in part** (PRD §6.1) | Must include `content_kind` ∈ {`note`, `summary`}; author and provenance injected by trusted code |
 | `create_followup_task` arguments | **FIXED in part** (Arch §6.2) | Short title, optional description, enum-bounded owner and priority, idempotency key. Enum values PROPOSED by P2-02 |
 | All other argument schemas | **PROPOSED** (P2-02, U-7) | Strict Pydantic models with `extra="forbid"`, length limits, no tier/identity fields |
-| Search result | **FIXED shape, open limits** | `KnowledgeSearchResult` / `KnowledgeSearchHit` / `SourceCitation`. Score scale, snippet limits, and `min_score`: **UNRESOLVED** (E17, U-10) |
+| Search result | **FIXED shape, open limits** | `KnowledgeSearchResult` / `KnowledgeSearchHit` / `SourceCitation`. Score scale and snippet limit: **PROPOSED** (P2-05: `score` = cosine similarity, `rank` = RRF order, snippets ≤ 400 chars; see §7). `min_score` value: **UNRESOLVED** (E17, U-10) |
 | `knowledge_get_source_*` / `read_source_*` results | **PROPOSED** (P2-02) | Bounded record with source ID, tier, and provenance; `read_source_*` returns rows only from named approved views (names PROPOSED by P2-01/P2-08) |
 | MCP result framing | **FIXED**: JSON-RPC 2.0, SSE, required text content shape (Arch §5.1). **PROPOSED** (P2-06, shape below): the text content carries the JSON of the P2-02 result model; the ledger reference travels in the result's `_meta` | |
 | Tool-server rejection | **PROPOSED** (P1-04/P2-06, shape below) | MCP error result (`isError: true`) whose text block is `{code, message}` with codes `unauthenticated`, `invalid_context`, `context_expired`, `replay`, `invalid_arguments`, `out_of_scope`, `precondition_failed`, `internal`. Gateway maps it to `ToolInvocationResult(status=rejected_by_tool_server)` + `DecisionSource.TOOL_SERVER_RULE`, never ALLOW. No protected detail in messages |
@@ -212,7 +212,24 @@ they live in `provenance` (`version` int, `review_status` ∈ `ReviewStatus`,
 `superseded_by` = successor `source_id` or `null`, consistent with `status`),
 next to `recorded_at`, `embed_model`, `embed_tool` (model version), `embed_dim`,
 and `ingest_digest`; `created_at`/`updated_at` = the record's synthetic date.
-`knowledge_chunks.tier` always equals its source's `tier`. `decisions`,
+`knowledge_chunks.tier` always equals its source's `tier`.
+
+Search ordering and score (P2-05, `services/knowledge/retrieval.py`,
+**PROPOSED**; the threshold value stays D-23/E17's): `knowledge_search_*`
+runs a lexical leg (`websearch_to_tsquery`, rows with `ts_rank_cd` = 0
+dropped) and a vector leg (HNSW cosine), 50 candidates each, and fuses them
+with RRF (k = 60) for ORDER only: `rank` is the fused order (chunks dedupe,
+then each source keeps its best chunk). `KnowledgeSearchHit.score` is the
+cosine similarity `1 - (embedding <=> query_embedding)` of the returned chunk
+under `EMBED_MODEL` (in [-1, 1]; seed corpus: on-topic top hits ~0.70–0.81,
+off-topic or nonsense queries ~0.45–0.60). It is comparable across queries,
+NOT monotonic in `rank`, and the only value `min_score` / `MIN_SCORE` filter
+on (the responder's `effective_min_score` compares it); a threshold measured
+on RRF sums or another model does not transfer. Both legs share one filter
+clause: workspace, exact tier, `status = 'active'`, `review_status =
+'authoritative'` (D-09), and the source join requires the chunk's workspace
+and tier. Snippets are ≤ 400 characters: the whole chunk, else `ts_headline`
+fragments around the matched terms, else the leading text. `decisions`,
 `manager_guidance`, `team_notes` carry a nullable `seed_key` (0010): set on
 seed rows, NULL on runtime rows. Eval case labels are never stored.
 

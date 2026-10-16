@@ -623,7 +623,7 @@ def test_live_write_tests_need_opt_in_and_never_neon(
 
 
 @NEEDS_DB
-def test_ledger_row_matches_verified_ctx() -> None:
+def test_ledger_row_matches_verified_ctx(real_model: Any) -> None:
     import psycopg
 
     jti = f"jti-dispatch-{uuid.uuid4().hex}"
@@ -646,7 +646,7 @@ def test_ledger_row_matches_verified_ctx() -> None:
 
 
 @NEEDS_DB
-def test_duplicate_jti_replays_without_executing() -> None:
+def test_duplicate_jti_replays_without_executing(real_model: Any) -> None:
     jti = f"jti-replay-{uuid.uuid4().hex}"
     with live_client() as client:
         first = call(client, {"query": "quokka", "limit": 5, "_ctx": make_ctx(jti=jti)})

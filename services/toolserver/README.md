@@ -24,7 +24,7 @@ unverified (experiment E1, `docs/EXPERIMENTS.md`).
 
 | Path | Endpoint | Credential env var |
 |---|---|---|
-| `GET /health` | liveness (public) | — |
+| `GET /health` | readiness (public): `200` once the embedding model is loaded at startup, else `503` `not_ready` | — |
 | `POST /memory/mcp` | `memory-mcp` | `TOOLSERVER_BEARER_MEMORY` |
 | `POST /workspace/mcp` | `workspace-mcp` | `TOOLSERVER_BEARER_WORKSPACE` |
 
@@ -50,6 +50,13 @@ Set at least the bearer tokens in the root `.env` (see `../.env.example`).
 ```bash
 uvicorn services.toolserver.main:create_app --factory --port 8100
 ```
+
+Startup loads the local FastEmbed model once (`EMBED_MODEL`, which must be
+`BAAI/bge-small-en-v1.5`; any other value fails startup). The first local run
+downloads it (~65 MB) into FastEmbed's cache (`FASTEMBED_CACHE_PATH`, else a
+temp dir); the Docker image bakes it in. If the load fails, `/health` stays
+`503` and every search fails closed: requests never load or download the
+model.
 
 Smoke test (the request shape from ArmorIQ's MCP format docs):
 

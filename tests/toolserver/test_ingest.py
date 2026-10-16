@@ -862,7 +862,7 @@ def test_model_cache_probe_uses_fastembed_cache_path(
 
 @pytest.mark.slow
 @pytest.mark.skipif(not _model_cached(), reason="FastEmbed model not cached (no download in tests)")
-def test_embeddings_return_384_dims() -> None:
+def test_embeddings_return_384_dims(real_model: object) -> None:
     from services.knowledge.embeddings import embed, model_version
 
     vectors = embed(["quokka Friday deploy freeze", "unrelated snack poll"])

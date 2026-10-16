@@ -140,6 +140,10 @@ services:
       # this false (deploy/toolserver/README.md).
       MCP_ENABLE_DIAGNOSTIC_TOOLS: ${MCP_ENABLE_DIAGNOSTIC_TOOLS:-true}
       CTX_SECRET: ${CTX_SECRET:-}
+      # Query-embedding model (P2-05). Must equal embeddings.MODEL_ID: any
+      # other value fails startup. The image bakes the model in; /health is
+      # 503 until it has loaded.
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-small-en-v1.5}
       # The tool server's own role DSN only. BACKEND / MIGRATE never mapped.
       # Empty until P2-01 defines the toolserver role (see the header note).
       DATABASE_URL_TOOLSERVER: ${DATABASE_URL_TOOLSERVER:-}

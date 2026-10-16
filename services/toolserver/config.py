@@ -7,6 +7,8 @@ from typing import Annotated, Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from services.knowledge.embeddings import MODEL_ID
+
 SERVER_DIR = Path(__file__).resolve().parent  # services/toolserver
 REPO_ROOT = SERVER_DIR.parents[1]
 
@@ -40,6 +42,11 @@ class Settings(BaseSettings):
     ctx_secret: SecretStr | None = None
     database_url_toolserver: SecretStr | None = None
 
+    # Query-embedding model (PRD §12 name). Must equal
+    # services.knowledge.embeddings.MODEL_ID: any other value fails startup
+    # (fail closed; there is no alternative or hosted embedder).
+    embed_model: str = MODEL_ID
+
     @field_validator("mcp_allowed_hosts", mode="before")
     @classmethod
     def _parse_csv(cls, value: object) -> object:
@@ -53,6 +60,13 @@ class Settings(BaseSettings):
         if not hosts:
             raise ValueError("MCP_ALLOWED_HOSTS must list at least one host")
         return hosts
+
+    @field_validator("embed_model")
+    @classmethod
+    def _require_local_model(cls, value: str) -> str:
+        if value != MODEL_ID:
+            raise ValueError(f"EMBED_MODEL must be {MODEL_ID!r}, the only supported local model")
+        return value
 
 
 @lru_cache

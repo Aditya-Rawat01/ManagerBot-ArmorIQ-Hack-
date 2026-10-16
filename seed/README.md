@@ -29,9 +29,10 @@ through the migration-role ingest into a database.
   of the decision it replaces (`superseded_by_id` is re-linked every run).
 - `guidance.json` — `manager_guidance` rows (`key`, `approved_by` persona).
 - `notes.json` — `team_notes` drafts (`key`, `review_status: draft`). Drafts
-  are NOT search evidence (D-09 interim): searchable retrieval (P2-04) only
-  returns authoritative, non-superseded records; Maya reaches drafts through
-  the review queue instead.
+  are NOT search evidence (D-09, resolved 16 Oct 2026): search (P2-04/P2-05,
+  both the lexical and the vector leg) only returns active records whose
+  `review_status` is `authoritative` (missing or unknown = excluded); Maya
+  reaches drafts through the review queue instead.
 - Members/workspace rows come from env at seed time (D-20/ADR-021), not files.
   A persona without `PERSONA_<NAME>_EMAIL` is not written (the run warns with
   the env-key name only) and its FKs stay NULL — an honest unknown, never a
