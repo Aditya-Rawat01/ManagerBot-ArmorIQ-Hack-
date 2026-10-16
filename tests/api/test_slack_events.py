@@ -491,11 +491,16 @@ def test__offline_fake_slack_dispatch_failure_leaves_received() -> None:
 # --- sender -----------------------------------------------------------------
 
 
+_NO_UNFURL = {"unfurl_links": False, "unfurl_media": False}
+
+
 def test__offline_fake_slack_sender_thread_reply() -> None:
     client = FakeSlackClient()
     sender = SlackSender(client)
     sender.post_in_thread("C1", "1700000000.0001", "hello")
-    assert client.posts == [{"channel": "C1", "thread_ts": "1700000000.0001", "text": "hello"}]
+    assert client.posts == [
+        {"channel": "C1", "thread_ts": "1700000000.0001", "text": "hello", **_NO_UNFURL}
+    ]
 
 
 def test__offline_fake_slack_sender_dm_opens_channel() -> None:
@@ -503,7 +508,7 @@ def test__offline_fake_slack_sender_dm_opens_channel() -> None:
     sender = SlackSender(client)
     sender.send_dm("U-maya", "review needed")
     assert client.opens == [{"users": ["U-maya"]}]
-    assert client.posts == [{"channel": "D-maya", "text": "review needed"}]
+    assert client.posts == [{"channel": "D-maya", "text": "review needed", **_NO_UNFURL}]
 
 
 def test__offline_fake_slack_sender_errors_are_typed() -> None:
@@ -512,6 +517,46 @@ def test__offline_fake_slack_sender_errors_are_typed() -> None:
         sender.post_in_thread("C1", None, "hello")
     with pytest.raises(SlackError):
         SlackSender(FakeSlackClient(fail_open=True)).send_dm("U-x", "hi")
+
+
+@pytest.mark.parametrize(
+    ("errors", "call", "code"),
+    [
+        ({"chat.postMessage": "not_in_channel"}, "thread", "not_in_channel"),
+        ({"chat.postMessage": "channel_not_found"}, "thread", "channel_not_found"),
+        ({"conversations.open": "missing_scope"}, "dm", "missing_scope"),
+        ({"chat.postMessage": "restricted_action"}, "dm", "restricted_action"),
+    ],
+)
+def test__offline_fake_slack_sender_keeps_real_slack_api_error_codes(
+    errors: dict[str, str], call: str, code: str
+) -> None:
+    """slack_sdk's SlackApiError carries a SlackResponse (not a dict) as `.response`."""
+    from slack_sdk.errors import SlackApiError
+
+    from tests.fakes.slack import fake_web_client
+
+    sender = SlackSender(fake_web_client(errors=errors))
+    with pytest.raises(SlackError) as failed:
+        if call == "thread":
+            sender.post_in_thread("C1", "1700000000.0001", "secret answer text")
+        else:
+            sender.send_dm("U-maya", "secret answer text")
+    assert str(failed.value).endswith(f": {code}")
+    assert isinstance(failed.value.__cause__, SlackApiError)
+    assert "secret answer text" not in str(failed.value)
+
+
+def test__offline_fake_slack_sender_never_unfurls_through_the_web_client() -> None:
+    from tests.fakes.slack import fake_web_client
+
+    client = fake_web_client()
+    sender = SlackSender(client)
+    sender.post_in_thread("C1", None, "see https://example.invalid/x")
+    sender.send_dm("U-maya", "see https://example.invalid/y")
+    posts = [args for method, args in client.calls if method == "chat.postMessage"]
+    assert len(posts) == 2
+    assert all(post["unfurl_links"] is False and post["unfurl_media"] is False for post in posts)
 
 
 def test__offline_fake_slack_sender_matches_p306_protocol() -> None:
@@ -723,8 +768,13 @@ def test__offline_fake_slack_bolt_unmapped_users_get_refusal_via_web_api(
     assert opens == [{"users": "U-stranger"}]
     assert sorted(posts, key=lambda a: str(a["channel"])) == sorted(
         [
-            {"channel": "C1", "thread_ts": "1700000000.0002", "text": UNMAPPED_USER_REFUSAL},
-            {"channel": "D-U-stranger", "text": UNMAPPED_USER_REFUSAL},
+            {
+                "channel": "C1",
+                "thread_ts": "1700000000.0002",
+                "text": UNMAPPED_USER_REFUSAL,
+                **_NO_UNFURL,
+            },
+            {"channel": "D-U-stranger", "text": UNMAPPED_USER_REFUSAL, **_NO_UNFURL},
         ],
         key=lambda a: str(a["channel"]),
     )
