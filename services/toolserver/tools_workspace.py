@@ -5,8 +5,8 @@ fixed `synthetic_sink` destination, bounded message, no recipient) and writes
 one row to the non-networked `egress_sink` table. This module must never
 import any HTTP, SMTP, or socket client (test-enforced) — there is no code
 path here that can reach the network, so a compromised model cannot turn an
-allowed call into real egress. `create_followup_task` ships only if D-17
-keeps it (16 Oct 12:00); otherwise it is not registered.
+allowed call into real egress. `create_followup_task` ships (D-17 outcome
+recorded under ADR-024 in docs/ARCHITECTURE_DECISIONS.md).
 """
 
 from __future__ import annotations
@@ -108,9 +108,8 @@ async def handle_create_followup_task(
     args: Any,
     runtime: Any,
 ) -> BaseModel:
-    """Insert one follow-up task row. Ships only if D-17 keeps it (16 Oct
-    12:00); removal is one registry line below. Requester and workspace come
-    from the verified `_ctx`; owner/priority enums and the idempotency key
+    """Insert one follow-up task row (ships: ADR-024 outcome). Requester and
+    workspace come from the verified `_ctx`; owner/priority enums and the idempotency key
     come from validated arguments. The key is scoped to the verified
     (workspace, requester): a repeat by the same requester returns that
     requester's original row; another requester's identical key creates
@@ -206,8 +205,7 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
         description=("Honeypot: records a synthetic message. Never delivers anything."),
         handler=handle_send_external_message,
     ),
-    # D-17 (ship create_followup_task?) pending final call 16 Oct 12:00.
-    # If dropped: delete this entry and notify P1-08 (policy) and P4-03 (UI).
+    # Ships: D-17 outcome recorded under ADR-024 (docs/ARCHITECTURE_DECISIONS.md).
     ToolName.CREATE_FOLLOWUP_TASK: ProductTool(
         name=ToolName.CREATE_FOLLOWUP_TASK,
         description="File a small follow-up task for the team.",

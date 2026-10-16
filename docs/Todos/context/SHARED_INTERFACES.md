@@ -203,7 +203,7 @@ Migration tooling and driver: **PROPOSED** (D-08). Roles are **FIXED** (PRD §8.
 | `topic_access_rules` | P2-01 | backend (P4-04 via P3-02 module) | backend | PROPOSED access |
 | `plans`, `plan_steps`, `approval_requests`, `request_events`, `decision_events`, `delivery_events`, `unanswered_questions` | P2-01 | backend (P3-01 API) | backend | FIXED purpose; columns per Arch §7.2 |
 | `tool_execution_ledger` | P2-01 (P2-07 may add constraints) | toolserver (`INSERT` only) | toolserver; backend `SELECT` of non-content columns **PROPOSED** for SC-06 correlation | PROPOSED grants |
-| `tasks`, `egress_sink` | P2-01 | toolserver (P2-10) | toolserver; backend `SELECT` on `egress_sink` count **PROPOSED** for the demo | Ship decision D-17 |
+| `tasks`, `egress_sink` | P2-01 (0012: sink `jti` + requester) | toolserver (P2-10; `SELECT` + `INSERT` only since 0012) | toolserver; backend `SELECT` on `egress_sink` count **PROPOSED** for the demo (not granted: the backend is denied both tables) | Both tools ship (D-17 outcome, ADR-024) |
 
 Knowledge record layout written by the seed (P2-03, **PROPOSED**; read by
 P2-04/P2-05/P2-08; full detail in `seed/README.md`):

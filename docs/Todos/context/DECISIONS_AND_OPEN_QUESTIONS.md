@@ -183,7 +183,7 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-17 — Does `create_followup_task` ship?
 
-**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI.
+**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI. **Outcome: ships** (P2-10, PR #73; recorded under ADR-024).
 
 - Optional (PRD §6.2). Arch §6.2: if not fully implemented and tested, remove it
   from the policy and UI.
