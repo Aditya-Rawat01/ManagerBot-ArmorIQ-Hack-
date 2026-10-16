@@ -235,3 +235,40 @@ def test__offline_fake_slack_hold_dm_failure_never_marks_request_delivered() -> 
     assert db.delivery_rows == [] and db.plans_delivered_updates() == []
     failed = [a for a in db.attempts("hold_notice") if a["status"] == "failed"]
     assert [a["error_class"] for a in failed] == ["RuntimeError"]
+
+
+# --- I2: audit before send ---------------------------------------------------
+
+
+def test__offline_fake_slack_hold_audit_down_sends_nothing() -> None:
+    sender, db = FakeSender(), AuditSim(fail_all=True)
+    record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert record.status == "failed"
+    assert record.error_class == "audit_failed"
+    assert sender.dms == []
+
+
+def test__offline_fake_slack_hold_pending_recorded_before_dm() -> None:
+    db = AuditSim()
+    seen: list[list[object]] = []
+
+    class CheckingSender(FakeSender):
+        def send_dm(self, slack_user_id: str, text: str) -> None:
+            seen.append([a["status"] for a in db.attempts("hold_notice")])
+            super().send_dm(slack_user_id, text)
+
+    sender = CheckingSender()
+    notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert seen == [["pending"]]
+    assert [a["status"] for a in db.attempts("hold_notice")] == ["pending", "sent"]
+
+
+def test__offline_fake_slack_hold_audit_fails_after_dm_raises_distinct_error() -> None:
+    from apps.api.delivery import DeliveryAuditAfterSendError
+
+    sender, db = FakeSender(), AuditSim(fail_tx=(1,))  # pending ok, sent fails
+    with pytest.raises(DeliveryAuditAfterSendError) as raised:
+        notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert raised.value.record.status == "delivered"
+    assert raised.value.record.error_class == "audit_failed"
+    assert len(sender.dms) == 1  # sent once; P3-04 must not re-send

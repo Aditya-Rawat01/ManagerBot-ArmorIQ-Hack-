@@ -158,16 +158,26 @@ class AuditSim:
     def plans_delivered_updates(self) -> list[str]:
         return [sql for sql, _ in self.statements if "UPDATE plans SET status = 'delivered'" in sql]
 
-    def attempts(self, purpose: str | None = None) -> list[dict[str, object]]:
-        """Committed ``delivery_attempted`` payloads (non-answer messages)."""
+    def attempts(
+        self, purpose: str | None = None, status: str | None = None
+    ) -> list[dict[str, object]]:
+        """Committed non-answer ``delivery_attempted`` payloads (they carry a
+        ``purpose``; an answer's ``pending`` row companion event does not)."""
         payloads = [
             event["payload"] for event in self.events if event["type"] == "delivery_attempted"
         ]
         return [
             p  # type: ignore[misc]
             for p in payloads
-            if isinstance(p, dict) and (purpose is None or p.get("purpose") == purpose)
+            if isinstance(p, dict)
+            and "purpose" in p
+            and (purpose is None or p["purpose"] == purpose)
+            and (status is None or p.get("status") == status)
         ]
+
+    def row_statuses(self) -> list[tuple[object, object]]:
+        """Committed answer ``delivery_events`` rows as (channel, status)."""
+        return [(row["channel"], row["status"]) for row in self.delivery_rows]
 
     def params_text(self) -> str:
         return str([params for _, params in self.statements])
@@ -342,11 +352,104 @@ def test__offline_fake_slack_failed_dm_never_falls_back_to_thread() -> None:
         assert posted in (GENERIC_THREAD_NOTICE, DM_FAILURE_NOTICE)
 
 
-def test__offline_fake_slack_failed_audit_not_reported_delivered() -> None:
+_ROUTES = [
+    (EntryPoint.SLACK_MENTION, DataTier.TEAM),
+    (EntryPoint.SLACK_MENTION, DataTier.CONFIDENTIAL),
+    (EntryPoint.SLACK_DM, DataTier.RESTRICTED),
+]
+
+
+@pytest.mark.parametrize(("entry", "tier"), _ROUTES)
+def test__offline_fake_slack_audit_down_sends_nothing(entry: EntryPoint, tier: DataTier) -> None:
+    # I2: with the audit store down, nothing may leave (no undocumented send).
     sender, db = FakeSender(), AuditSim(fail_all=True)
-    record = deliver(_ctx(), _answer("team update"), DataTier.TEAM, sender=sender, db=db)
+    record = deliver(_ctx(entry), _answer("team update"), tier, sender=sender, db=db)
     assert record.status == "failed"
     assert record.error_class == "audit_failed"
+    assert sender.thread_posts == [] and sender.dms == []
+
+
+class AuditCheckingSender(FakeSender):
+    """Fails the test if anything is sent before a ``pending`` audit record."""
+
+    def __init__(self, db: AuditSim) -> None:
+        super().__init__()
+        self.db = db
+
+    def _assert_pending_recorded(self) -> None:
+        answer_pending = bool(self.db.delivery_rows) and self.db.delivery_rows[-1]["status"] == (
+            "pending"
+        )
+        notice_pending = bool(self.db.attempts()) and self.db.attempts()[-1]["status"] == (
+            "pending"
+        )
+        assert answer_pending or notice_pending, "sent before its pending audit record"
+
+    def post_in_thread(self, channel_id: str, thread_ts: str | None, text: str) -> None:
+        self._assert_pending_recorded()
+        super().post_in_thread(channel_id, thread_ts, text)
+
+    def send_dm(self, slack_user_id: str, text: str) -> None:
+        self._assert_pending_recorded()
+        super().send_dm(slack_user_id, text)
+
+
+@pytest.mark.parametrize(("entry", "tier"), _ROUTES)
+def test__offline_fake_slack_pending_recorded_before_send(
+    entry: EntryPoint, tier: DataTier
+) -> None:
+    db = AuditSim()
+    sender = AuditCheckingSender(db)
+    record = deliver(_ctx(entry), _answer("content"), tier, sender=sender, db=db)
+    assert record.status == "delivered"
+    assert sender.thread_posts or sender.dms
+    pending_then_delivered = [status for _, status in db.row_statuses()]
+    assert pending_then_delivered == ["pending", "delivered"]
+    assert record.delivery_ids == (1, 2)
+
+
+def _expected_channel(entry: EntryPoint, tier: DataTier) -> str:
+    if entry is EntryPoint.SLACK_MENTION and tier is DataTier.TEAM:
+        return "slack_thread"
+    return "slack_dm"
+
+
+@pytest.mark.parametrize(("entry", "tier"), _ROUTES)
+def test__offline_fake_slack_audit_fails_after_send_raises_distinct_error(
+    entry: EntryPoint, tier: DataTier
+) -> None:
+    from apps.api.delivery import DeliveryAuditAfterSendError
+
+    # tx 0 = pending (ok), tx 1 = delivered (fails): the content is out.
+    sender, db = FakeSender(), AuditSim(fail_tx=(1,))
+    with pytest.raises(DeliveryAuditAfterSendError) as raised:
+        deliver(_ctx(entry), _answer("content"), tier, sender=sender, db=db)
+    assert isinstance(raised.value, DeliveryError)  # still fails closed for P3-04
+    assert raised.value.record.status == "delivered"  # sent: P3-04 must not re-send
+    assert raised.value.record.error_class == "audit_failed"
+    assert len(sender.thread_posts) + len(sender.dms) == 1  # sent exactly once
+    assert db.row_statuses() == [(_expected_channel(entry, tier), "pending")]
+
+
+def test__offline_fake_slack_notice_not_posted_without_pending_event() -> None:
+    # tx 0/1 = answer pending/delivered, tx 2 = notice pending (fails).
+    sender, db = FakeSender(), AuditSim(fail_tx=(2,))
+    record = deliver(_ctx(), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db)
+    assert record.status == "delivered"
+    assert record.notice_posted is False
+    assert sender.thread_posts == []
+
+
+def test__offline_fake_slack_notice_audit_fails_after_post_raises() -> None:
+    from apps.api.delivery import DeliveryAuditAfterSendError
+
+    # tx 2 = notice pending (ok), tx 3 = notice sent (fails).
+    sender, db = FakeSender(), AuditSim(fail_tx=(3,))
+    with pytest.raises(DeliveryAuditAfterSendError) as raised:
+        deliver(_ctx(), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db)
+    assert raised.value.record.status == "delivered"
+    assert raised.value.record.notice_posted is True
+    assert sender.thread_posts == [("C1", "1700000000.0001", GENERIC_THREAD_NOTICE)]
 
 
 def test__offline_fake_slack_missing_mapping_fails_safely() -> None:
@@ -393,11 +496,11 @@ def test__offline_fake_slack_dm_failure_notice_never_marks_request_delivered() -
     # plans->delivered UPDATE, no delivered row, and the read API agrees.
     assert db.plans_delivered_updates() == []
     assert db.plan_status != "delivered"
-    assert [row["status"] for row in db.delivery_rows] == ["failed"]
+    assert "delivered" not in [status for _, status in db.row_statuses()]
+    assert not any(channel == "slack_thread" for channel, _ in db.row_statuses())
     assert request_status(db, "req-1", "m-sam").delivered is False
-    (notice,) = db.attempts("dm_failure_notice")
+    (notice,) = db.attempts("dm_failure_notice", status="sent")
     assert notice["channel"] == "slack_thread"
-    assert notice["status"] == "sent"
     assert DM_FAILURE_NOTICE not in db.params_text()  # metadata only, never the text
 
 
@@ -406,12 +509,9 @@ def test__offline_fake_slack_private_notice_is_not_a_delivery_row() -> None:
     record = deliver(_ctx(), _answer("secret"), DataTier.RESTRICTED, sender=sender, db=db)
     assert record.status == "delivered" and record.notice_posted is True
     # Exactly one delivered row: the DM answer. The thread notice is an event.
-    assert [
-        (row["channel"], row["status"]) for row in db.delivery_rows if row["status"] != "pending"
-    ] == [("slack_dm", "delivered")]
-    assert not any(row["channel"] == "slack_thread" for row in db.delivery_rows)
-    (notice,) = db.attempts("private_response_notice")
-    assert notice["status"] == "sent"
+    assert [row for row in db.row_statuses() if row[1] != "pending"] == [("slack_dm", "delivered")]
+    assert not any(channel == "slack_thread" for channel, _ in db.row_statuses())
+    (notice,) = db.attempts("private_response_notice", status="sent")
     assert notice["recipient_member_id"] == "m-sam"
     assert GENERIC_THREAD_NOTICE not in db.params_text()
 
@@ -421,7 +521,7 @@ def test__offline_fake_slack_failed_notice_post_is_recorded() -> None:
     record = deliver(_ctx(), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db)
     assert record.status == "delivered"
     assert record.notice_posted is False
-    failed = [n for n in db.attempts("private_response_notice") if n["status"] == "failed"]
+    failed = db.attempts("private_response_notice", status="failed")
     assert [n["error_class"] for n in failed] == ["RuntimeError"]
 
 

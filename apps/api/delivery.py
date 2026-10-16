@@ -42,7 +42,7 @@ URL, never a fabricated deep link; final link acceptance stays pending.
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import Literal, Protocol
@@ -70,7 +70,7 @@ DM_FAILURE_NOTICE = "I couldn't deliver that privately. Please send me a direct 
 # delivery row advances ``plans.status`` to ``delivered`` and makes
 # ``request_status().delivered`` true, which only the answer itself may do.
 NoticePurpose = Literal["private_response_notice", "dm_failure_notice", "hold_notice"]
-NoticeStatus = Literal["sent", "failed"]
+NoticeStatus = Literal["pending", "sent", "failed"]
 
 CONSOLE_BASE_URL_DEFAULT = "https://platform.armoriq.ai"  # FIXED base (D-22: page TBD)
 _MAYA_MEMBER_ID = "m-maya"  # stable D-20/ADR-021 format, used only if unresolvable
@@ -104,23 +104,37 @@ class DeliveryRecord:
     notice_posted: bool = False
 
 
+class DeliveryAuditAfterSendError(DeliveryError):
+    """A message reached Slack but the audit write AFTER the send failed.
+
+    The message is already out: P3-04 must NOT re-send it (a retry would
+    duplicate it) and must not report it undelivered. ``record`` describes
+    what was sent (``error_class="audit_failed"``); handle it as an audit gap
+    (ERROR outcome). Every send is preceded by a successful ``pending``
+    audit write, so the attempt itself is always on record.
+    """
+
+    def __init__(self, record: DeliveryRecord) -> None:
+        super().__init__("message sent but its audit record could not be written: do not re-send")
+        self.record = record
+
+
 def _record(
     db: AuditDatabase,
     *,
-    request_id: str,
-    trace_id: str,
+    ctx: RequestContext,
     channel: DeliveryChannel,
     recipient_member_id: str,
     tier: DataTier,
     status: DeliveryStatus,
     error_class: str | None,
 ) -> int | None:
-    """Persist one send; None when the audit write itself fails (fail closed)."""
+    """Persist one answer delivery row; None when the audit write fails."""
     try:
         return record_delivery(
             db,
-            request_id=request_id,
-            trace_id=trace_id,
+            request_id=ctx.request_id,
+            trace_id=ctx.trace_id,
             channel=channel,
             recipient_member_id=recipient_member_id,
             tier_delivered=tier,
@@ -131,91 +145,71 @@ def _record(
         return None
 
 
-def _failed(
+def _deliver_answer(
+    db: AuditDatabase,
+    *,
     ctx: RequestContext,
     channel: DeliveryChannel,
     recipient_member_id: str,
     tier: DataTier,
+    send: Callable[[], None] | None,
+    unavailable: str = "unavailable",
 ) -> DeliveryRecord:
-    return DeliveryRecord(
-        request_id=ctx.request_id,
-        channel=channel,
-        recipient_member_id=recipient_member_id,
-        tier_delivered=tier,
-        status="failed",
-        error_class="audit_failed",
-    )
+    """Audit-first send of the answer to exactly one destination (R-64).
 
+    1. ``send`` is None (no sender / mapping / thread): one ``failed`` row
+       naming ``unavailable``; nothing is sent.
+    2. A ``pending`` row is written BEFORE anything leaves; if that write
+       fails nothing is sent (``audit_failed``).
+    3. Send, then record ``delivered`` or ``failed`` (the send's error class).
+    4. If the ``delivered`` write fails after a successful send, raise
+       :class:`DeliveryAuditAfterSendError` (content is out: never re-send).
+    """
 
-def _send_dm(
-    sender: SlackSender | None,
-    db: AuditDatabase,
-    *,
-    ctx: RequestContext,
-    slack_user_id: str | None,
-    recipient_member_id: str,
-    text: str,
-    tier: DataTier,
-    error_no_mapping: str,
-) -> tuple[DeliveryStatus, str | None, int | None]:
-    """Send one DM; returns (status, error_class, delivery_id). Never raises."""
-    if sender is None:
-        delivery_id = _record(
+    def write(status: DeliveryStatus, error_class: str | None = None) -> int | None:
+        return _record(
             db,
-            request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
-            channel=DeliveryChannel.SLACK_DM,
+            ctx=ctx,
+            channel=channel,
             recipient_member_id=recipient_member_id,
             tier=tier,
-            status="failed",
-            error_class="no_sender",
+            status=status,
+            error_class=error_class,
         )
-        if delivery_id is None:
-            return ("failed", "audit_failed", None)
-        return ("failed", "no_sender", delivery_id)
-    if not slack_user_id:
-        delivery_id = _record(
-            db,
+
+    def outcome(
+        status: DeliveryStatus, error_class: str | None, ids: tuple[int, ...]
+    ) -> DeliveryRecord:
+        return DeliveryRecord(
             request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
-            channel=DeliveryChannel.SLACK_DM,
+            channel=channel,
             recipient_member_id=recipient_member_id,
-            tier=tier,
-            status="failed",
-            error_class=error_no_mapping,
+            tier_delivered=tier,
+            status=status,
+            error_class=error_class,
+            delivery_ids=ids,
         )
-        if delivery_id is None:
-            return ("failed", "audit_failed", None)
-        return ("failed", error_no_mapping, delivery_id)
+
+    if send is None:
+        failed_id = write("failed", unavailable)
+        if failed_id is None:
+            return outcome("failed", "audit_failed", ())
+        return outcome("failed", unavailable, (failed_id,))
+    pending_id = write("pending")
+    if pending_id is None:
+        return outcome("failed", "audit_failed", ())  # nothing left ProxyLead
     try:
-        sender.send_dm(slack_user_id, text)
+        send()
     except Exception as exc:
-        delivery_id = _record(
-            db,
-            request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
-            channel=DeliveryChannel.SLACK_DM,
-            recipient_member_id=recipient_member_id,
-            tier=tier,
-            status="failed",
-            error_class=type(exc).__name__,
-        )
-        if delivery_id is None:
-            return ("failed", "audit_failed", None)
-        return ("failed", type(exc).__name__, delivery_id)
-    delivery_id = _record(
-        db,
-        request_id=ctx.request_id,
-        trace_id=ctx.trace_id,
-        channel=DeliveryChannel.SLACK_DM,
-        recipient_member_id=recipient_member_id,
-        tier=tier,
-        status="delivered",
-        error_class=None,
-    )
-    if delivery_id is None:
-        return ("failed", "audit_failed", None)
-    return ("delivered", None, delivery_id)
+        error = type(exc).__name__
+        failed_id = write("failed", error)
+        if failed_id is None:
+            return outcome("failed", "audit_failed", (pending_id,))
+        return outcome("failed", error, (pending_id, failed_id))
+    delivered_id = write("delivered")
+    if delivered_id is None:
+        raise DeliveryAuditAfterSendError(outcome("delivered", "audit_failed", (pending_id,)))
+    return outcome("delivered", None, (pending_id, delivered_id))
 
 
 def _notice_event(
@@ -270,11 +264,14 @@ def _send_notice(
     send: Callable[[], None] | None,
     unavailable: str = "unavailable",
 ) -> tuple[bool, str | None]:
-    """Send one non-answer message and audit it; returns (sent, error_class).
+    """Audit-first send of one non-answer message; returns (sent, error_class).
 
-    ``send`` is None when nothing can be sent; ``unavailable`` names why
-    (recorded as a failed attempt). A failed send or audit write is recorded
-    or reported, never swallowed silently. Never raises.
+    Same order as the answer: a ``pending`` event before the send (no event,
+    no send), then ``sent`` / ``failed``. ``send`` is None when nothing can
+    be sent; ``unavailable`` names why (recorded as a failed attempt).
+    ``(True, "audit_failed")`` means the message went out but its ``sent``
+    event could not be written — callers raise
+    :class:`DeliveryAuditAfterSendError`. Never raises.
     """
 
     def audit(status: NoticeStatus, error_class: str | None) -> bool:
@@ -290,13 +287,15 @@ def _send_notice(
 
     if send is None:
         return (False, unavailable if audit("failed", unavailable) else "audit_failed")
+    if not audit("pending", None):
+        return (False, "audit_failed")  # nothing left ProxyLead
     try:
         send()
     except Exception as exc:
         error = type(exc).__name__
         return (False, error if audit("failed", error) else "audit_failed")
     if not audit("sent", None):
-        return (False, "audit_failed")
+        return (True, "audit_failed")
     return (True, None)
 
 
@@ -307,11 +306,12 @@ def _post_thread_notice(
     ctx: RequestContext,
     text: str,
     purpose: NoticePurpose,
-) -> bool:
-    """Post a fixed generic notice in the originating thread; returns posted.
+) -> tuple[bool, str | None]:
+    """Post a fixed generic notice in the originating thread.
 
     Recorded via :func:`_notice_event` (``delivery_attempted``), so a notice
-    can never mark the request delivered. Never raises.
+    can never mark the request delivered. Returns ``_send_notice``'s
+    (sent, error_class). Never raises.
     """
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
@@ -320,7 +320,7 @@ def _post_thread_notice(
             send = partial(sender.post_in_thread, ctx.slack_channel_id, ctx.slack_thread_ts, text)
         else:
             unavailable = "no_thread_context"
-    posted, _ = _send_notice(
+    return _send_notice(
         db,
         ctx=ctx,
         purpose=purpose,
@@ -329,7 +329,6 @@ def _post_thread_notice(
         send=send,
         unavailable=unavailable,
     )
-    return posted
 
 
 def deliver(
@@ -346,7 +345,9 @@ def deliver(
     ``answer`` is the responder's output (its ``request_id`` must match
     ``ctx``; anything else raises). ``members`` is accepted for interface
     symmetry but unused here — destinations resolve from ``ctx`` alone.
-    ``db`` is required: without persistence there is no delivery.
+    ``db`` is required: without persistence there is no delivery. Content
+    leaves only after a ``pending`` audit row exists; a failed post-send
+    audit write raises :class:`DeliveryAuditAfterSendError` (do not re-send).
     """
     from apps.api.responder import ResponderOutput
 
@@ -363,23 +364,21 @@ def deliver(
     if ctx.entry_point is EntryPoint.WEB:
         delivery_id = _record(
             db,
-            request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
+            ctx=ctx,
             channel=DeliveryChannel.WEB_PRIVATE,
             recipient_member_id=recipient,
             tier=highest_tier,
             status="delivered",
             error_class=None,
         )
-        if delivery_id is None:
-            return _failed(ctx, DeliveryChannel.WEB_PRIVATE, recipient, highest_tier)
         return DeliveryRecord(
             request_id=ctx.request_id,
             channel=DeliveryChannel.WEB_PRIVATE,
             recipient_member_id=recipient,
             tier_delivered=highest_tier,
-            status="delivered",
-            delivery_ids=(delivery_id,),
+            status="delivered" if delivery_id is not None else "failed",
+            error_class=None if delivery_id is not None else "audit_failed",
+            delivery_ids=(delivery_id,) if delivery_id is not None else (),
         )
 
     if ctx.entry_point is EntryPoint.SLACK_DM or not elevated:
@@ -414,24 +413,21 @@ def _deliver_dm(
     db: AuditDatabase,
     recipient: str,
 ) -> DeliveryRecord:
-    status, error, delivery_id = _send_dm(
-        sender,
+    send: Callable[[], None] | None = None
+    unavailable = "no_sender"
+    if sender is not None:
+        if ctx.requester.slack_user_id:
+            send = partial(sender.send_dm, ctx.requester.slack_user_id, text)
+        else:
+            unavailable = "no_slack_mapping"
+    return _deliver_answer(
         db,
         ctx=ctx,
-        slack_user_id=ctx.requester.slack_user_id,
-        recipient_member_id=recipient,
-        text=text,
-        tier=tier,
-        error_no_mapping="no_slack_mapping",
-    )
-    return DeliveryRecord(
-        request_id=ctx.request_id,
         channel=DeliveryChannel.SLACK_DM,
         recipient_member_id=recipient,
-        tier_delivered=tier,
-        status=status,
-        error_class=error,
-        delivery_ids=(delivery_id,) if delivery_id else (),
+        tier=tier,
+        send=send,
+        unavailable=unavailable,
     )
 
 
@@ -444,72 +440,21 @@ def _deliver_thread(
     db: AuditDatabase,
     recipient: str,
 ) -> DeliveryRecord:
-    if sender is None or not ctx.slack_channel_id:
-        error = "no_sender" if sender is None else "no_thread_context"
-        delivery_id = _record(
-            db,
-            request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
-            channel=DeliveryChannel.SLACK_THREAD,
-            recipient_member_id=recipient,
-            tier=tier,
-            status="failed",
-            error_class=error,
-        )
-        if delivery_id is None:
-            return _failed(ctx, DeliveryChannel.SLACK_THREAD, recipient, tier)
-        return DeliveryRecord(
-            request_id=ctx.request_id,
-            channel=DeliveryChannel.SLACK_THREAD,
-            recipient_member_id=recipient,
-            tier_delivered=tier,
-            status="failed",
-            error_class=error,
-            delivery_ids=(delivery_id,),
-        )
-    try:
-        sender.post_in_thread(ctx.slack_channel_id, ctx.slack_thread_ts, text)
-    except Exception as exc:
-        delivery_id = _record(
-            db,
-            request_id=ctx.request_id,
-            trace_id=ctx.trace_id,
-            channel=DeliveryChannel.SLACK_THREAD,
-            recipient_member_id=recipient,
-            tier=tier,
-            status="failed",
-            error_class=type(exc).__name__,
-        )
-        if delivery_id is None:
-            return _failed(ctx, DeliveryChannel.SLACK_THREAD, recipient, tier)
-        return DeliveryRecord(
-            request_id=ctx.request_id,
-            channel=DeliveryChannel.SLACK_THREAD,
-            recipient_member_id=recipient,
-            tier_delivered=tier,
-            status="failed",
-            error_class=type(exc).__name__,
-            delivery_ids=(delivery_id,),
-        )
-    delivery_id = _record(
+    send: Callable[[], None] | None = None
+    unavailable = "no_sender"
+    if sender is not None:
+        if ctx.slack_channel_id:
+            send = partial(sender.post_in_thread, ctx.slack_channel_id, ctx.slack_thread_ts, text)
+        else:
+            unavailable = "no_thread_context"
+    return _deliver_answer(
         db,
-        request_id=ctx.request_id,
-        trace_id=ctx.trace_id,
+        ctx=ctx,
         channel=DeliveryChannel.SLACK_THREAD,
         recipient_member_id=recipient,
         tier=tier,
-        status="delivered",
-        error_class=None,
-    )
-    if delivery_id is None:
-        return _failed(ctx, DeliveryChannel.SLACK_THREAD, recipient, tier)
-    return DeliveryRecord(
-        request_id=ctx.request_id,
-        channel=DeliveryChannel.SLACK_THREAD,
-        recipient_member_id=recipient,
-        tier_delivered=tier,
-        status="delivered",
-        delivery_ids=(delivery_id,),
+        send=send,
+        unavailable=unavailable,
     )
 
 
@@ -522,47 +467,21 @@ def _deliver_dm_with_notice(
     db: AuditDatabase,
     recipient: str,
 ) -> DeliveryRecord:
-    status, error, dm_id = _send_dm(
-        sender,
-        db,
-        ctx=ctx,
-        slack_user_id=ctx.requester.slack_user_id,
-        recipient_member_id=recipient,
-        text=text,
-        tier=tier,
-        error_no_mapping="no_slack_mapping",
-    )
-    ids = (dm_id,) if dm_id else ()
-    if status == "delivered":
+    record = _deliver_dm(ctx, text, tier, sender=sender, db=db, recipient=recipient)
+    purpose: NoticePurpose
+    if record.status == "delivered":
         # Content is private; the thread learns only that it exists.
-        posted = _post_thread_notice(
-            sender, db, ctx=ctx, text=GENERIC_THREAD_NOTICE, purpose="private_response_notice"
-        )
-        return DeliveryRecord(
-            request_id=ctx.request_id,
-            channel=DeliveryChannel.SLACK_DM,
-            recipient_member_id=recipient,
-            tier_delivered=tier,
-            status="delivered",
-            delivery_ids=ids,
-            notice_posted=posted,
-        )
-    # DM failed: never post the content; optionally post the generic failure
-    # notice (no content), and report failure regardless. The notice is not
-    # the answer, so it never marks the request delivered.
-    posted = _post_thread_notice(
-        sender, db, ctx=ctx, text=DM_FAILURE_NOTICE, purpose="dm_failure_notice"
-    )
-    return DeliveryRecord(
-        request_id=ctx.request_id,
-        channel=DeliveryChannel.SLACK_DM,
-        recipient_member_id=recipient,
-        tier_delivered=tier,
-        status="failed",
-        error_class=error,
-        delivery_ids=ids,
-        notice_posted=posted,
-    )
+        notice, purpose = GENERIC_THREAD_NOTICE, "private_response_notice"
+    else:
+        # DM failed: never post the content; optionally post the generic
+        # failure notice (no content), and report failure regardless. The
+        # notice is not the answer, so it never marks the request delivered.
+        notice, purpose = DM_FAILURE_NOTICE, "dm_failure_notice"
+    posted, error = _post_thread_notice(sender, db, ctx=ctx, text=notice, purpose=purpose)
+    record = replace(record, notice_posted=posted)
+    if posted and error == "audit_failed":
+        raise DeliveryAuditAfterSendError(record)
+    return record
 
 
 def _maya_slack_id(
@@ -622,7 +541,7 @@ def notify_hold(
         send=send,
         unavailable=unavailable,
     )
-    return DeliveryRecord(
+    record = DeliveryRecord(
         request_id=ctx.request_id,
         channel=DeliveryChannel.SLACK_DM,
         recipient_member_id=maya_member_id,
@@ -630,11 +549,15 @@ def notify_hold(
         status="delivered" if sent else "failed",
         error_class=error,
     )
+    if sent and error == "audit_failed":
+        raise DeliveryAuditAfterSendError(record)
+    return record
 
 
 __all__ = [
     "DM_FAILURE_NOTICE",
     "GENERIC_THREAD_NOTICE",
+    "DeliveryAuditAfterSendError",
     "DeliveryError",
     "DeliveryRecord",
     "SlackSender",
