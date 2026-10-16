@@ -119,6 +119,13 @@ def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
     role, independent of ArmorIQ (R-26): manager → restricted, senior →
     confidential, junior → team. Tier-less tools (P2-09/P2-10) authorize in
     their own handlers. Unknown roles fail closed.
+
+    Follow-up (review M3, not implemented): the backend-signed `app_role` is
+    trusted for the `_ctx` lifetime (≤ 900 s). Cross-checking it against
+    `members.app_role` / `members.active` for `requester_member_id` would
+    stop a demoted or deactivated member's still-valid `_ctx` from clearing a
+    ceiling; it needs a toolserver `SELECT` grant on `members` (a migration)
+    and one query per call.
     """
     tier = tool_spec(tool).tier
     if tier is None:
@@ -317,9 +324,12 @@ class GuardedDispatch(Extension):
                 rejection.original_entry_id if isinstance(rejection, ReplayRejection) else None
             )
             return error_result(rejection.code, original_entry_id=original)
-        # 1.2 business arguments (strict P2-02 model).
+        # 1.2 business arguments (strict P2-02 model, then the tool's own
+        # trusted-code argument policy, e.g. read_source_* include_superseded).
         try:
             args = parse_tool_arguments(tool, verified.business_arguments)
+            if spec.check_arguments is not None:
+                spec.check_arguments(args)
         except InvalidArguments:
             return await self._reject(runtime, verified, INVALID_ARGUMENTS)
         # 1.3 member tier ceiling.
@@ -334,11 +344,17 @@ class GuardedDispatch(Extension):
         try:
             result_model = await spec.handler(verified, args, runtime)
         except NotFound:
-            # Authorized lookup, nothing visible: an executed empty lookup.
+            # Authorized lookup, nothing visible: an executed empty lookup
+            # (SHARED_INTERFACES §4: the gateway maps it to EXECUTED with no
+            # evidence, not to a tool-server block). Like a success, it is
+            # never reported without its stored row.
             entry_id = await _record(
                 runtime,
                 _ledger_entry(verified, ACCEPTED, ToolExecutionStatus.EXECUTED, None),
             )
+            if entry_id is None:
+                return error_result(INTERNAL)
+            logger.info("executed %s: not_found (entry %s)", tool.value, entry_id.value)
             return error_result(NOT_FOUND, ledger_entry_id=entry_id)
         except Exception as exc:
             logger.error("tool %s failed (%s)", tool.value, type(exc).__name__)

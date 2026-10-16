@@ -6,14 +6,24 @@ time, never logged.
 """
 
 import json
+import uuid
+from types import SimpleNamespace
 
-from services.contracts import DataTier, ToolName
+import anyio
+import pytest
+
+from services.contracts import DataTier, ReadSourceTeamArgs, ToolExecutionStatus, ToolName
+from services.toolserver import tools_memory
+from services.toolserver.schemas import InvalidArguments
 
 from .test_tool_dispatch import (
     NEEDS_DB,
+    FakeLedger,
     call,
     dev_client,
+    fake_ledger_client,
     make_ctx,
+    result_meta,
     result_text,
 )
 
@@ -215,3 +225,84 @@ def test_sam_confidential_allowed_restricted_denied(real_model: object) -> None:
             tool=denied_tool,
         )
         assert result_text(denied)["code"] == "out_of_scope"
+
+
+# --- include_superseded fails closed (D-09 rule 3; SourceRow has no status) ----
+
+
+def test_include_superseded_is_rejected_before_any_handler() -> None:
+    """`include_superseded=True` is `invalid_arguments` for every read tool
+    (dispatch step 1.2); the same call with False reaches the no-ledger
+    refusal, so only the argument policy can produce the rejection."""
+    with dev_client() as client:
+        for tier, tool in READ_SOURCE_TOOLS.items():
+            base = {"view": READ_SOURCE_VIEWS[tier], "limit": 5}
+            rejected = call(
+                client,
+                {**base, "include_superseded": True, "_ctx": member_ctx("maya", tool)},
+                tool=tool,
+            )
+            assert result_text(rejected)["code"] == "invalid_arguments", tool
+            allowed = call(
+                client,
+                {**base, "include_superseded": False, "_ctx": member_ctx("maya", tool)},
+                tool=tool,
+            )
+            assert result_text(allowed)["code"] == "internal", tool
+
+
+def test_include_superseded_rejection_is_recorded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Recorded as an `invalid_arguments` rejection row; the real handler never
+    runs (the fake pool would fail it)."""
+    tool = READ_SOURCE_TOOLS[DataTier.TEAM]
+    ledger = FakeLedger()
+    jti = f"jti-sup-{uuid.uuid4().hex}"
+    with fake_ledger_client(monkeypatch, ledger) as client:
+        message = call(
+            client,
+            {
+                "view": READ_SOURCE_VIEWS[DataTier.TEAM],
+                "limit": 5,
+                "include_superseded": True,
+                "_ctx": make_ctx(jti=jti, tool=tool, **MEMBERS["maya"]),
+            },
+            tool=tool,
+        )
+    assert result_text(message)["code"] == "invalid_arguments"
+    [(entry_id, entry)] = ledger.rows(jti)
+    assert result_meta(message) == {"ledger_entry_id": str(entry_id)}
+    assert entry.validation_outcome == "invalid_arguments"
+    assert entry.execution_status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+
+
+def test_read_source_handler_refuses_include_superseded_directly() -> None:
+    """Defense in depth: a direct handler call (no dispatcher) fails closed."""
+    args = ReadSourceTeamArgs(view="approved_company_data_team", limit=5, include_superseded=True)
+    runtime = SimpleNamespace(pool=object())
+    with pytest.raises(InvalidArguments):
+        anyio.run(tools_memory.handle_read_source_team, None, args, runtime)
+
+
+@NEEDS_DB
+def test_read_source_never_returns_superseded_rows() -> None:
+    """The seeded superseded team project (proj-compass) never comes back."""
+    from .test_tool_dispatch import live_client as live
+
+    tool = READ_SOURCE_TOOLS[DataTier.TEAM]
+    with live() as client:
+        message = call(
+            client,
+            {
+                "view": READ_SOURCE_VIEWS[DataTier.TEAM],
+                "limit": 50,
+                "_ctx": member_ctx("maya", tool),
+            },
+            tool=tool,
+        )
+    assert message["result"]["isError"] is False, message
+    body = json.loads(message["result"]["content"][0]["text"])
+    ids = {row["source_id"] for row in body["rows"]}
+    assert "proj-atlas" in ids
+    assert "proj-compass" not in ids
+    assert body["row_count"] == len(body["rows"])
+    assert not any("SUPERSEDED" in row["snippet"] for row in body["rows"])

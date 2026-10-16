@@ -89,3 +89,42 @@ def test_unknown_view_rejected_without_database() -> None:
                 tool="read_source_team",
             )
             assert result_text(message)["code"] == "invalid_arguments"
+
+
+# --- NUL characters: rejected as arguments, never a driver error (`internal`) ----
+
+NUL = chr(0)
+NUL_CASES = [
+    ("knowledge_get_source_team", {"source_ref": f"team-friday{NUL}deploy"}),
+    ("knowledge_get_source_restricted", {"source_ref": f"restr-workforce{NUL}"}),
+    (
+        "read_source_team",
+        {"view": "approved_company_data_team", "limit": 5, "author": f"s{NUL}m"},
+    ),
+    ("knowledge_search_team", {"query": f"deploy{NUL}freeze", "limit": 3}),
+]
+
+
+def test_nul_in_string_arguments_is_invalid_arguments_without_database() -> None:
+    """Dev path: the same calls without NUL reach the no-ledger refusal
+    (`internal`), so only the argument check can answer `invalid_arguments`."""
+    with dev_client() as client:
+        for tool, arguments in NUL_CASES:
+            message = call(client, {**arguments, "_ctx": member_ctx("maya", tool)}, tool=tool)
+            assert result_text(message)["code"] == "invalid_arguments", tool
+
+
+@NEEDS_DB
+def test_nul_in_arguments_is_never_internal_against_postgres() -> None:
+    """PostgreSQL text cannot hold NUL: without the check these calls fail in
+    the driver and answer `internal`."""
+    from .test_tool_dispatch import live_client as live
+
+    with live() as client:
+        for tool, arguments in NUL_CASES:
+            message = call(client, {**arguments, "_ctx": member_ctx("maya", tool)}, tool=tool)
+            body = result_text(message)
+            assert body == {
+                "code": "invalid_arguments",
+                "message": "The call was rejected: invalid arguments.",
+            }, tool

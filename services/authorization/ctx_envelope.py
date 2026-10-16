@@ -57,6 +57,17 @@ class ExpiredContext(CtxError):
     """``exp`` has passed (beyond the skew leeway)."""
 
 
+class LifetimeTooLong(CtxError):
+    """``exp - iat`` exceeds :data:`MAX_CTX_LIFETIME_S` (rejected as invalid)."""
+
+
+# Upper bound on a token's validity window. The gateway mints 300 s tokens
+# (armoriq_gateway.CTX_TTL_S); anything far longer is not one of ours and must
+# not stay replayable-by-capture for hours. Generous headroom over 300 s keeps
+# clock-skewed or test-minted tokens working.
+MAX_CTX_LIFETIME_S = 900.0
+
+
 class CtxEnvelope(BaseModel):
     """Identity envelope the backend signs per tool call (D-04/ADR-020)."""
 
@@ -68,7 +79,11 @@ class CtxEnvelope(BaseModel):
     requester_member_id: str = Field(min_length=1)
     # Env-var NAME holding the member's ArmorIQ email (never the address itself).
     armoriq_member_email_ref: str = Field(min_length=1)
-    # Informational label only; ArmorIQ policy (not this label) authorizes tools.
+    # Requester role, signed by the backend from its trusted member record
+    # (never from message text). ArmorIQ policy decides first; after it, the
+    # tool server's member tier ceiling authorizes on this signed value
+    # (P2-08, SHARED_INTERFACES §6: manager -> restricted, senior ->
+    # confidential, junior -> team).
     app_role: Literal["manager", "senior", "junior"]
     plan_id: str = Field(min_length=1)
     step_index: int = Field(ge=0)
@@ -150,6 +165,9 @@ def verify_ctx(
         raise NotYetValid("context used before iat")
     if current > envelope.exp + leeway_s:
         raise ExpiredContext("context expired")
+    # After the time checks, so an expired token still reports "expired".
+    if envelope.exp - envelope.iat > MAX_CTX_LIFETIME_S:
+        raise LifetimeTooLong("context lifetime exceeds the maximum")
     return envelope
 
 

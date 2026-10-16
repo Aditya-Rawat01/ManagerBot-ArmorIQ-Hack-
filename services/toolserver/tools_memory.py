@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
 import anyio.to_thread
+from psycopg import sql
 from pydantic import BaseModel
 
 from services.contracts import (
@@ -27,6 +29,7 @@ from services.contracts import (
     ReadSourceConfidentialResult,
     ReadSourceRestrictedResult,
     ReadSourceTeamResult,
+    ReviewStatus,
     SourceCitation,
     SourceRow,
     ToolName,
@@ -34,7 +37,7 @@ from services.contracts import (
 from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.knowledge import retrieval
 from services.toolserver import db
-from services.toolserver.schemas import NotFound
+from services.toolserver.schemas import InvalidArguments, NotFound
 from services.toolserver.security import VerifiedCall
 
 
@@ -109,10 +112,6 @@ async def handle_knowledge_search_restricted(
 def _citation_from_source_row(row: dict[str, Any]) -> SourceCitation:
     """Build a citation from a source_records row (mirrors retrieval._citation:
     recorded synthetic date preferred, stored timestamp as fallback)."""
-    from datetime import UTC, datetime
-
-    from services.contracts import ReviewStatus
-
     provenance = row["provenance"] or {}
     recorded = provenance.get("recorded_at") or ""
     try:
@@ -134,21 +133,28 @@ def _citation_from_source_row(row: dict[str, Any]) -> SourceCitation:
     )
 
 
+# One fixed, parameterized re-check (D-11): verified-ctx workspace, the
+# handler's exact tier literal, active, authoritative (D-09). The excerpt
+# subquery requires the chunk's own workspace and tier to equal the source's,
+# so a mis-tiered chunk can never leak into another tier's excerpt.
+_GET_SOURCE_SQL = """SELECT s.source_id, s.title, s.author, s.tier, s.created_at,
+       s.provenance,
+       (SELECT c.chunk_text FROM public.knowledge_chunks AS c
+         WHERE c.source_id = s.id
+           AND c.workspace_id = s.workspace_id
+           AND c.tier = s.tier
+         ORDER BY c.id LIMIT 1) AS excerpt
+FROM public.source_records AS s
+WHERE s.workspace_id = %s AND s.source_id = %s AND s.tier = %s
+  AND s.status = 'active'
+  AND s.provenance ->> 'review_status' = 'authoritative'"""
+
+
 def _fetch_source(pool: Any, workspace_id: str, source_ref: str, tier: DataTier) -> dict | None:
     """Single re-check query (workspace + exact tier + active + authoritative);
     None when missing, wrong-tier, or inactive — the cases share one response."""
     with db.transaction(pool) as conn, conn.cursor() as cur:
-        cur.execute(
-            """SELECT s.source_id, s.title, s.author, s.tier, s.created_at,
-                      s.provenance,
-                      (SELECT c.chunk_text FROM public.knowledge_chunks AS c
-                        WHERE c.source_id = s.id ORDER BY c.id LIMIT 1) AS excerpt
-               FROM public.source_records AS s
-               WHERE s.workspace_id = %s AND s.source_id = %s AND s.tier = %s
-                 AND s.status = 'active'
-                 AND s.provenance ->> 'review_status' = 'authoritative'""",
-            (workspace_id, source_ref, tier.value),
-        )
+        cur.execute(_GET_SOURCE_SQL, (workspace_id, source_ref, tier.value))
         row = cur.fetchone()
         if row is None:
             return None
@@ -217,11 +223,13 @@ async def handle_knowledge_get_source_restricted(
     )
 
 
-_VIEW_NAMES: tuple[str, ...] = (
-    "approved_company_data_team",
-    "approved_company_data_confidential",
-    "approved_company_data_restricted",
-)
+# The one approved view per tier (D-11, final names). `read_source_*` derives
+# its view from the handler's tier literal, never from the arguments.
+_VIEW_BY_TIER: dict[DataTier, str] = {
+    DataTier.TEAM: "approved_company_data_team",
+    DataTier.CONFIDENTIAL: "approved_company_data_confidential",
+    DataTier.RESTRICTED: "approved_company_data_restricted",
+}
 
 
 def _like_literal(text: str) -> str:
@@ -229,29 +237,45 @@ def _like_literal(text: str) -> str:
     return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
+def check_read_source_arguments(args: Any, *, tier: DataTier) -> None:
+    """Trusted-code argument policy for `read_source_*` (dispatch step 1.2).
+
+    - `view` must be the tool's own tier view (`_VIEW_BY_TIER[tier]`). The
+      P2-02 Literal already enforces it; this keeps the rule if a model ever
+      widens, and the SQL uses the tier's view regardless.
+    - `include_superseded=True` is rejected (`invalid_arguments`, fail
+      closed): `SourceRow` has no structured status field, so a superseded
+      row would reach the responder as current evidence (D-09 rule 3). Rows
+      are always `status = 'active'` until an ICR adds a status field to
+      `SourceRow`.
+    """
+    if args.view != _VIEW_BY_TIER[tier]:
+        raise InvalidArguments("view is not this tool's approved view")
+    if args.include_superseded:
+        raise InvalidArguments("include_superseded is not supported")
+
+
 def _read_view_rows(
     pool: Any,
-    view: str,
+    tier: DataTier,
     workspace_id: str,
     author: str | None,
-    include_superseded: bool,
     limit: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Fixed per-view SQL (view name from the allowlist constant only)."""
-    from psycopg import sql
-
-    if view not in _VIEW_NAMES:
-        # Unreachable: P2-02 Literals admit only the three allowlisted names.
-        raise ValueError(f"unknown approved view: {view}")
-    table = sql.Identifier("public", view)
-    fragments = [sql.SQL("workspace_id = %s")]
-    params: list[Any] = [workspace_id]
+    """Fixed per-tier SQL: the tier's allowlisted view, the verified-ctx
+    workspace, the exact tier again (defense in depth over the view's own
+    filter), current rows only (D-09 rule 3)."""
+    table = sql.Identifier("public", _VIEW_BY_TIER[tier])
+    fragments = [
+        sql.SQL("workspace_id = %s"),
+        sql.SQL("tier = %s"),
+        sql.SQL("status = 'active'"),
+    ]
+    params: list[Any] = [workspace_id, tier.value]
     if author:
         # Escape LIKE metacharacters: the filter is a literal substring match.
         fragments.append(sql.SQL("owner ILIKE %s ESCAPE '\\'"))
         params.append(_like_literal(author))
-    if not include_superseded:
-        fragments.append(sql.SQL("status = 'active'"))
     where = sql.SQL(" AND ").join(fragments)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
@@ -273,9 +297,9 @@ def _read_view_rows(
     return rows, total
 
 
-def _flagged_snippet(body: str, status: str) -> str:
-    text = f"[SUPERSEDED] {body}" if status == "superseded" else body
-    return text[:MAX_EXCERPT_CHARS]
+def _snippet(body: str) -> str:
+    """Character cap for a returned row (P2-02 `SourceRow.snippet`)."""
+    return body[:MAX_EXCERPT_CHARS]
 
 
 async def _read_source(
@@ -288,27 +312,29 @@ async def _read_source(
 ) -> Any:
     if runtime.pool is None:
         raise _NoDatabase("source read needs a database pool")
+    # Never fails through dispatch (it ran at step 1.2); repeated so a direct
+    # handler call fails closed too.
+    check_read_source_arguments(args, tier=tier)
     rows, total = await anyio.to_thread.run_sync(
         _read_view_rows,
         runtime.pool,
-        args.view,
+        tier,
         verified.ctx.workspace_id,
         args.author,
-        args.include_superseded,
         args.limit,
     )
     built = [
         SourceRow(
             source_id=row["project_key"],
             title=row["project_name"],
-            snippet=_flagged_snippet(row["body"], row["status"]),
+            snippet=_snippet(row["body"]),
         )
         for row in rows
     ]
     return result_model(
         tool=tool,
         tier=tier,
-        view=args.view,
+        view=_VIEW_BY_TIER[tier],
         rows=built,
         row_count=total,
         truncated=len(built) < total,
@@ -356,6 +382,10 @@ class ProductTool:
     name: ToolName
     description: str
     handler: Callable[..., Awaitable[BaseModel]]
+    # Trusted-code argument policy beyond the P2-02 schema. The dispatcher
+    # runs it right after schema validation (step 1.2, before the ceiling and
+    # the handler); InvalidArguments -> recorded `invalid_arguments`.
+    check_arguments: Callable[[Any], None] | None = None
 
 
 PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
@@ -397,17 +427,29 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
     ),
     ToolName.READ_SOURCE_TEAM: ProductTool(
         name=ToolName.READ_SOURCE_TEAM,
-        description="Read rows from the approved team-tier company-data view.",
+        description=(
+            "Read current rows from the approved team-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_team,
+        check_arguments=partial(check_read_source_arguments, tier=DataTier.TEAM),
     ),
     ToolName.READ_SOURCE_CONFIDENTIAL: ProductTool(
         name=ToolName.READ_SOURCE_CONFIDENTIAL,
-        description="Read rows from the approved confidential-tier company-data view.",
+        description=(
+            "Read current rows from the approved confidential-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_confidential,
+        check_arguments=partial(check_read_source_arguments, tier=DataTier.CONFIDENTIAL),
     ),
     ToolName.READ_SOURCE_RESTRICTED: ProductTool(
         name=ToolName.READ_SOURCE_RESTRICTED,
-        description="Read rows from the approved restricted-tier company-data view.",
+        description=(
+            "Read current rows from the approved restricted-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_restricted,
+        check_arguments=partial(check_read_source_arguments, tier=DataTier.RESTRICTED),
     ),
 }

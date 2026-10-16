@@ -27,10 +27,15 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 DEFAULT_STATEMENT_TIMEOUT_MS = 30000
-# Seconds a caller waits for a pooled connection before failing (psycopg_pool
-# default: 30). Short, so a database outage fails tool calls fast instead of
-# parking worker threads that the rest of the app (e.g. /health) shares.
-DEFAULT_POOL_TIMEOUT_S = 5.0
+# Seconds a caller waits for a pooled connection before failing (PoolTimeout).
+# 15 s, not shorter: after a Neon suspend the first reconnect can take the
+# whole wake window, and failing it turns E1's first call into "internal"
+# (cold-start probe, Oct 2026). Slow QUERIES still fail fast via the
+# per-statement timeout below — this only bounds waiting for a connection.
+DEFAULT_POOL_TIMEOUT_S = 15.0
+# libpq connect timeout per attempt (a startup keyword, so the pooled
+# endpoint accepts it, unlike session-level options).
+CONNECT_TIMEOUT_S = 10
 
 
 def create_pool(
@@ -54,7 +59,8 @@ def create_pool(
         dsn,
         min_size=min_size,
         max_size=max_size,
-        kwargs={"prepare_threshold": None},
+        kwargs={"prepare_threshold": None, "connect_timeout": CONNECT_TIMEOUT_S},
+        check=ConnectionPool.check_connection,
         timeout=timeout_s,
         open=True,
     )

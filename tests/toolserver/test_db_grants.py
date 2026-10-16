@@ -138,6 +138,36 @@ def test_backend_cannot_read_protected_sequences(backend_conn) -> None:
         db.fetch_all(backend_conn, "SELECT last_value FROM public.team_notes_id_seq")
 
 
+APPROVED_VIEWS = (
+    "approved_company_data_team",
+    "approved_company_data_confidential",
+    "approved_company_data_restricted",
+)
+
+
+@NEEDS_DB
+@pytest.mark.parametrize("role", ["backend", "toolserver"])
+def test_no_runtime_role_reads_or_writes_company_projects(request, role: str) -> None:
+    """0011 (M1): the base table holds every tier's raw columns; views read it
+    with their owner's privileges, so no runtime role is granted the table."""
+    conn = request.getfixturevalue(f"{role}_conn")
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(conn, "SELECT 1 FROM public.company_projects LIMIT 1")
+    conn.rollback()
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(conn, "UPDATE public.company_projects SET summary = summary WHERE id = -1")
+    conn.rollback()
+
+
+@NEEDS_DB
+@pytest.mark.parametrize("view", APPROVED_VIEWS)
+def test_approved_views_toolserver_only(backend_conn, toolserver_conn, view: str) -> None:
+    query = f"SELECT 1 FROM public.{view} LIMIT 1"  # noqa: S608 -- view from module allowlist
+    db.fetch_all(toolserver_conn, query)
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(backend_conn, query)
+
+
 @NEEDS_DB
 @pytest.mark.parametrize("table", PROTECTED_TABLES)
 def test_toolserver_can_select_knowledge_tables(toolserver_conn, table: str) -> None:
