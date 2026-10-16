@@ -38,12 +38,12 @@ class SlackRuntime:
     def stop(self) -> None:
         try:
             self.handler.disconnect()
-        except Exception:
-            logger.warning("slack handler disconnect failed")
+        except Exception as exc:
+            logger.warning("slack handler disconnect failed error=%s", type(exc).__name__)
         try:
             self.handler.close()
-        except Exception:
-            logger.warning("slack handler close failed")
+        except Exception as exc:
+            logger.warning("slack handler close failed error=%s", type(exc).__name__)
 
 
 def build_app(

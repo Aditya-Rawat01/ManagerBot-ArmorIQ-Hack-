@@ -590,6 +590,36 @@ def test__offline_fake_slack_no_bodies_or_secrets_in_logs(caplog) -> None:
     assert secret not in caplog.text
 
 
+def test__offline_fake_slack_logs_carry_ids_through_the_api_formatter(caplog) -> None:  # type: ignore[no-untyped-def]
+    """The API formatter prints only the message (`extra=` is dropped), so IDs
+    must be in the message itself; message text and user IDs never are."""
+    from apps.api.core.logging import LOG_FORMAT
+
+    secret = "sk-fake-slack-secret-0001"
+    with caplog.at_level(logging.INFO, logger="services.slack_socket.events"):
+        accepted = on_app_mention(
+            _mention_body(text=f"<@U-bot> token {secret} here", event_id="Ev-log"),
+            lambda: None,
+            **_deps(),
+        )
+        on_app_mention(
+            _mention_body(user="U-stranger", text=f"<@U-bot> {secret}", event_id="Ev-rej"),
+            lambda: None,
+            **_deps(),
+        )
+    assert isinstance(accepted, IncomingSlackEvent)
+    formatter = logging.Formatter(LOG_FORMAT)
+    output = "\n".join(formatter.format(record) for record in caplog.records)
+    assert "slack event received event_id=Ev-log" in output
+    assert (
+        f"slack event accepted event_id=Ev-log request_id={accepted.request_id} "
+        f"trace_id={accepted.trace_id}"
+    ) in output
+    assert "slack event rejected event_id=Ev-rej reason=unmapped_user" in output
+    assert secret not in output
+    assert "U-stranger" not in output and "U-sam" not in output
+
+
 # --- lifecycle --------------------------------------------------------------
 
 

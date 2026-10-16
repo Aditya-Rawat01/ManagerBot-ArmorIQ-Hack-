@@ -248,5 +248,6 @@ def test_adapter_rejection_audit_failure_is_logged_not_raised(
         )
     assert isinstance(result, SlackRejection)
     assert result.reason_code == "unmapped_user"
-    assert "slack rejection audit failed error=AuditStoreError" in caplog.text
+    assert "slack rejection audit failed event_id=Ev1 reason=unmapped_user" in caplog.text
+    assert "error=AuditStoreError" in caplog.text
     assert "secret words" not in caplog.text

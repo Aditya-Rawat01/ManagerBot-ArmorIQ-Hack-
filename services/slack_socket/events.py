@@ -160,6 +160,7 @@ def _audit_rejection(
     Never raises: the event is already refused, so an audit failure is
     logged (exception class only) and never lets the event through.
     """
+    logger.info("slack event rejected event_id=%s reason=%s", event_id, reason_code)
     if db is None:
         return
     try:
@@ -171,7 +172,12 @@ def _audit_rejection(
             channel_id=channel_id,
         )
     except Exception as exc:
-        logger.warning("slack rejection audit failed error=%s", type(exc).__name__)
+        logger.warning(
+            "slack rejection audit failed event_id=%s reason=%s error=%s",
+            event_id,
+            reason_code,
+            type(exc).__name__,
+        )
 
 
 def _claim_dedupe(
@@ -248,7 +254,7 @@ def process_event(
     if not isinstance(event, dict) or not event_id or not isinstance(event_id, str):
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
     channel_id = event.get("channel")
-    logger.info("slack event received", extra={"event_id": event_id})
+    logger.info("slack event received event_id=%s", event_id)
 
     if _is_bot_event(event):
         return SlackRejection(event_id=event_id, reason_code="bot_ignored")
@@ -331,7 +337,12 @@ def process_event(
     except Exception:
         return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
     trace_id = ctx.trace_id
-    logger.info("slack event accepted", extra={"event_id": event_id, "request_id": request_id})
+    logger.info(
+        "slack event accepted event_id=%s request_id=%s trace_id=%s",
+        event_id,
+        request_id,
+        trace_id,
+    )
     return IncomingSlackEvent(
         request_id=request_id,
         trace_id=trace_id,
