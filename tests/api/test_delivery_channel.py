@@ -282,12 +282,31 @@ def test__offline_fake_slack_web_private_only(tier: DataTier) -> None:
         _ctx(EntryPoint.WEB),
         _answer("private content"),
         tier,
-        sender=None,
+        sender=sender,  # even with a sender available, web never touches Slack
         db=db,
     )
     assert record.channel is DeliveryChannel.WEB_PRIVATE
-    assert record.status == "delivered"
     assert sender.dms == [] and sender.thread_posts == []
+
+
+@pytest.mark.parametrize("tier", list(DataTier))
+def test__offline_fake_slack_web_answer_recorded_pending_not_delivered(tier: DataTier) -> None:
+    # I7: the web answer text is stored nowhere yet (ICR pending), so it must
+    # not be reported delivered.
+    db = AuditSim()
+    record = deliver(_ctx(EntryPoint.WEB), _answer("private content"), tier, sender=None, db=db)
+    assert record.status == "pending"
+    assert record.error_class is None
+    assert db.row_statuses() == [("web_private", "pending")]
+    assert db.plans_delivered_updates() == []
+    assert request_status(db, "req-1", "m-sam").delivered is False
+    assert "private content" not in db.params_text()  # metadata only
+
+
+def test__offline_fake_slack_web_audit_down_reports_failed() -> None:
+    record = deliver(_ctx(EntryPoint.WEB), _answer("x"), DataTier.TEAM, db=AuditSim(fail_all=True))
+    assert record.status == "failed"
+    assert record.error_class == "audit_failed"
 
 
 # --- leakage proofs ---------------------------------------------------------

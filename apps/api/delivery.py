@@ -13,10 +13,18 @@ Routing (task §9.1):
   DM, plus the fixed generic notice in the thread (no titles, snippets,
   citations, counts, or tiers).
 - ``slack_dm`` → requester's own DM, any tier.
-- ``web`` → ``web_private`` audit record only; the answer text itself is NOT
-  persisted here (``delivery_events`` holds metadata only). Retaining the
-  private answer for ``GET /api/v1/requests/{id}`` is P3-04/P4-01's contract
-  (pending ICR — flagged, not invented here).
+- ``web`` → ``web_private``, recorded as a ``pending`` delivery row, never
+  ``delivered``; no Slack call.
+
+KNOWN GAP — web answer storage (ICR pending with P3-01 / P4-01): no table,
+store function, or API persists the private answer text so that
+``GET /api/v1/requests/{id}`` can return it to the owning session member
+(``delivery_events`` and ``request_events`` are metadata-only, and this
+module invents no storage). A web answer therefore reaches nobody yet, so it
+is recorded ``pending`` and ``request_status().delivered`` stays false.
+Once the ICR defines where the answer is stored and who records
+``delivered`` (e.g. when it is stored for, or fetched by, the owner), this
+branch writes there and records ``delivered`` accordingly.
 
 Slack transport arrives as a :class:`SlackSender` (P3-05's agreed shape:
 ``post_in_thread`` / ``send_dm``, raising on failure). P3-05 is not merged,
@@ -380,13 +388,16 @@ def deliver(
     recipient = ctx.requester.member_id
 
     if ctx.entry_point is EntryPoint.WEB:
+        # KNOWN GAP (module docstring): nothing stores the web answer text
+        # yet, so it is recorded ``pending`` — never ``delivered`` — until
+        # the P3-01/P4-01 ICR defines answer storage.
         delivery_id = _record(
             db,
             ctx=ctx,
             channel=DeliveryChannel.WEB_PRIVATE,
             recipient_member_id=recipient,
             tier=highest_tier,
-            status="delivered",
+            status="pending",
             error_class=None,
         )
         return DeliveryRecord(
@@ -394,7 +405,7 @@ def deliver(
             channel=DeliveryChannel.WEB_PRIVATE,
             recipient_member_id=recipient,
             tier_delivered=highest_tier,
-            status="delivered" if delivery_id is not None else "failed",
+            status="pending" if delivery_id is not None else "failed",
             error_class=None if delivery_id is not None else "audit_failed",
             delivery_ids=(delivery_id,) if delivery_id is not None else (),
         )
