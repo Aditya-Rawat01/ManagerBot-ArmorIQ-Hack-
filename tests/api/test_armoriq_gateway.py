@@ -9,12 +9,15 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from armoriq_sdk import exceptions as sdk_exceptions
 from armoriq_sdk.models import HoldInfo, MCPInvocationResult
+from armoriq_sdk.observability import ObservabilityConfig
+from armoriq_sdk.session import ArmorIQSession
 
 from apps.api.core.config import Settings
 from services.authorization.armoriq_gateway import ArmorIQGateway
@@ -72,6 +75,7 @@ class FakeScope:
 
     def start_session(self, opts: Any = None) -> FakeSession:
         self._client.sessions_started.append(self.email)
+        self._client.session_options.append(opts)
         return self.session
 
 
@@ -84,6 +88,7 @@ class FakeClient:
         self.policy_calls: list[dict[str, Any]] = []
         self.invoke_calls: list[dict[str, Any]] = []
         self.sessions_started: list[str] = []
+        self.session_options: list[Any] = []
         self.hold_seen: list[Any] = []
 
     def for_user(self, email: str) -> FakeScope:
@@ -274,6 +279,38 @@ def test_mint_once_per_request__offline_fake_sdk() -> None:
     session = fake.scopes["maya@example.com"].session
     assert session.start_plan_calls == 1
     assert len(fake.policy_calls) == 2
+
+
+def test_sdk_telemetry_off_by_default__offline_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mint session disables the SDK observability shipper unless opted in.
+
+    The real ``ArmorIQSession`` is built offline only to check its local
+    disable switch; it never mints or touches the network.
+    """
+    gateway, fake = _gateway()
+    asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.MAYA, "m-maya")), _plan()))
+    (opts,) = fake.session_options
+    assert isinstance(opts.observability, ObservabilityConfig)
+    assert opts.observability.enabled is False
+    # Nothing else about the session changes.
+    assert (opts.mode, opts.validity_seconds, opts.llm) == ("proxy", 1200, "proxylead")
+    # Settings objects without the field stay off too.
+    assert ArmorIQGateway(object())._session_options().observability.enabled is False
+
+    # An explicit config beats a stray process env var, and no shipper starts.
+    monkeypatch.setenv("ARMORIQ_OBSERVABILITY", "true")
+    before = set(threading.enumerate())
+    session = ArmorIQSession(object(), opts)  # type: ignore[arg-type]
+    assert session.observability_recorder is None
+    started = {t.name for t in set(threading.enumerate()) - before}
+    assert "armoriq-observability-shipper" not in started
+
+
+def test_sdk_telemetry_opt_in_defers_to_sdk__offline_fake_sdk() -> None:
+    gateway, fake = _gateway(armoriq_observability=True)
+    asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.MAYA, "m-maya")), _plan()))
+    (opts,) = fake.session_options
+    assert opts.observability is None
 
 
 def test_concurrent_personas_do_not_share_identity__offline_fake_sdk() -> None:
