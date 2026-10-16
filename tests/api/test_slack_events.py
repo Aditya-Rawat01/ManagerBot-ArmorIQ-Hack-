@@ -24,6 +24,7 @@ from services.slack_socket.events import (
     resolve_workspace_id,
 )
 from services.slack_socket.sender import SlackError, SlackSender
+from tests.fakes.slack import dm_body, mention_body
 
 
 class FakeSlackClient:
@@ -116,52 +117,10 @@ def _members() -> dict[PersonaKey, MemberRecord]:
     }
 
 
-def _mention_body(
-    text: str = "<@U-bot> atlas budget?",
-    user: str = "U-sam",
-    channel: str = "C1",
-    event_id: str = "Ev1",
-    team: str = "T1",
-    thread_ts: str | None = "1700000000.0001",
-    subtype: str | None = None,
-) -> dict[str, object]:
-    event: dict[str, object] = {
-        "type": "app_mention",
-        "user": user,
-        "text": text,
-        "ts": "1700000000.0002",
-        "channel": channel,
-        "event_ts": "1700000000.0002",
-    }
-    if thread_ts is not None:
-        event["thread_ts"] = thread_ts
-    if subtype is not None:
-        event["subtype"] = subtype
-    if event_id is None:
-        event.pop("event_id", None)
-    else:
-        event["event_id"] = event_id
-    return {"team_id": team, "event": event}
-
-
-def _dm_body(
-    text: str = "hello bot",
-    user: str = "U-sam",
-    event_id: str = "Ev2",
-    team: str = "T1",
-) -> dict[str, object]:
-    return {
-        "team_id": team,
-        "event": {
-            "type": "message",
-            "channel_type": "im",
-            "user": user,
-            "text": text,
-            "ts": "1700000000.0003",
-            "channel": "D-sam",
-            "event_id": event_id,
-        },
-    }
+# Real Events API / Socket Mode envelopes (outer `event_id`, `team_id`,
+# `authorizations`; inner `event`): see tests/fakes/slack.py.
+_mention_body = mention_body
+_dm_body = dm_body
 
 
 def _deps(db=None, dm: bool = False, **overrides):  # type: ignore[no-untyped-def]
@@ -217,6 +176,28 @@ def test__offline_fake_slack_mapped_dm_reaches_handler_once() -> None:
     assert result.ctx.entry_point.value == "slack_dm"
     assert result.ctx.requester.member_id == "m-sam"
     assert result.message == "hello bot"
+    assert result.ctx.slack_event_id == "Ev2"
+
+
+def test__offline_fake_slack_event_id_comes_from_outer_envelope() -> None:
+    """B1: real payloads carry `event_id` on the outer body, never the inner event."""
+    body = mention_body(event_id="Ev-outer")
+    assert "event_id" not in body["event"]
+    result = on_app_mention(body, lambda: None, **_deps())
+    assert isinstance(result, IncomingSlackEvent)
+    assert result.event_id == "Ev-outer"
+    assert result.ctx.slack_event_id == "Ev-outer"
+
+
+def test__offline_fake_slack_inner_event_id_alone_is_invalid() -> None:
+    """The legacy fake shape (inner `event_id`, no outer one) is not a real envelope."""
+    for body in (mention_body(event_id=None), dm_body(event_id=None)):
+        body["event"]["event_id"] = "Ev-inner"
+        listener = on_app_mention if body["event"]["type"] == "app_mention" else on_direct_message
+        deps = _deps(dm=listener is on_direct_message)
+        result = listener(body, lambda: None, **deps)
+        assert isinstance(result, SlackRejection)
+        assert result.reason_code == "invalid_envelope"
 
 
 # --- validation order -------------------------------------------------------

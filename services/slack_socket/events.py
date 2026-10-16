@@ -167,6 +167,7 @@ def mark_processed(db: AuditDatabase, event_id: str) -> None:
 def _build_context(
     *,
     event: MappingEvent,
+    event_id: str,
     entry_point: Literal["slack_mention", "slack_dm"],
     requester: AuthenticatedUser,
     workspace_id: str,
@@ -183,7 +184,7 @@ def _build_context(
         slack_team_id=team_id,
         slack_channel_id=event.get("channel"),
         slack_thread_ts=event.get("thread_ts") or event.get("ts"),
-        slack_event_id=event.get("event_id"),
+        slack_event_id=event_id,
     )
     return ctx, request_id
 
@@ -191,6 +192,7 @@ def _build_context(
 def process_event(
     event: MappingEvent,
     *,
+    event_id: str | None,
     team_id: str | None,
     entry_point: Literal["slack_mention", "slack_dm"],
     members: dict[PersonaKey, MemberRecord],
@@ -199,8 +201,11 @@ def process_event(
     workspace_id: str | None,
     db: AuditDatabase | None,
 ) -> IncomingSlackEvent | SlackRejection:
-    """Validate one event (ack already sent by the caller). Never raises."""
-    event_id = event.get("event_id") if isinstance(event, dict) else None
+    """Validate one event (ack already sent by the caller). Never raises.
+
+    ``event_id`` is the OUTER envelope's ``event_id`` (Events API / Socket
+    Mode ``event_callback`` body); the inner ``event`` dict never carries it.
+    """
     if not isinstance(event, dict) or not event_id or not isinstance(event_id, str):
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
     channel_id = event.get("channel")
@@ -278,6 +283,7 @@ def process_event(
     try:
         ctx, request_id = _build_context(
             event=event,
+            event_id=event_id,
             entry_point=entry_point,
             requester=requester,
             workspace_id=workspace_id,
@@ -314,6 +320,7 @@ def on_app_mention(
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
     return process_event(
         event,
+        event_id=body.get("event_id"),
         team_id=body.get("team_id"),
         entry_point="slack_mention",
         members=members,
@@ -340,6 +347,7 @@ def on_direct_message(
         return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
     return process_event(
         event,
+        event_id=body.get("event_id"),
         team_id=body.get("team_id") or event.get("team"),
         entry_point="slack_dm",
         members=members,

@@ -18,6 +18,7 @@ from services.slack_socket.events import (
     mark_processed,
     on_app_mention,
 )
+from tests.fakes.slack import mention_body
 
 
 class UniqueCursor:
@@ -107,17 +108,8 @@ def _deps(db, **overrides):  # type: ignore[no-untyped-def]
 
 
 def _mention(event_id: str = "Ev-dup") -> dict[str, object]:
-    return {
-        "team_id": "T1",
-        "event": {
-            "type": "app_mention",
-            "user": "U-sam",
-            "text": "<@U-bot> atlas budget?",
-            "ts": "1700000000.0002",
-            "channel": "C1",
-            "event_id": event_id,
-        },
-    }
+    """Real `event_callback` envelope: the dedupe key is the OUTER `event_id`."""
+    return mention_body(event_id=event_id, thread_ts=None)
 
 
 def test__offline_fake_slack_duplicate_event_id_dropped() -> None:
