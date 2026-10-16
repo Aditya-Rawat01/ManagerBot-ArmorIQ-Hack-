@@ -36,10 +36,12 @@ docker build -f deploy/toolserver/Dockerfile -t proxylead-toolserver:dev .
 What the Dockerfile does (`deploy/toolserver/Dockerfile`):
 
 - `FROM python:3.12-slim` (R-81: pinned Python 3.12).
-- Copies `pyproject.toml` and `services/` only (no API or web source) and runs
+- Three cache-friendly layers: (1) `pyproject.toml` only, then
   `pip install --no-cache-dir ".[toolserver]"` — the toolserver extra only,
   matching the CI `toolserver` job isolation (`armoriq-sdk`, `anthropic`,
-  `slack-bolt` are **not** installed; verified in §4).
+  `slack-bolt` are **not** installed; verified in §4); (2) the FastEmbed model
+  (see below); (3) `services/` (no API or web source). A source change
+  rebuilds only layer 3.
 - `USER appuser` (non-root, ADR-029). `EXPOSE 8100` (documentation only).
 - `CMD` is the task-fixed run command in **shell form** so Render's `PORT`
   expands: `exec uvicorn services.toolserver.main:create_app --factory
@@ -53,8 +55,18 @@ What the Dockerfile does (`deploy/toolserver/Dockerfile`):
   journals out of the context (ADR-029).
 - Diagnostic ping tools are **off by default** in the image. Only local
   compose opts in (`docs/DOCKER.md`); Render keeps them off.
-- The FastEmbed model is **not** downloaded at build time. Retrieval lands in
-  P2-05, which adds the build-time model preparation step there.
+- The FastEmbed model (`BAAI/bge-small-en-v1.5`, ~65 MB) **is** downloaded at
+  build time into `FASTEMBED_CACHE_PATH=/app/.fastembed-cache` (P2-05), in a
+  layer that depends only on `services/knowledge/embeddings.py`. fastembed
+  0.9.0 cannot pin a hub revision, so the build log prints the snapshot it got
+  (2026-10-16: `aa8f8b060edb00e03bfdd08813a2949946c8ba55`). The runtime sets
+  `HF_HUB_OFFLINE=1`: it never downloads; a missing or corrupt cache means
+  `/health` 503, never a fetch.
+- `MALLOC_ARENA_MAX=2` and `EMBED_THREADS=1` (in code) keep memory and CPU
+  contention low on a 512 MB / 0.1 CPU instance (§4a).
+- `/health` is **readiness**: `503 not_ready` until the startup warm loaded
+  the model, then `200`. `HEALTHCHECK --start-period=120s` covers a ~45 s cold
+  start at 0.1 CPU.
 
 ## 3. Run the container locally
 
@@ -113,6 +125,30 @@ server `Parse error` (client-side quoting artifact). Payloads were sent with
 `--data @file.json` instead — the failure was in the test invocation, not the
 server. Prefer body files (or Git Bash) for MCP smoke tests on Windows.
 
+## 4a. P2-05 resources (observed 2026-10-16, image built from the P2-05 branch)
+
+`docker run --memory=512m --memory-swap=512m --cpus=0.1` (Render Free's
+limits), local seeded PostgreSQL, fake local secrets, real MCP `tools/call`
+of `knowledge_search_team` with a validly signed `_ctx` (each call also writes
+its ledger rows):
+
+| Measure | Observed |
+|---|---|
+| Image size | 710 MB (dependencies 308 MB, model layer 67 MB) |
+| Container start → `Application startup complete` | 44.6 s (28.2 s Python imports, 16.4 s model warm) |
+| RSS after warm (`VmHWM`) | 335 MiB |
+| RSS peak after 78 searches incl. 2× 8 concurrent (`VmHWM`) | 342 MiB (cgroup `memory.peak` 299 MiB; no OOM events) |
+| Headroom under 512 MiB | ~170 MiB by RSS, ~213 MiB by cgroup peak |
+| Typical query, sequential (n=30, twice) | p50 0.20 s, p95 0.29–0.30 s, max 0.54 s |
+| 500-character query | 0.90 s |
+| 8 concurrent calls | all succeed; 2.3 s wall, slowest call 2.27 s (embeds are serialized) |
+| Model cache missing, no network | startup completes in ~37 s with an error log; `/health` 503 `not_ready`; never retries a download |
+
+So the tool server **fits Render Free (512 MB)**; the PRD's "~1 GB" was a
+budget, not a measurement. Expect slower cold starts and query latency if the
+host's CPU slice is slower than this machine's; re-measure on Render (§5
+step 9).
+
 ## 5. Render deployment procedure (NOT YET PERFORMED — needs owner action)
 
 Create a **Docker Web Service** (D-07 resolved → Render, ADR-016):
@@ -122,7 +158,8 @@ Create a **Docker Web Service** (D-07 resolved → Render, ADR-016):
    later publishes one — default is repo build).
 2. Runtime: **Docker**. Dockerfile Path: `deploy/toolserver/Dockerfile`.
    Build context: repository root.
-3. Health Check Path: `/health`.
+3. Health Check Path: `/health` (readiness: `503` until the embedding model
+   has loaded, so a deploy whose model fails to load never goes live).
 4. Environment: set `APP_ENV=staging`. Leave `PORT` to Render (it injects it;
    the image defaults to `8100` locally).
 5. Environment variables / secret files — add in Render's **Environment**
@@ -139,16 +176,19 @@ Create a **Docker Web Service** (D-07 resolved → Render, ADR-016):
    | `MCP_ENABLE_DIAGNOSTIC_TOOLS` | `false` |
    | `CTX_SECRET` | generated token, shared privately with the backend path (unused by the scaffold; required from P1-04/P2-06 — set now so redeploys need no secret changes) |
    | `DATABASE_URL_TOOLSERVER` | set when P2-01 provisions Neon (not yet — leave unset; nothing reads it) |
-   | `EMBED_MODEL` | set when P2-05 needs it (not yet — leave unset) |
+   | `EMBED_MODEL` | leave unset: the default is `BAAI/bge-small-en-v1.5`, the only accepted value (anything else fails startup) |
 
 6. Deploy. Wait for "Live".
 7. Read the public URL (`https://<service>.onrender.com`), set
    `MCP_ALLOWED_HOSTS` to that hostname, redeploy.
 8. Run the public smoke tests from §6 against the public URL.
-9. Verify the instance meets ADR-016 before handing off: enough RAM for the
-   ~1 GB FastEmbed reservation (PRD §3, §8.2 — needed once P2-05 lands), no
-   idle sleep during experiments (sleeping breaks E1 timeouts and ArmorIQ
-   reachability), public HTTPS with sane request timeouts. **Record the
+9. Verify the instance meets ADR-016 before handing off: memory for the
+   FastEmbed model (measured locally under Render Free's limits: ~335–342 MiB
+   RSS, so 512 MB fits with ~170 MiB headroom, §4a; confirm the RSS in Render's
+   Metrics after a few searches), no idle sleep during experiments (sleeping
+   breaks E1 timeouts and ArmorIQ reachability), public HTTPS with sane
+   request timeouts. Startup takes ~45 s at 0.1 CPU; `/health` is 503 until
+   then. **Record the
    instance type and observed limits in issue #6 and the EXPERIMENTS Setup
    record** (via `samarth-chawla`, the EXPERIMENTS steward). A shortfall is
    recorded, never worked around by weakening checks (task file §14).
@@ -210,10 +250,14 @@ redacted; verified locally in §4). Share log excerpts with tokens redacted.
 - **Free-tier sleep risk.** If the service sleeps when idle, ArmorIQ/E1 calls
   hit cold starts or timeouts. Confirm the no-sleep requirement (ADR-016) at
   provisioning; record the behavior in #6.
-- **RAM headroom.** PRD reserves ~1 GB for FastEmbed. The scaffold needs far
-  less; record whether the chosen instance leaves that headroom for P2-05,
-  else file the fallback decision (never send confidential text to a hosted
-  embedder silently — PRD §8.2).
+- **RAM headroom.** PRD budgets ~1 GB for FastEmbed; measured with the model
+  warm it needs ~335–342 MiB RSS (§4a), so Render Free's 512 MB fits with
+  ~170 MiB headroom. Watch Render's memory metric after deploys; if it ever
+  does not fit, file the fallback decision (never send confidential text to a
+  hosted embedder silently — PRD §8.2).
+- **CPU.** At 0.1 CPU a typical search takes ~0.2–0.3 s and embeds are
+  serialized, so concurrent calls queue (8 at once: ~2.3 s). Long queries
+  cost more (500 characters: ~0.9 s here).
 - **Transport compatibility (U-2/D-06) is E1's job, not this task's.** Local
   SDK handshake is proven (§4, `tests/toolserver/test_protocol.py`); whether
   ArmorIQ's proxy accepts it is decided by P1-06.

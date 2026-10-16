@@ -100,6 +100,11 @@ Resources:
   **not** meet ADR-016's ~1 GB reservation for FastEmbed (PRD §3, §8.2). Before P2-05
   deploys FastEmbed, move this service to an instance with at least 1 GB RAM or record a
   decision; never switch silently to a hosted embedder (PRD §8.2).
+- Update 16 Oct 2026 (P2-05 review; a LOCAL measurement, not a Render run): with the
+  model warm the tool server image uses ~335–342 MiB RSS under `--memory=512m
+  --cpus=0.1`, so 512 MB fits with ~170 MiB headroom and RAM no longer blocks P2-05
+  (`deploy/toolserver/README.md` §4a). Confirm the memory metric on Render after the
+  next deploy.
 
 Outcome: **PASS** for the P1-05 public smoke tests (task file §10/§12). Recorded
 limitations: the ping interval (fix in progress) and RAM (blocks P2-05, not Wave 1).
