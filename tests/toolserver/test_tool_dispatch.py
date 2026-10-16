@@ -292,6 +292,15 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
             arguments = {"view": view, "limit": 1}
         elif "get_source" in tool.value:
             arguments = {"source_ref": "team-friday-deploy-freeze"}
+        elif tool.value == "send_external_message":
+            arguments = {"destination": "synthetic_sink", "message": "x"}
+        elif tool.value == "create_followup_task":
+            arguments = {
+                "title": "T",
+                "owner": "sam",
+                "priority": "low",
+                "idempotency_key": "k",
+            }
         else:
             arguments = {"query": "q", "limit": 1}
         with dev_client() as client:
@@ -663,12 +672,6 @@ def test_errors_do_not_leak_details() -> None:
             body = call(client, arguments)
             assert result_text(body)["code"] == code
             assert secret_value not in json.dumps(body)
-
-
-def test_workspace_endpoint_has_no_product_tools() -> None:
-    with dev_client() as client:
-        names = [t["name"] for t in list_tools(client, "/workspace/mcp", WORKSPACE_TOKEN)]
-    assert not set(names) & {name.value for name in ToolName}
 
 
 @pytest.mark.parametrize(

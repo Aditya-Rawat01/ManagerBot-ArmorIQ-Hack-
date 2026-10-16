@@ -26,6 +26,16 @@ def test_csv_lists_are_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.slack_allowed_channels == ["C1", "C2"]
 
 
+def test_armoriq_observability_is_off_unless_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).armoriq_observability is False  # type: ignore[call-arg]
+    monkeypatch.setenv("ARMORIQ_OBSERVABILITY", "")
+    assert Settings(_env_file=None).armoriq_observability is False  # type: ignore[call-arg]
+    monkeypatch.setenv("ARMORIQ_OBSERVABILITY", "false")
+    assert Settings(_env_file=None).armoriq_observability is False  # type: ignore[call-arg]
+    monkeypatch.setenv("ARMORIQ_OBSERVABILITY", "true")
+    assert Settings(_env_file=None).armoriq_observability is True  # type: ignore[call-arg]
+
+
 def test_wildcard_cors_origin_is_rejected() -> None:
     with pytest.raises(ValidationError, match="explicit origins"):
         make_settings(cors_allowed_origins="*")
