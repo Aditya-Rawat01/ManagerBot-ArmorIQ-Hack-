@@ -260,6 +260,23 @@ def test_meta_present_reads_the_payload() -> None:
     assert probe.meta_present(None, rejected)[0] == "n.a."
 
 
+def test_decision_reason_masks_emails() -> None:
+    """M2: an ArmorIQ/SDK reason quoting the member e-mail is masked."""
+    decision = ArmorIQDecision(
+        outcome=DecisionOutcome.BLOCK,
+        source=DecisionSource.ARMORIQ_POLICY_DECISION,
+        reason=f"policy denied {FAKE_EMAIL} (also ops.lead@corp.example.org)",
+        decided_at=NOW,
+    )
+    described = probe.describe_outcome(_outcome(decision))
+    reason = described["decision_reason"]
+    assert FAKE_EMAIL not in reason
+    assert "ops.lead@corp.example.org" not in reason
+    assert "m***@e***.com" in reason
+    assert "o***@c***.e***.org" in reason
+    assert reason.startswith("policy denied ")
+
+
 def test_rejection_reports_tool_server_layer() -> None:
     described = probe.describe_outcome(
         _outcome(

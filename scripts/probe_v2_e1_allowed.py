@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -219,6 +220,18 @@ def summarize_result(payload: Any) -> Any:
     return summarize_value(payload)
 
 
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+
+
+def mask_emails(text: str | None) -> str | None:
+    """Mask every e-mail address in free text (an SDK/ArmorIQ reason may quote one)."""
+    if not text:
+        return text
+    from apps.api.identity import mask_email
+
+    return _EMAIL.sub(lambda match: mask_email(match.group(0)), text)
+
+
 def describe_outcome(outcome: Any) -> dict[str, Any]:
     """Presentation read of a real gateway `StepOutcome` (no re-decision).
 
@@ -230,7 +243,7 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
     described: dict[str, Any] = {
         "decision_outcome": decision.outcome.value,
         "decision_source": decision.source.value,
-        "decision_reason": decision.reason,
+        "decision_reason": mask_emails(decision.reason),
         "tool_server_reached": None,
         "invocation_status": None,
         "ledger_entry_id": None,
