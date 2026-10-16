@@ -18,6 +18,7 @@ decisions (ADR-026).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import uuid
@@ -54,9 +55,25 @@ SDK_VERSION = armoriq_sdk.VERSION
 # validation. Always well within the intent-token lifetime.
 CTX_TTL_S = 300
 
-# Provisional: refined by P2-06/P2-07 via ICR once the tool server defines how a
-# ledger reference is surfaced in a tool result.
+# Tool-result shape (SHARED_INTERFACES §4, emitted by P2-06): the payload is the
+# MCP CallToolResult. Success: `isError: false`, ledger reference in
+# `_meta.ledger_entry_id`. Rejection: `isError: true`, text block
+# `{"code", "message"}`, optional `_meta.ledger_entry_id` (the call's own row) or
+# `_meta.original_entry_id` (replay). Top-level `ledger_entry_id`/`error_code`
+# keys are still accepted (earlier provisional shape).
 _LEDGER_KEYS = ("ledger_entry_id", "ledgerEntryId")
+_TOOL_SERVER_CODES = frozenset(
+    {
+        "unauthenticated",
+        "invalid_context",
+        "context_expired",
+        "replay",
+        "invalid_arguments",
+        "out_of_scope",
+        "precondition_failed",
+        "internal",
+    }
+)
 
 
 def _now() -> datetime:
@@ -728,8 +745,11 @@ class ArmorIQGateway:
     ) -> StepOutcome:
         payload = getattr(result, "result", None)
         ledger_id = self._ledger_ref(payload)
-        error_code = self._error_code(payload)
+        error_code = self._error_code(payload, tool_error=self._is_tool_error(result, payload))
         if error_code is not None:
+            # A tool-server rejection is never an ALLOW (isError is honoured
+            # even without a parsable code). The ledger reference, if any, is
+            # the call's own rejection row or, on replay, the original entry.
             invocation = ToolInvocationResult(
                 request_id=ctx.request_id,
                 plan_id=handle.plan_id,
@@ -738,6 +758,7 @@ class ArmorIQGateway:
                 jti=jti,
                 status=ToolExecutionStatus.REJECTED_BY_TOOL_SERVER,
                 tool_server_reached=True,
+                ledger_entry_id=ledger_id or self._meta_ref(payload, "original_entry_id"),
                 error_code=error_code,
             )
             return StepOutcome(
@@ -940,21 +961,45 @@ class ArmorIQGateway:
             return None
 
     @staticmethod
-    def _ledger_ref(payload: Any) -> str | None:
+    def _meta_ref(payload: Any, key: str) -> str | None:
+        meta = payload.get("_meta") if isinstance(payload, Mapping) else None
+        value = meta.get(key) if isinstance(meta, Mapping) else None
+        return value if isinstance(value, str) and value else None
+
+    @classmethod
+    def _ledger_ref(cls, payload: Any) -> str | None:
         if isinstance(payload, Mapping):
             for key in _LEDGER_KEYS:
                 value = payload.get(key)
                 if isinstance(value, str) and value:
                     return value
-        return None
+        return cls._meta_ref(payload, "ledger_entry_id")
 
     @staticmethod
-    def _error_code(payload: Any) -> str | None:
+    def _is_tool_error(result: Any, payload: Any) -> bool:
+        """MCP `isError` on the payload, or the SDK's own error status for it."""
+        if isinstance(payload, Mapping) and (payload.get("isError") or payload.get("is_error")):
+            return True
+        return getattr(result, "status", None) == "error"
+
+    @staticmethod
+    def _error_code(payload: Any, *, tool_error: bool = False) -> str | None:
         if isinstance(payload, Mapping):
             code = payload.get("error_code", payload.get("errorCode"))
             if isinstance(code, str) and code:
                 return code
-        return None
+        if not tool_error:
+            return None
+        # §4 body in the first text block; anything else is `internal`.
+        content = payload.get("content") if isinstance(payload, Mapping) else None
+        first = content[0] if isinstance(content, list) and content else None
+        text = first.get("text") if isinstance(first, Mapping) else None
+        try:
+            body = json.loads(text) if isinstance(text, str) else None
+        except (ValueError, RecursionError):
+            body = None
+        code = body.get("code") if isinstance(body, Mapping) else None
+        return code if isinstance(code, str) and code in _TOOL_SERVER_CODES else "internal"
 
     @staticmethod
     def _token_expiry(token: Any) -> datetime | None:
