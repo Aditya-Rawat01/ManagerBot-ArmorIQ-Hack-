@@ -1,0 +1,79 @@
+[
+  {
+    "project_key": "proj-atlas",
+    "project_name": "Atlas rollout",
+    "status": "active",
+    "tier": "team",
+    "owner": "sam",
+    "summary": "Atlas rolls out in three stages with a freeze calendar.",
+    "details": "",
+    "budget": "",
+    "internal_notes": ""
+  },
+  {
+    "project_key": "proj-beacon",
+    "project_name": "Beacon alerts",
+    "status": "active",
+    "tier": "team",
+    "owner": "priya",
+    "summary": "Beacon pages the primary within fifteen minutes.",
+    "details": "",
+    "budget": "",
+    "internal_notes": ""
+  },
+  {
+    "project_key": "proj-compass",
+    "project_name": "Compass dashboard v1",
+    "status": "superseded",
+    "tier": "team",
+    "owner": "sam",
+    "summary": "First dashboard attempt, replaced by v2.",
+    "details": "",
+    "budget": "",
+    "internal_notes": ""
+  },
+  {
+    "project_key": "proj-harbor",
+    "project_name": "Harbor vendor review",
+    "status": "active",
+    "tier": "confidential",
+    "owner": "sam",
+    "summary": "Harbor renewal capped at last year plus five percent.",
+    "details": "Evaluation notes stay with the negotiation pair.",
+    "budget": "95k cap",
+    "internal_notes": ""
+  },
+  {
+    "project_key": "proj-lagoon",
+    "project_name": "Lagoon hiring plan",
+    "status": "active",
+    "tier": "confidential",
+    "owner": "maya",
+    "summary": "Two senior hires if contractor spend drops by a third.",
+    "details": "Offer numbers stay with Maya until approvals complete.",
+    "budget": "2 headcount",
+    "internal_notes": ""
+  },
+  {
+    "project_key": "proj-meridian",
+    "project_name": "Meridian scenario plan",
+    "status": "active",
+    "tier": "restricted",
+    "owner": "maya",
+    "summary": "Half-year scenarios: grow, hold, or reduce contractor roles.",
+    "details": "Only Maya holds the full document.",
+    "budget": "board eyes only",
+    "internal_notes": "no communication before review"
+  },
+  {
+    "project_key": "proj-northstar",
+    "project_name": "Northstar incident review",
+    "status": "active",
+    "tier": "restricted",
+    "owner": "maya",
+    "summary": "Credential exposure postmortem from September.",
+    "details": "Access revoked within the hour; no customer data touched.",
+    "budget": "n/a",
+    "internal_notes": "timeline restricted"
+  }
+]
