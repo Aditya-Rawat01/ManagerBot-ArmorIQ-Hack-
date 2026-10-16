@@ -370,6 +370,64 @@ def test__offline_fake_slack_store_this_parsing() -> None:
     assert parse_store_this("Store This:  standup moved") == "standup moved"
     assert parse_store_this("store this:   ") == ""
     assert parse_store_this("atlas budget?") is None
+    assert parse_store_this("store this") == ""  # a command with empty content
+    assert parse_store_this("store thisfoo bar") is None  # `\b`, like the planner
+    assert parse_store_this("  STORE THIS\nnotes") == "notes"
+
+
+def test__offline_fake_slack_store_this_agrees_with_planner_rule() -> None:
+    from apps.api.planner import STORE_THIS
+
+    for text in (
+        "store this x",
+        "store thisx",
+        "Store This",
+        "store this:",
+        "restore this",
+        "  store this y",
+        "store-this z",
+        "store  this q",
+    ):
+        planner_says = STORE_THIS.match(text.strip()) is not None
+        assert (parse_store_this(text) is not None) is planner_says, text
+
+
+def test__offline_fake_slack_bare_store_this_flags_empty_and_planner_clarifies() -> None:
+    from apps.api.planner import Clarification, plan
+
+    result = on_app_mention(_mention_body(text="<@U-bot> store this"), lambda: None, **_deps())
+    assert isinstance(result, IncomingSlackEvent)
+    assert result.store_this_content == ""  # flagged as store-this, like the planner
+    planned = asyncio.run(plan(result.ctx, result.message, model=None, db=None))
+    assert isinstance(planned, Clarification)
+
+
+def test__offline_fake_slack_only_the_bots_own_mention_is_stripped() -> None:
+    other = on_app_mention(
+        _mention_body(text="<@U-other> store this secret plan"), lambda: None, **_deps()
+    )
+    assert isinstance(other, IncomingSlackEvent)
+    assert other.message == "<@U-other> store this secret plan"
+    assert other.store_this_content is None
+    labelled = on_app_mention(
+        _mention_body(text="<@U-bot|proxylead> atlas budget?", event_id="Ev-l"),
+        lambda: None,
+        **_deps(),
+    )
+    assert isinstance(labelled, IncomingSlackEvent)
+    assert labelled.message == "atlas budget?"
+    dm = on_direct_message(
+        _dm_body(text="<@U-bot> store this note"), lambda: None, **_deps(dm=True)
+    )
+    assert isinstance(dm, IncomingSlackEvent)
+    assert dm.store_this_content == "note"
+    unknown_bot = on_app_mention(
+        _mention_body(text="<@U-bot> atlas budget?", event_id="Ev-n", bot_user_id=None),
+        lambda: None,
+        **_deps(),
+    )
+    assert isinstance(unknown_bot, IncomingSlackEvent)
+    assert unknown_bot.message == "<@U-bot> atlas budget?"  # unknown bot ID: strip nothing
 
 
 def test__offline_fake_slack_store_this_preserves_requester() -> None:
@@ -634,6 +692,17 @@ def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs(
     assert handle.done.wait(5)
     time.sleep(0.2)  # give a wrongly-routed channel message time to show up
     assert handle.calls == [("slack_dm", "Ev-dm-only", "hello bot")]
+
+
+def test__offline_fake_slack_bot_user_id_comes_from_bolt_context(
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
+    """The envelope lacks the bot ID here; Bolt's auth.test context supplies it."""
+    handle = _RecordingHandle(expected=1)
+    bolt = _wired_bolt_app(handle, api_loop)
+    _bolt_dispatch(bolt, mention_body(event_id="Ev-ctx", bot_user_id=None))
+    assert handle.done.wait(5)
+    assert handle.calls == [("slack_mention", "Ev-ctx", "atlas budget?")]
 
 
 def test__offline_fake_slack_bolt_unmapped_users_get_refusal_via_web_api(

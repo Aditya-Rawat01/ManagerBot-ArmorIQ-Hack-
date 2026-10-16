@@ -115,17 +115,21 @@ def build_app(
             functools.partial(_log_dispatch_outcome, incoming.event_id, incoming.request_id)
         )
 
+    # Bolt injects listener arguments by name; `context.bot_user_id` comes
+    # from auth.test and is the only mention the adapter strips.
     @app.event("app_mention")
-    def _on_mention(body: dict[str, Any], ack: Any) -> None:
-        _submit(slack_events.on_app_mention(body, ack, **mention_deps))
+    def _on_mention(body: dict[str, Any], ack: Any, context: Any) -> None:
+        bot_user_id = getattr(context, "bot_user_id", None)
+        _submit(slack_events.on_app_mention(body, ack, **mention_deps, bot_user_id=bot_user_id))
 
     @app.event("message")
-    def _on_message(body: dict[str, Any], ack: Any) -> None:
+    def _on_message(body: dict[str, Any], ack: Any, context: Any) -> None:
         event = body.get("event") if isinstance(body, dict) else None
         if not isinstance(event, dict) or event.get("channel_type") != "im":
             ack()
             return
-        _submit(slack_events.on_direct_message(body, ack, **dm_deps))
+        bot_user_id = getattr(context, "bot_user_id", None)
+        _submit(slack_events.on_direct_message(body, ack, **dm_deps, bot_user_id=bot_user_id))
 
     return app
 

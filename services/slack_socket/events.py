@@ -18,10 +18,13 @@ makes concurrent duplicates collapse to exactly one processing attempt; the
 row moves ``received`` → ``processed`` only after the orchestrator returns.
 Any database/dedupe failure fails closed (the event is not processed).
 
-``store this``: the text after the bot mention is forwarded verbatim, so the
-P3-02 planner's prefix detection keeps working with no orchestrator change,
-and the parsed remainder travels as ``store_this_content`` metadata for
-P3-04's future use (proposed handoff, no ``handle`` signature change).
+``store this``: only THIS bot's own leading mention is stripped (its user ID
+comes from the envelope's ``authorizations`` or Bolt's ``context``; a leading
+mention of anyone else is kept). The rest is forwarded verbatim, so the P3-02
+planner's ``^store this\\b`` rule (``apps.api.planner.STORE_THIS``, reused
+here) decides; ``store_this_content`` is the same remainder as metadata
+(``""`` for a bare ``store this``, which the planner answers with a
+clarification). No ``handle`` signature change.
 """
 
 import asyncio
@@ -35,6 +38,7 @@ from typing import Any, Literal, Protocol
 
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord, resolve_slack_user
+from apps.api.planner import STORE_THIS
 from services.audit import store as audit_store
 from services.audit.store import SlackRejectionReason
 from services.contracts import AuthenticatedUser, EntryPoint, PersonaKey, RequestContext
@@ -43,8 +47,6 @@ logger = logging.getLogger(__name__)
 
 MappingEvent = dict[str, Any]
 
-STORE_THIS_PREFIX = "store this"
-_MENTION_PREFIX = re.compile(r"^<@[^>]+>\s*")
 _BOT_SUBTYPES = frozenset({"bot_message", "message_changed", "message_deleted"})
 
 OrchestratorHandle = Callable[[RequestContext, str], Awaitable[str]]
@@ -93,16 +95,43 @@ def _is_bot_event(event: MappingEvent) -> bool:
     return event.get("subtype") in _BOT_SUBTYPES or "bot_id" in event or "bot_profile" in event
 
 
-def _strip_mention(text: str) -> str:
-    return _MENTION_PREFIX.sub("", text, count=1)
+def _strip_bot_mention(text: str, bot_user_id: str | None) -> str:
+    """Drop one leading mention of THIS bot (``<@Ubot>`` / ``<@Ubot|name>``).
+
+    A leading mention of any other user is kept, and nothing is stripped
+    when the bot's user ID is unknown (the planner then sees the raw text).
+    """
+    if not bot_user_id:
+        return text
+    pattern = re.compile(rf"^\s*<@{re.escape(bot_user_id)}(?:\|[^>]*)?>\s*")
+    return pattern.sub("", text, count=1)
+
+
+def _authorized_bot_user_id(body: dict[str, Any]) -> str | None:
+    """The bot's user ID from the envelope's ``authorizations[0].user_id``."""
+    authorizations = body.get("authorizations")
+    if isinstance(authorizations, list) and authorizations:
+        first = authorizations[0]
+        if isinstance(first, dict):
+            user_id = first.get("user_id")
+            if isinstance(user_id, str) and user_id:
+                return user_id
+    return None
 
 
 def parse_store_this(message: str) -> str | None:
-    """Remainder after a case-insensitive `store this` prefix, else None."""
+    """Note content of a ``store this`` command, else None (the planner's rule).
+
+    Same test as P3-02 (``apps.api.planner.STORE_THIS``: ``^store this\\b``,
+    case-insensitive, on the stripped text) and the same remainder, so the
+    adapter's flag always agrees with the planner: a bare ``store this`` is a
+    command with empty content (``""``), ``store thisfoo`` is not one.
+    """
     text = message.strip()
-    if text[: len(STORE_THIS_PREFIX)].lower() != STORE_THIS_PREFIX:
+    found = STORE_THIS.match(text)
+    if found is None:
         return None
-    return text[len(STORE_THIS_PREFIX) :].lstrip(" :\n\t")
+    return text[found.end() :].lstrip(" :\n\t")
 
 
 def resolve_workspace_id(db: AuditDatabase) -> str | None:
@@ -209,6 +238,7 @@ def process_event(
     allowed_channels: set[str],
     workspace_id: str | None,
     db: AuditDatabase | None,
+    bot_user_id: str | None = None,
 ) -> IncomingSlackEvent | SlackRejection:
     """Validate one event (ack already sent by the caller). Never raises.
 
@@ -287,8 +317,8 @@ def process_event(
     raw_text = event.get("text")
     if not isinstance(raw_text, str):
         return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
-    message = _strip_mention(raw_text) if entry_point == "slack_mention" else raw_text
-    store_this_content = parse_store_this(message) or None
+    message = _strip_bot_mention(raw_text, bot_user_id)
+    store_this_content = parse_store_this(message)
     try:
         ctx, request_id = _build_context(
             event=event,
@@ -360,6 +390,7 @@ def on_app_mention(
     workspace_id: str | None,
     db: AuditDatabase | None,
     sender: RefusalSender | None = None,
+    bot_user_id: str | None = None,
 ) -> IncomingSlackEvent | SlackRejection:
     """Bolt `app_mention` listener: ack immediately, then validate.
 
@@ -380,6 +411,7 @@ def on_app_mention(
         allowed_channels=allowed_channels,
         workspace_id=workspace_id,
         db=db,
+        bot_user_id=bot_user_id or _authorized_bot_user_id(body),
     )
     if isinstance(result, SlackRejection) and result.reason_code == "unmapped_user":
         _refuse_unmapped(sender, event, entry_point="slack_mention", event_id=result.event_id)
@@ -395,6 +427,7 @@ def on_direct_message(
     workspace_id: str | None,
     db: AuditDatabase | None,
     sender: RefusalSender | None = None,
+    bot_user_id: str | None = None,
 ) -> IncomingSlackEvent | SlackRejection:
     """Bolt `message` listener for DMs: ack immediately, then validate.
 
@@ -415,6 +448,7 @@ def on_direct_message(
         allowed_channels=set(),
         workspace_id=workspace_id,
         db=db,
+        bot_user_id=bot_user_id or _authorized_bot_user_id(body),
     )
     if isinstance(result, SlackRejection) and result.reason_code == "unmapped_user":
         _refuse_unmapped(sender, event, entry_point="slack_dm", event_id=result.event_id)
