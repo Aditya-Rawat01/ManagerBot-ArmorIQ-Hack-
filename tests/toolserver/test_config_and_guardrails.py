@@ -34,6 +34,19 @@ def test_empty_allowed_hosts_are_rejected() -> None:
         make_settings(mcp_allowed_hosts="")
 
 
+def test_embed_model_must_be_the_local_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EMBED_MODEL is validated at startup (fail closed), not just logged."""
+    from services.knowledge.embeddings import MODEL_ID
+
+    assert make_settings().embed_model == MODEL_ID
+    for other in ("text-embedding-3-small", "BAAI/bge-base-en-v1.5", ""):
+        with pytest.raises(ValidationError, match="EMBED_MODEL"):
+            make_settings(embed_model=other)
+    monkeypatch.setenv("EMBED_MODEL", "BAAI/bge-large-en-v1.5")
+    with pytest.raises(ValidationError, match="EMBED_MODEL"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
 def test_tokens_are_not_exposed_in_repr() -> None:
     assert "test-memory-token" not in repr(make_settings())
 

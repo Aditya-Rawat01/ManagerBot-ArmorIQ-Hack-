@@ -121,7 +121,7 @@ def test_json_only_accept_header_is_not_acceptable(client: TestClient) -> None:
     assert client.post("/memory/mcp", json=INITIALIZE, headers=headers).status_code == 406
 
 
-def test_product_tool_end_to_end_over_sse() -> None:
+def test_product_tool_end_to_end_over_sse(real_model: object) -> None:
     """initialize → list → call with a signed _ctx (P2-06 §9-step-5).
 
     Needs a LOCAL DATABASE_URL_TOOLSERVER with seeded data and
