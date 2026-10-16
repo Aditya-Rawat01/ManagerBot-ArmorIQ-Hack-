@@ -98,6 +98,19 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-09 — Are draft notes and summaries returned by search?
 
+**RESOLVED 16 Oct 2026 (`VTCodeCraft` + `Aditya-Rawat01`): drafts are never search evidence.**
+
+1. `knowledge_search_*` returns only `status='active'` rows whose
+   `provenance->>'review_status'='authoritative'` (missing/unknown = excluded).
+   Implemented in P2-04 (`services/knowledge/retrieval.py`); anyone can save a
+   draft, so drafts are a poisoning risk, never evidence.
+2. P2-09 does not chunk/embed drafts; drafts are visible only in Maya's
+   metadata-only `draft_review_queue` until she confirms (then authoritative
+   and ingested).
+3. Superseded records are excluded from search; explicit source-read tools
+   (P2-08) reach them flagged, never presented as current. The responder
+   already never cites drafts (P3-03).
+
 - PRD §8.4 and Arch §7.3 say drafts are non-authoritative and carry
   provenance. PRD §8.2 filters on "active status" (Arch §7.1: "status"). Neither says
   whether drafts are retrievable as evidence or how the responder must label
