@@ -17,16 +17,19 @@ unverified until experiment E1.
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+from services.authorization.ctx_envelope import InMemoryReplayGuard
 from services.contracts import HealthResponse, McpEndpoint
-from services.toolserver import __version__
+from services.toolserver import __version__, db
 from services.toolserver.config import Settings, get_settings
+from services.toolserver.ledger import Ledger
 from services.toolserver.security import BearerTokenGuard
-from services.toolserver.servers import build_server
+from services.toolserver.servers import CREDENTIAL_IDS, ToolRuntime, build_server
 
 MCP_PATH = "/mcp"
 MOUNTS: dict[McpEndpoint, str] = {
@@ -49,12 +52,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         McpEndpoint.WORKSPACE: settings.toolserver_bearer_workspace,
     }
 
-    servers: dict[McpEndpoint, MCPServer] = {
-        endpoint: build_server(
-            endpoint, enable_diagnostic_tools=settings.mcp_enable_diagnostic_tools
+    servers: dict[McpEndpoint, MCPServer] = {}
+    holders: dict[McpEndpoint, dict[str, Any]] = {}
+    for endpoint in MOUNTS:
+        holder: dict[str, Any] = {}
+        holders[endpoint] = holder
+        servers[endpoint] = build_server(
+            endpoint, enable_diagnostic_tools=settings.mcp_enable_diagnostic_tools, holder=holder
         )
-        for endpoint in MOUNTS
-    }
     # streamable_http_app() must be called before session_manager is available.
     http_apps = {
         endpoint: server.streamable_http_app(
@@ -73,7 +78,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async with AsyncExitStack() as stack:
             for server in servers.values():
                 await stack.enter_async_context(server.session_manager.run())
-            yield
+            # One pool + ledger per process (SHARED_INTERFACES §9). Without a
+            # DSN the tools still register but every database-backed step
+            # fails closed (ledger None).
+            pool = None
+            ledger = None
+            dsn = (
+                settings.database_url_toolserver.get_secret_value()
+                if settings.database_url_toolserver
+                else ""
+            )
+            if dsn:
+                try:
+                    pool = db.create_pool(dsn)
+                    ledger = Ledger(pool=pool)
+                except Exception as exc:
+                    logging.getLogger(__name__).error(
+                        "toolserver pool unavailable (%s); tools fail closed",
+                        type(exc).__name__,
+                    )
+            ctx_secret = settings.ctx_secret.get_secret_value() if settings.ctx_secret else None
+            for endpoint, holder in holders.items():
+                holder["runtime"] = ToolRuntime(
+                    endpoint=endpoint,
+                    ledger=ledger,
+                    pool=pool,
+                    ctx_secret=ctx_secret,
+                    credential_id=CREDENTIAL_IDS[endpoint],
+                    dev_guard=InMemoryReplayGuard(),
+                )
+            try:
+                yield
+            finally:
+                if pool is not None:
+                    pool.close()
 
     app = FastAPI(
         title="ProxyLead MCP tool server",
