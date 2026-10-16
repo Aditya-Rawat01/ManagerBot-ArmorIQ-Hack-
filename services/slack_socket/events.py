@@ -4,9 +4,10 @@ Every incoming event flows through :func:`on_app_mention` / :func:`on_direct_mes
 which acknowledge FIRST and then validate in task order: team → (mentions)
 channel allowlist → mapped user → dedupe → trusted ``RequestContext``. Bot and
 unsupported events are ignored without any database write (loop safety).
-Rejected events get a metadata-only audit row (``slack_event_rejected`` —
-event IDs and reason codes, never message bodies); the ``AuditEventType``
-enum gains no new member here (ICR requested for formalization instead).
+Rejected events get a metadata-only ``slack_event_rejected`` audit row via
+``services.audit.store.record_slack_event_rejected`` (Slack event/team/channel
+IDs and a reason code, never message bodies or user IDs). Those rows are not
+requests, so the manager console's ``recent_requests`` never lists them.
 
 Identity comes only from ``resolve_slack_user`` over the Slack user ID.
 Message text — including "I am Maya" claims — never influences identity,
@@ -34,7 +35,8 @@ from typing import Any, Literal
 
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord, resolve_slack_user
-from services.audit.redaction import redact_payload
+from services.audit import store as audit_store
+from services.audit.store import SlackRejectionReason
 from services.contracts import AuthenticatedUser, EntryPoint, PersonaKey, RequestContext
 
 logger = logging.getLogger(__name__)
@@ -106,35 +108,27 @@ def _audit_rejection(
     db: AuditDatabase | None,
     *,
     event_id: str,
-    reason_code: str,
+    reason_code: SlackRejectionReason,
     team_id: str | None,
     channel_id: str | None,
 ) -> None:
-    """Best-effort metadata-only audit row. Never raises, never stores bodies."""
+    """Metadata-only ``slack_event_rejected`` row via the audit store.
+
+    Never raises: the event is already refused, so an audit failure is
+    logged (exception class only) and never lets the event through.
+    """
     if db is None:
         return
     try:
-        with db.tx() as cursor:
-            cursor.execute(
-                "INSERT INTO request_events "
-                "(request_id, trace_id, event_type, payload, occurred_at) "
-                "VALUES (%s, %s, 'slack_event_rejected', %s, %s)",
-                [
-                    f"rej-{event_id}",
-                    f"trace-{event_id}",
-                    redact_payload(
-                        {
-                            "reason": reason_code,
-                            "slack_event_id": event_id,
-                            "team_id": team_id,
-                            "channel_id": channel_id,
-                        }
-                    ),
-                    datetime.now(UTC),
-                ],
-            )
-    except Exception:
-        logger.warning("slack rejection audit failed", extra={"event_id": event_id})
+        audit_store.record_slack_event_rejected(
+            db,
+            slack_event_id=event_id,
+            reason=reason_code,
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+    except Exception as exc:
+        logger.warning("slack rejection audit failed error=%s", type(exc).__name__)
 
 
 def _claim_dedupe(

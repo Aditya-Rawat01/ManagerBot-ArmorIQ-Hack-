@@ -199,7 +199,7 @@ def test__offline_fake_slack_audit_row_for_dropped_duplicate() -> None:
     recording._seen.add("Ev-dup")
     result = on_app_mention(_mention(), lambda: None, **_deps(recording))
     assert isinstance(result, SlackRejection)
-    assert any("slack_event_rejected" in sql for sql, _ in seen)
+    assert any("slack_event_rejected" in f"{sql} {params}" for sql, params in seen)
 
 
 def test__offline_fake_slack_no_db_means_no_processing() -> None:

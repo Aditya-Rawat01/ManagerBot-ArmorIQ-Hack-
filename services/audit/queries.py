@@ -192,17 +192,23 @@ def recent_requests(
 ) -> list[RequestSummary]:
     """Newest requests first (Maya-only, for P4-04).
 
-    One bounded query (no per-request round trips). A request whose
-    ``request_received`` event is missing or unreadable is still listed, with
-    empty identity fields, rather than failing the whole console page.
+    One bounded query (no per-request round trips). Only IDs that have a
+    ``request_received`` event are requests: rows without one (e.g. Slack
+    ``slack_event_rejected`` rows keyed ``rej-<event_id>``, P3-05) are never
+    listed and never consume the limit. A request whose origin payload is
+    unreadable is still listed, with empty identity fields, rather than
+    failing the whole console page.
     """
     _require_manager(actor)
     summaries: list[RequestSummary] = []
     with db.tx() as cursor:
         cursor.execute(
             "WITH latest AS ("
-            "SELECT request_id, MAX(trace_id) AS trace_id, MAX(occurred_at) AS last_at "
-            "FROM request_events GROUP BY request_id ORDER BY last_at DESC LIMIT %s) "
+            "SELECT e.request_id, MAX(e.trace_id) AS trace_id, MAX(e.occurred_at) AS last_at "
+            "FROM request_events e WHERE EXISTS ("
+            "SELECT 1 FROM request_events s WHERE s.request_id = e.request_id "
+            "AND s.event_type = 'request_received') "
+            "GROUP BY e.request_id ORDER BY last_at DESC LIMIT %s) "
             "SELECT l.request_id, COALESCE(o.trace_id, l.trace_id), o.payload, l.last_at "
             "FROM latest l LEFT JOIN LATERAL ("
             "SELECT r.trace_id, r.payload FROM request_events r "

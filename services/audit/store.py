@@ -23,6 +23,12 @@ Schema mapping notes (no column was added; migration 0009 only hardens FKs):
   allowed tables, no protected join).
 - ``delivery_events`` has no tier/error columns: ``tier_delivered`` and
   ``error_class`` travel in the companion delivery event row.
+- Slack events refused before they become requests (P3-05 ICR) are
+  ``slack_event_rejected`` rows in ``request_events`` keyed
+  ``rej-<slack_event_id>``, written only by
+  :func:`record_slack_event_rejected` (``event_type`` has no CHECK, so no
+  migration). They have no ``request_received`` origin, so read queries never
+  list them as requests.
 - Execution facts the ledger owns (tool server reached, validation outcome,
   result ID) are stored as *references* in the ``tool_executed`` /
   ``tool_rejected`` payload.
@@ -74,12 +80,26 @@ DeliveryStatus = Literal["pending", "delivered", "failed"]
 UnansweredReason = Literal[
     "no_evidence", "conflict", "manager_decision_required", "source_unavailable"
 ]
+# Why the Slack adapter (P3-05) dropped an event before it became a request.
+SlackRejectionReason = Literal[
+    "invalid_envelope",
+    "wrong_team",
+    "channel_not_allowed",
+    "unmapped_user",
+    "db_unavailable",
+    "duplicate",
+]
 
 _APPROVAL_TERMINAL = ("approved", "rejected", "expired", "timeout", "interrupted", "unverified")
 _DELIVERY_STATUSES: tuple[str, ...] = get_args(DeliveryStatus)
 _UNANSWERED_REASONS: tuple[str, ...] = get_args(UnansweredReason)
+_SLACK_REJECTION_REASONS: tuple[str, ...] = get_args(SlackRejectionReason)
 _MAX_SAFE_REFS = 20
 _MAX_REF_CHARS = 200
+
+# Slack event/team/channel IDs (``Ev…``, ``T…``, ``C…``/``D…``): short and
+# printable, the same shape as plan IDs; never free text.
+_SLACK_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}")
 
 # Caller-supplied plan IDs (the gateway's ``p-<hex>``): short, printable,
 # no whitespace — they are primary keys and correlation IDs, never content.
@@ -830,12 +850,78 @@ def add_unanswered(
         return question_id
 
 
+def _slack_ref(value: object, field: str, *, required: bool) -> str | None:
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not _SLACK_REF_RE.fullmatch(value):
+        raise AuditStoreError(
+            f"{field} must be 1-128 characters of letters, digits, '.', '_', ':' or '-'"
+        )
+    return value
+
+
+@fail_closed
+def record_slack_event_rejected(
+    db: AuditDatabase,
+    *,
+    slack_event_id: str,
+    reason: SlackRejectionReason,
+    team_id: str | None,
+    channel_id: str | None,
+) -> str:
+    """Record a Slack event dropped before it became a request (P3-05 ICR).
+
+    Metadata only: the Slack event/team/channel IDs and a reason code, never
+    message text and never a Slack user ID (an unmapped sender is not a
+    member). The ``slack_event_rejected`` row is appended to
+    ``request_events`` under the synthetic key ``rej-<slack_event_id>``
+    (returned). It has no ``request_received`` origin, so it is never a
+    request: :func:`services.audit.queries.recent_requests` skips it and
+    ``timeline`` / ``request_status`` report the key as not found.
+
+    Raises ``AuditStoreError`` on an unknown reason, a malformed ID, or a
+    database failure. The caller has already refused the event, so a failed
+    write never lets it through (fail closed).
+    """
+    event_id = _slack_ref(slack_event_id, "slack_event_id", required=True)
+    if reason not in _SLACK_REJECTION_REASONS:
+        raise AuditStoreError(f"reason must be one of {', '.join(_SLACK_REJECTION_REASONS)}")
+    team = _slack_ref(team_id, "team_id", required=False)
+    channel = _slack_ref(channel_id, "channel_id", required=False)
+    key = f"rej-{event_id}"
+    with db.tx() as cursor:
+        cursor.execute(
+            "INSERT INTO request_events "
+            "(request_id, trace_id, event_type, payload, occurred_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            [
+                key,
+                key,
+                AuditEventType.SLACK_EVENT_REJECTED.value,
+                redact_payload(
+                    {
+                        "reason": reason,
+                        "slack_event_id": event_id,
+                        "team_id": team,
+                        "channel_id": channel,
+                    }
+                ),
+                _now(),
+            ],
+        )
+    return key
+
+
 def _check_generic_event(event: AuditEvent) -> None:
     """Apply the typed writers' evidence rules to :func:`append_event`."""
     kind = event.event_type
     if kind is AuditEventType.REQUEST_RECEIVED:
         raise AuditStoreError(
             "request_received is written only by create_request (trusted RequestContext)"
+        )
+    if kind is AuditEventType.SLACK_EVENT_REJECTED:
+        raise AuditStoreError(
+            "slack_event_rejected is written only by record_slack_event_rejected (metadata only)"
         )
     if kind is AuditEventType.AUTHORIZATION_DECIDED and event.decision_source is None:
         raise AuditStoreError(
@@ -907,6 +993,7 @@ def append_event(db: AuditDatabase, *, event: AuditEvent) -> None:
 
 __all__ = [
     "DeliveryStatus",
+    "SlackRejectionReason",
     "StepOutcomeLike",
     "UnansweredReason",
     "add_unanswered",
@@ -917,5 +1004,6 @@ __all__ = [
     "record_delivery",
     "record_execution_ref",
     "record_plan",
+    "record_slack_event_rejected",
     "record_step_decision",
 ]
