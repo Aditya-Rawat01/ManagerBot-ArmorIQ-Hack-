@@ -24,6 +24,15 @@ so this module defines the structural Protocol and tests with fakes; the
 real sender plugs in unchanged. A failed DM is recorded ``delivery_failed``
 and never falls back to a thread post (R-64).
 
+Audit (SHARED_INTERFACES §10): only the answer is written with
+``record_delivery`` — a ``delivered`` row advances ``plans.status`` to
+``delivered`` and makes ``request_status().delivered`` true. Non-answer
+messages (the generic thread notice, the DM-failure notice, the HOLD DM) are
+audited with ``append_event`` as ``delivery_attempted`` events whose payload
+carries ``purpose`` / ``channel`` / ``recipient_member_id`` / ``status`` /
+``error_class`` and never the message text, so they cannot mark a request
+delivered.
+
 HOLD notification (R-40, R-44): DM to Maya's mapped Slack ID only, strict
 metadata allowlist (requester persona, tool name, request ID, console base
 URL). No approve/reject buttons, no approval actions, no protected content.
@@ -31,15 +40,21 @@ D-22 (exact console page) is OPEN: the DM links only the FIXED console base
 URL, never a fabricated deep link; final link acceptance stays pending.
 """
 
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import UTC, datetime
+from functools import partial
+from typing import Literal, Protocol
 
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord
 from services.audit.errors import AuditError
-from services.audit.store import DeliveryStatus, record_delivery
+from services.audit.store import DeliveryStatus, append_event, record_delivery
 from services.contracts import (
     ApprovalStatus,
+    AuditEvent,
+    AuditEventType,
     DataTier,
     DeliveryChannel,
     EntryPoint,
@@ -50,6 +65,13 @@ from services.contracts.tools import TOOL_CATALOG
 
 GENERIC_THREAD_NOTICE = "I sent you a private response."
 DM_FAILURE_NOTICE = "I couldn't deliver that privately. Please send me a direct message."
+
+# Non-answer messages. They are audited as ``delivery_attempted`` events
+# (``append_event``), NEVER as ``record_delivery`` rows: a ``delivered``
+# delivery row advances ``plans.status`` to ``delivered`` and makes
+# ``request_status().delivered`` true, which only the answer itself may do.
+NoticePurpose = Literal["private_response_notice", "dm_failure_notice", "hold_notice"]
+NoticeStatus = Literal["sent", "failed"]
 
 CONSOLE_BASE_URL_DEFAULT = "https://platform.armoriq.ai"  # FIXED base (D-22: page TBD)
 _MAYA_MEMBER_ID = "m-maya"  # stable D-20/ADR-021 format, used only if unresolvable
@@ -68,8 +90,10 @@ class SlackSender(Protocol):
 
 @dataclass(frozen=True)
 class DeliveryRecord:
-    """One delivery outcome. ``delivery_ids`` are audit rows; ``notice_posted``
-    tracks whether the generic thread notice went out alongside a DM."""
+    """One delivery outcome. ``delivery_ids`` are the answer's
+    ``delivery_events`` rows (notices and HOLD DMs have none: they are
+    ``delivery_attempted`` events); ``notice_posted`` tracks whether the
+    generic thread notice went out alongside a DM."""
 
     request_id: str
     channel: DeliveryChannel
@@ -195,36 +219,115 @@ def _send_dm(
     return ("delivered", None, delivery_id)
 
 
+def _notice_event(
+    db: AuditDatabase,
+    *,
+    ctx: RequestContext,
+    purpose: NoticePurpose,
+    channel: DeliveryChannel,
+    recipient_member_id: str,
+    status: NoticeStatus,
+    error_class: str | None,
+) -> bool:
+    """Audit one non-answer message as a ``delivery_attempted`` event.
+
+    Metadata only (purpose, channel, recipient, status, error class) — never
+    the message text. Writes no ``delivery_events`` row and never touches
+    ``plans``. Returns False when the audit write itself fails.
+    """
+    try:
+        append_event(
+            db,
+            event=AuditEvent(
+                event_id=f"dlv-{uuid.uuid4().hex}",
+                occurred_at=datetime.now(UTC),
+                event_type=AuditEventType.DELIVERY_ATTEMPTED,
+                request_id=ctx.request_id,
+                trace_id=ctx.trace_id,
+                payload={
+                    "purpose": purpose,
+                    "channel": channel.value,
+                    "recipient_member_id": recipient_member_id,
+                    "status": status,
+                    "error_class": error_class,
+                },
+            ),
+        )
+    except AuditError:
+        return False
+    return True
+
+
+def _send_notice(
+    db: AuditDatabase,
+    *,
+    ctx: RequestContext,
+    purpose: NoticePurpose,
+    channel: DeliveryChannel,
+    recipient_member_id: str,
+    send: Callable[[], None] | None,
+    unavailable: str = "unavailable",
+) -> tuple[bool, str | None]:
+    """Send one non-answer message and audit it; returns (sent, error_class).
+
+    ``send`` is None when nothing can be sent; ``unavailable`` names why
+    (recorded as a failed attempt). A failed send or audit write is recorded
+    or reported, never swallowed silently. Never raises.
+    """
+
+    def audit(status: NoticeStatus, error_class: str | None) -> bool:
+        return _notice_event(
+            db,
+            ctx=ctx,
+            purpose=purpose,
+            channel=channel,
+            recipient_member_id=recipient_member_id,
+            status=status,
+            error_class=error_class,
+        )
+
+    if send is None:
+        return (False, unavailable if audit("failed", unavailable) else "audit_failed")
+    try:
+        send()
+    except Exception as exc:
+        error = type(exc).__name__
+        return (False, error if audit("failed", error) else "audit_failed")
+    if not audit("sent", None):
+        return (False, "audit_failed")
+    return (True, None)
+
+
 def _post_thread_notice(
     sender: SlackSender | None,
     db: AuditDatabase,
     *,
     ctx: RequestContext,
     text: str,
-    tier: DataTier,
-) -> tuple[bool, int | None]:
-    """Post the generic notice; returns (posted, delivery_id). Never raises."""
-    if (
-        sender is None
-        or ctx.entry_point is not EntryPoint.SLACK_MENTION
-        or not ctx.slack_channel_id
-    ):
-        return (False, None)
-    try:
-        sender.post_in_thread(ctx.slack_channel_id, ctx.slack_thread_ts, text)
-    except Exception:
-        return (False, None)
-    delivery_id = _record(
+    purpose: NoticePurpose,
+) -> bool:
+    """Post a fixed generic notice in the originating thread; returns posted.
+
+    Recorded via :func:`_notice_event` (``delivery_attempted``), so a notice
+    can never mark the request delivered. Never raises.
+    """
+    send: Callable[[], None] | None = None
+    unavailable = "no_sender"
+    if sender is not None:
+        if ctx.entry_point is EntryPoint.SLACK_MENTION and ctx.slack_channel_id:
+            send = partial(sender.post_in_thread, ctx.slack_channel_id, ctx.slack_thread_ts, text)
+        else:
+            unavailable = "no_thread_context"
+    posted, _ = _send_notice(
         db,
-        request_id=ctx.request_id,
-        trace_id=ctx.trace_id,
+        ctx=ctx,
+        purpose=purpose,
         channel=DeliveryChannel.SLACK_THREAD,
         recipient_member_id=ctx.requester.member_id,
-        tier=tier,
-        status="delivered",
-        error_class=None,
+        send=send,
+        unavailable=unavailable,
     )
-    return (delivery_id is not None, delivery_id)
+    return posted
 
 
 def deliver(
@@ -427,28 +530,27 @@ def _deliver_dm_with_notice(
         tier=tier,
         error_no_mapping="no_slack_mapping",
     )
-    ids = [dm_id] if dm_id else []
+    ids = (dm_id,) if dm_id else ()
     if status == "delivered":
         # Content is private; the thread learns only that it exists.
-        posted, notice_id = _post_thread_notice(
-            sender, db, ctx=ctx, text=GENERIC_THREAD_NOTICE, tier=tier
+        posted = _post_thread_notice(
+            sender, db, ctx=ctx, text=GENERIC_THREAD_NOTICE, purpose="private_response_notice"
         )
-        if notice_id:
-            ids.append(notice_id)
         return DeliveryRecord(
             request_id=ctx.request_id,
             channel=DeliveryChannel.SLACK_DM,
             recipient_member_id=recipient,
             tier_delivered=tier,
             status="delivered",
-            delivery_ids=tuple(ids),
+            delivery_ids=ids,
             notice_posted=posted,
         )
     # DM failed: never post the content; optionally post the generic failure
-    # notice (no content), and report failure regardless.
-    posted, notice_id = _post_thread_notice(sender, db, ctx=ctx, text=DM_FAILURE_NOTICE, tier=tier)
-    if notice_id:
-        ids.append(notice_id)
+    # notice (no content), and report failure regardless. The notice is not
+    # the answer, so it never marks the request delivered.
+    posted = _post_thread_notice(
+        sender, db, ctx=ctx, text=DM_FAILURE_NOTICE, purpose="dm_failure_notice"
+    )
     return DeliveryRecord(
         request_id=ctx.request_id,
         channel=DeliveryChannel.SLACK_DM,
@@ -456,7 +558,7 @@ def _deliver_dm_with_notice(
         tier_delivered=tier,
         status="failed",
         error_class=error,
-        delivery_ids=tuple(ids),
+        delivery_ids=ids,
         notice_posted=posted,
     )
 
@@ -500,24 +602,32 @@ def notify_hold(
         "Review pending approvals in the ArmorIQ console: "
         f"{console_base_url}"
     )
-    status, error, delivery_id = _send_dm(
-        sender,
+    send: Callable[[], None] | None = None
+    unavailable = "no_sender"
+    if sender is not None:
+        if maya_slack_id:
+            send = partial(sender.send_dm, maya_slack_id, text)
+        else:
+            unavailable = "no_maya_mapping"
+    # The HOLD DM is not the requester's answer: it is audited as a
+    # ``delivery_attempted`` event, never a delivery row, so the request is
+    # not marked delivered while the HOLD is still pending.
+    sent, error = _send_notice(
         db,
         ctx=ctx,
-        slack_user_id=maya_slack_id or None,
+        purpose="hold_notice",
+        channel=DeliveryChannel.SLACK_DM,
         recipient_member_id=maya_member_id,
-        text=text,
-        tier=tool_tier,
-        error_no_mapping="no_maya_mapping",
+        send=send,
+        unavailable=unavailable,
     )
     return DeliveryRecord(
         request_id=ctx.request_id,
         channel=DeliveryChannel.SLACK_DM,
         recipient_member_id=maya_member_id,
         tier_delivered=tool_tier,
-        status=status,
+        status="delivered" if sent else "failed",
         error_class=error,
-        delivery_ids=(delivery_id,) if delivery_id else (),
     )
 
 

@@ -5,13 +5,13 @@ Every test asserts on the actual DM text against the metadata allowlist —
 and on what is absent.
 """
 
-from contextlib import contextmanager
 from datetime import UTC, datetime
 
 import pytest
 
 from apps.api.delivery import DeliveryError, notify_hold
 from apps.api.identity import MemberRecord
+from services.audit.queries import request_status
 from services.contracts import (
     AppRole,
     ApprovalState,
@@ -24,6 +24,7 @@ from services.contracts import (
     RequestContext,
     ToolName,
 )
+from tests.api.test_delivery_channel import AuditSim
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 CONSOLE = "https://platform.armoriq.ai"
@@ -44,31 +45,6 @@ class FakeSender:
         if self.fail_dm:
             raise RuntimeError("fake DM failed")
         self.dms.append((slack_user_id, text))
-
-
-class FakeCursor:
-    def __init__(self, one=None) -> None:
-        self.statements: list[tuple[str, object]] = []
-        self._one = list(one or [])
-        self.rowcount = 1
-
-    def execute(self, query: str, params: object = None) -> None:
-        self.statements.append((query, params))
-
-    def fetchone(self) -> object:
-        return self._one.pop(0) if self._one else None
-
-    def fetchall(self) -> list[object]:
-        return []
-
-
-class FakeDb:
-    def __init__(self, one=None) -> None:
-        self._one = one
-
-    @contextmanager
-    def tx(self):  # type: ignore[no-untyped-def]
-        yield FakeCursor(one=self._one)
 
 
 def _members(maya_slack: str | None = "U-maya") -> dict[PersonaKey, MemberRecord]:
@@ -132,7 +108,7 @@ def _approval() -> ApprovalStatus:
 
 
 def test__offline_fake_slack_hold_dm_goes_to_maya_only() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     assert record.status == "delivered"
     assert record.channel is DeliveryChannel.SLACK_DM
@@ -147,7 +123,7 @@ def test__offline_fake_slack_hold_dm_goes_to_maya_only() -> None:
 
 
 def test__offline_fake_slack_hold_text_is_allowlisted() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     (_, text) = sender.dms[0]
     assert "sam" in text  # requester persona
@@ -157,7 +133,7 @@ def test__offline_fake_slack_hold_text_is_allowlisted() -> None:
 
 
 def test__offline_fake_slack_hold_text_has_no_protected_content() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     (_, text) = sender.dms[0]
     for leaked in (
@@ -174,7 +150,7 @@ def test__offline_fake_slack_hold_text_has_no_protected_content() -> None:
 
 
 def test__offline_fake_slack_hold_has_no_approval_affordance() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     (_, text) = sender.dms[0]
     assert "Approve" not in text and "Reject" not in text and "button" not in text
@@ -182,7 +158,7 @@ def test__offline_fake_slack_hold_has_no_approval_affordance() -> None:
 
 
 def test__offline_fake_slack_hold_links_base_only_pending_d22() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     (_, text) = sender.dms[0]
     assert "/approve" not in text and "/delegat" not in text and "?" not in text
@@ -192,7 +168,7 @@ def test__offline_fake_slack_hold_links_base_only_pending_d22() -> None:
 
 
 def test__offline_fake_slack_missing_maya_mapping_fails_safely() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     record = notify_hold(
         _ctx(), _approval(), sender=sender, db=db, members=_members(maya_slack=None)
     )
@@ -202,14 +178,14 @@ def test__offline_fake_slack_missing_maya_mapping_fails_safely() -> None:
 
 
 def test__offline_fake_slack_no_members_table_fails_safely() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=None)
     assert record.status == "failed"
     assert sender.dms == []
 
 
 def test__offline_fake_slack_hold_dm_failure_recorded() -> None:
-    sender, db = FakeSender(fail_dm=True), FakeDb(one=[(3,)])
+    sender, db = FakeSender(fail_dm=True), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     assert record.status == "failed"
     assert record.error_class is not None
@@ -222,7 +198,37 @@ def test__offline_fake_slack_hold_no_store_refuses() -> None:
 
 
 def test__offline_fake_slack_hold_records_confidential_tier_metadata() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(3,)])
+    sender, db = FakeSender(), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     # Labels the held action's tier (metadata about that tier, not its content).
     assert record.tier_delivered is DataTier.CONFIDENTIAL
+
+
+# --- B1: the HOLD DM never marks the request delivered ----------------------
+
+
+def test__offline_fake_slack_hold_dm_never_marks_request_delivered() -> None:
+    sender, db = FakeSender(), AuditSim()
+    record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert record.status == "delivered"  # Maya got the DM ...
+    assert len(sender.dms) == 1
+    # ... but the requester's request is still on HOLD, not delivered.
+    assert db.delivery_rows == []
+    assert not any("INSERT INTO delivery_events" in sql for sql, _ in db.statements)
+    assert db.plans_delivered_updates() == []
+    assert db.plan_status != "delivered"
+    assert request_status(db, "req-7", "m-sam").delivered is False
+    (event,) = [a for a in db.attempts("hold_notice") if a["status"] == "sent"]
+    assert event["channel"] == "slack_dm"
+    assert event["recipient_member_id"] == "m-maya"
+    (_, text) = sender.dms[0]
+    assert text not in db.params_text()  # metadata only, never the DM text
+
+
+def test__offline_fake_slack_hold_dm_failure_never_marks_request_delivered() -> None:
+    sender, db = FakeSender(fail_dm=True), AuditSim()
+    record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
+    assert record.status == "failed"
+    assert db.delivery_rows == [] and db.plans_delivered_updates() == []
+    failed = [a for a in db.attempts("hold_notice") if a["status"] == "failed"]
+    assert [a["error_class"] for a in failed] == ["RuntimeError"]

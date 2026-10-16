@@ -19,6 +19,7 @@ from apps.api.delivery import (
 )
 from apps.api.responder import ResponderOutput
 from services.audit.errors import AuditStoreError
+from services.audit.queries import request_status
 from services.contracts import (
     AppRole,
     AuthenticatedUser,
@@ -53,43 +54,123 @@ class FakeSender:
         self.dms.append((slack_user_id, text))
 
 
-class FakeCursor:
-    def __init__(self, one=None) -> None:
-        self.statements: list[tuple[str, object]] = []
-        self._one = list(one or [])
+class _SimCursor:
+    """One transaction of :class:`AuditSim`; changes apply only on commit."""
+
+    def __init__(self, sim: "AuditSim", fail: bool) -> None:
+        self.sim = sim
+        self.fail = fail
         self.rowcount = 1
+        self._one: list[object] = []
+        self._all: list[list[object]] = []
+        self._rows: list[dict[str, object]] = []
+        self._events: list[dict[str, object]] = []
+        self._plans_delivered = False
 
     def execute(self, query: str, params: object = None) -> None:
-        self.statements.append((query, params))
+        values = list(params or [])  # type: ignore[call-overload]
+        self.sim.statements.append((query, values))
+        if self.fail:
+            raise AuditStoreError("fake audit write failed")
+        if query.startswith("INSERT INTO delivery_events"):
+            row_id = len(self.sim.delivery_rows) + len(self._rows) + 1
+            self._rows.append(
+                {
+                    "id": row_id,
+                    "request_id": values[0],
+                    "plan_id": values[2],
+                    "channel": values[3],
+                    "recipient": values[4],
+                    "status": values[5],
+                }
+            )
+            self._one.append((row_id,))
+        elif query.startswith("INSERT INTO request_events"):
+            # record_delivery: (request, trace, plan, type, payload, at);
+            # append_event: (request, trace, plan, step, jti, type, payload, at).
+            kind, payload = (values[3], values[4]) if len(values) == 6 else (values[5], values[6])
+            self._events.append(
+                {"request_id": values[0], "plan_id": values[2], "type": kind, "payload": payload}
+            )
+        elif query.startswith("UPDATE plans SET status = 'delivered'"):
+            self._plans_delivered = True
+        elif "event_type = 'request_received'" in query:
+            origin = {"requester_member_id": self.sim.requester, "workspace_id": "ws-1"}
+            self._one.append(("trace-1", origin))
+        elif query.startswith("SELECT id FROM plans"):
+            self._all.append([("plan-1",)])
+        elif "FROM approval_requests" in query:
+            self._one.append((0,))
+        elif "FROM delivery_events" in query and "'delivered'" in query:
+            count = sum(1 for row in self.sim.delivery_rows if row["status"] == "delivered")
+            self._one.append((count,))
+        elif query.startswith("SELECT MAX(occurred_at)"):
+            self._one.append((NOW,))
+        else:
+            raise AssertionError(f"unexpected SQL in delivery test: {query}")
 
     def fetchone(self) -> object:
         return self._one.pop(0) if self._one else None
 
     def fetchall(self) -> list[object]:
-        return []
+        return self._all.pop(0) if self._all else []
+
+    def commit(self) -> None:
+        self.sim.delivery_rows.extend(self._rows)
+        self.sim.events.extend(self._events)
+        if self._plans_delivered:
+            self.sim.plan_status = "delivered"
 
 
-class FakeDb:
-    """Test-local audit store double (records SQL, no database)."""
+class AuditSim:
+    """Stateful stand-in for the backend audit tables (SQL captured, no database).
 
-    def __init__(self, one=None, fail: bool = False) -> None:
-        self._one = one
-        self.fail = fail
-        self.cursors: list[FakeCursor] = []
+    Applies what ``record_delivery`` / ``append_event`` write and answers
+    the ``request_status`` reads from that state, so tests can assert on the
+    real read API. A transaction commits only if it does not raise.
+    ``fail_tx`` lists transaction indexes (0-based) that fail; ``fail_all``
+    fails every transaction.
+    """
+
+    def __init__(
+        self,
+        *,
+        requester: str = "m-sam",
+        fail_tx: tuple[int, ...] = (),
+        fail_all: bool = False,
+    ) -> None:
+        self.requester = requester
+        self.fail_tx = set(fail_tx)
+        self.fail_all = fail_all
+        self.statements: list[tuple[str, list[object]]] = []
+        self.delivery_rows: list[dict[str, object]] = []
+        self.events: list[dict[str, object]] = []
+        self.plan_status = "answered"
+        self._count = 0
 
     @contextmanager
     def tx(self):  # type: ignore[no-untyped-def]
-        cursor = FakeCursor(one=self._one)
-        self.cursors.append(cursor)
-        if self.fail:
-            original = cursor.execute
-
-            def _boom(query: str, params: object = None) -> None:
-                original(query, params)
-                raise AuditStoreError("fake audit write failed")
-
-            cursor.execute = _boom  # type: ignore[method-assign]
+        index, self._count = self._count, self._count + 1
+        cursor = _SimCursor(self, fail=self.fail_all or index in self.fail_tx)
         yield cursor
+        cursor.commit()
+
+    def plans_delivered_updates(self) -> list[str]:
+        return [sql for sql, _ in self.statements if "UPDATE plans SET status = 'delivered'" in sql]
+
+    def attempts(self, purpose: str | None = None) -> list[dict[str, object]]:
+        """Committed ``delivery_attempted`` payloads (non-answer messages)."""
+        payloads = [
+            event["payload"] for event in self.events if event["type"] == "delivery_attempted"
+        ]
+        return [
+            p  # type: ignore[misc]
+            for p in payloads
+            if isinstance(p, dict) and (purpose is None or p.get("purpose") == purpose)
+        ]
+
+    def params_text(self) -> str:
+        return str([params for _, params in self.statements])
 
 
 def _requester(slack_id: str | None = "U-sam") -> AuthenticatedUser:
@@ -140,7 +221,7 @@ def _answer(text: str = "team update", citations: list[str] | None = None) -> Re
 
 
 def test__offline_fake_slack_mention_team_goes_to_thread() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(_ctx(), _answer("team update"), DataTier.TEAM, sender=sender, db=db)
     assert isinstance(record, DeliveryRecord)
     assert record.channel is DeliveryChannel.SLACK_THREAD
@@ -153,7 +234,7 @@ def test__offline_fake_slack_mention_team_goes_to_thread() -> None:
 def test__offline_fake_slack_mention_elevated_dm_plus_generic_notice(
     tier: DataTier,
 ) -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,), (8,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(),
         _answer(f"secret {tier.value} content"),
@@ -170,7 +251,7 @@ def test__offline_fake_slack_mention_elevated_dm_plus_generic_notice(
 
 @pytest.mark.parametrize("tier", list(DataTier))
 def test__offline_fake_slack_dm_always_private(tier: DataTier) -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(EntryPoint.SLACK_DM),
         _answer("any content"),
@@ -186,7 +267,7 @@ def test__offline_fake_slack_dm_always_private(tier: DataTier) -> None:
 
 @pytest.mark.parametrize("tier", list(DataTier))
 def test__offline_fake_slack_web_private_only(tier: DataTier) -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(EntryPoint.WEB),
         _answer("private content"),
@@ -207,7 +288,7 @@ def test__offline_fake_slack_notice_is_fixed_constant() -> None:
 
 
 def test__offline_fake_slack_thread_notice_carries_no_content() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,), (8,)])
+    sender, db = FakeSender(), AuditSim()
     answer_text = f"{_SECRET_TITLE} [src-9] allege 3 layoffs (confidence 0.9)"
     deliver(
         _ctx(),
@@ -223,7 +304,7 @@ def test__offline_fake_slack_thread_notice_carries_no_content() -> None:
 
 
 def test__offline_fake_slack_uncited_elevated_still_dm() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,), (8,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(),
         _answer("uncited confidential text"),
@@ -236,7 +317,7 @@ def test__offline_fake_slack_uncited_elevated_still_dm() -> None:
 
 
 def test__offline_fake_slack_citations_do_not_drive_routing() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(),
         _answer("team answer [src-1]", citations=["src-1"]),
@@ -251,7 +332,7 @@ def test__offline_fake_slack_citations_do_not_drive_routing() -> None:
 
 
 def test__offline_fake_slack_failed_dm_never_falls_back_to_thread() -> None:
-    sender, db = FakeSender(fail_dm=True), FakeDb(one=[(7,), (8,)])
+    sender, db = FakeSender(fail_dm=True), AuditSim()
     secret = "confidential content must not leak"
     record = deliver(_ctx(), _answer(secret), DataTier.CONFIDENTIAL, sender=sender, db=db)
     assert record.status == "failed"
@@ -262,14 +343,14 @@ def test__offline_fake_slack_failed_dm_never_falls_back_to_thread() -> None:
 
 
 def test__offline_fake_slack_failed_audit_not_reported_delivered() -> None:
-    sender, db = FakeSender(), FakeDb(fail=True)
+    sender, db = FakeSender(), AuditSim(fail_all=True)
     record = deliver(_ctx(), _answer("team update"), DataTier.TEAM, sender=sender, db=db)
     assert record.status == "failed"
     assert record.error_class == "audit_failed"
 
 
 def test__offline_fake_slack_missing_mapping_fails_safely() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,)])
+    sender, db = FakeSender(), AuditSim()
     record = deliver(
         _ctx(slack_id=None),
         _answer("dm content"),
@@ -285,7 +366,7 @@ def test__offline_fake_slack_missing_mapping_fails_safely() -> None:
 def test__offline_fake_slack_request_mismatch_refuses() -> None:
     other = ResponderOutput(request_id="req-OTHER", answer_text="x")
     with pytest.raises(DeliveryError):
-        deliver(_ctx(), other, DataTier.TEAM, sender=FakeSender(), db=FakeDb())
+        deliver(_ctx(), other, DataTier.TEAM, sender=FakeSender(), db=AuditSim())
 
 
 def test__offline_fake_slack_no_store_refuses() -> None:
@@ -294,7 +375,51 @@ def test__offline_fake_slack_no_store_refuses() -> None:
 
 
 def test__offline_fake_slack_recipient_is_mapped_identity() -> None:
-    sender, db = FakeSender(), FakeDb(one=[(7,), (8,)])
+    sender, db = FakeSender(), AuditSim()
     deliver(_ctx(), _answer("x"), DataTier.RESTRICTED, sender=sender, db=db)
     # No recipient input exists anywhere: destination is the trusted mapping.
     assert [user for user, _ in sender.dms] == ["U-sam"]
+
+
+# --- B1: non-answer messages never mark the request delivered ---------------
+
+
+def test__offline_fake_slack_dm_failure_notice_never_marks_request_delivered() -> None:
+    sender, db = FakeSender(fail_dm=True), AuditSim()
+    record = deliver(_ctx(), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db)
+    assert record.status == "failed"
+    assert sender.thread_posts == [("C1", "1700000000.0001", DM_FAILURE_NOTICE)]
+    # The notice reached the thread, the answer reached nobody: no
+    # plans->delivered UPDATE, no delivered row, and the read API agrees.
+    assert db.plans_delivered_updates() == []
+    assert db.plan_status != "delivered"
+    assert [row["status"] for row in db.delivery_rows] == ["failed"]
+    assert request_status(db, "req-1", "m-sam").delivered is False
+    (notice,) = db.attempts("dm_failure_notice")
+    assert notice["channel"] == "slack_thread"
+    assert notice["status"] == "sent"
+    assert DM_FAILURE_NOTICE not in db.params_text()  # metadata only, never the text
+
+
+def test__offline_fake_slack_private_notice_is_not_a_delivery_row() -> None:
+    sender, db = FakeSender(), AuditSim()
+    record = deliver(_ctx(), _answer("secret"), DataTier.RESTRICTED, sender=sender, db=db)
+    assert record.status == "delivered" and record.notice_posted is True
+    # Exactly one delivered row: the DM answer. The thread notice is an event.
+    assert [
+        (row["channel"], row["status"]) for row in db.delivery_rows if row["status"] != "pending"
+    ] == [("slack_dm", "delivered")]
+    assert not any(row["channel"] == "slack_thread" for row in db.delivery_rows)
+    (notice,) = db.attempts("private_response_notice")
+    assert notice["status"] == "sent"
+    assert notice["recipient_member_id"] == "m-sam"
+    assert GENERIC_THREAD_NOTICE not in db.params_text()
+
+
+def test__offline_fake_slack_failed_notice_post_is_recorded() -> None:
+    sender, db = FakeSender(fail_thread=True), AuditSim()
+    record = deliver(_ctx(), _answer("secret"), DataTier.CONFIDENTIAL, sender=sender, db=db)
+    assert record.status == "delivered"
+    assert record.notice_posted is False
+    failed = [n for n in db.attempts("private_response_notice") if n["status"] == "failed"]
+    assert [n["error_class"] for n in failed] == ["RuntimeError"]
