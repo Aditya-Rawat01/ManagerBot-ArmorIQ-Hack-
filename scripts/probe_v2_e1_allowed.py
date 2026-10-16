@@ -19,9 +19,14 @@ Logs: only the gateway's own INFO/WARNING lines go to stderr (request_id,
 jti, ledger reference, exception class), so a failed call keeps its jti.
 SDK, httpx, and root logging are left alone.
 
-Exit codes: 0 the probe ran to completion (any observed outcome); 1 an
-unexpected error stopped it; 2 prerequisites missing (settings unreadable or
-required values unset: names only, never values).
+Exit codes:
+    0  EXECUTED and the ledger row correlates with this run (a PASS
+       candidate: the operator still confirms the Render request log)
+    1  an unexpected error stopped the probe (exception type only)
+    2  prerequisites missing: arguments given, settings unreadable, or a
+       required value unset (names only, never values)
+    3  the probe ran, but the result is not EXECUTED + correlated (includes
+       a run without DATABASE_URL_TOOLSERVER); read the record
 """
 
 from __future__ import annotations
@@ -60,6 +65,11 @@ TOOLSERVER_ENV_FILE = REPO_ROOT / "services" / "toolserver" / ".env"
 E1_QUERY = "quokka Friday deploy freeze"
 E1_LIMIT = 5
 E1_TOOL = "knowledge_search_team"
+
+EXIT_PASS_CANDIDATE = 0
+EXIT_ERROR = 1
+EXIT_PREREQUISITES = 2
+EXIT_NOT_PASS = 3
 
 # Ledger columns the record may show (P2-07 ledger). Never `arguments_sha256`,
 # `prev_hash`, or `entry_hash`.
@@ -543,6 +553,11 @@ def pass_candidate(described: Mapping[str, Any], ledger: Mapping[str, Any]) -> b
     return described.get("invocation_status") == "executed" and ledger.get("correlated") is True
 
 
+def probe_exit_code(described: Mapping[str, Any], ledger: Mapping[str, Any]) -> int:
+    """0 only for a PASS candidate; every other completed run exits 3."""
+    return EXIT_PASS_CANDIDATE if pass_candidate(described, ledger) else EXIT_NOT_PASS
+
+
 def build_record(
     *,
     run_at: str,
@@ -594,7 +609,8 @@ def build_record(
         "- Attempt rows (tool_call_attempts; credential_id answers D-06): "
         f"{ledger.get('attempts')}",
         "- PASS candidate (EXECUTED and correlated): "
-        f"{'yes' if pass_candidate(described, ledger) else 'no'}",
+        f"{'yes' if pass_candidate(described, ledger) else 'no'} "
+        f"(probe exit code {probe_exit_code(described, ledger)})",
         "- Credential path observed: see deployed tool-server request log "
         "(bearer accepted vs 401) plus tool_call_attempts.credential_id",
         f"- D-05 (`_ctx` forwarded): {d05_answer} ({d05_reason})",
@@ -715,7 +731,7 @@ async def run_probe(
         payload=payload,
         ledger=ledger,
     )
-    return 0, record
+    return probe_exit_code(described, ledger), record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -723,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
         argv = sys.argv[1:]
     if argv:
         print("probe_v2_e1_allowed: no arguments accepted", file=sys.stderr)
-        return 2
+        return EXIT_PREREQUISITES
     try:
         settings = load_settings()
     except Exception as exc:
@@ -732,7 +748,7 @@ def main(argv: list[str] | None = None) -> int:
             f"probe_v2_e1_allowed: settings could not be loaded ({type(exc).__name__})",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_PREREQUISITES
     missing = missing_settings(settings)
     if missing:
         print(
@@ -740,7 +756,7 @@ def main(argv: list[str] | None = None) -> int:
             + ", ".join(missing),
             file=sys.stderr,
         )
-        return 2
+        return EXIT_PREREQUISITES
     try:
         ledger_dsn = load_ledger_dsn()
     except Exception as exc:
@@ -749,11 +765,11 @@ def main(argv: list[str] | None = None) -> int:
             f"({type(exc).__name__})",
             file=sys.stderr,
         )
-        return 2
+        return EXIT_PREREQUISITES
     if ledger_dsn is None:
         print(
-            "probe_v2_e1_allowed: DATABASE_URL_TOOLSERVER is not set; "
-            "ledger correlation will be skipped",
+            "probe_v2_e1_allowed: DATABASE_URL_TOOLSERVER is not set; ledger "
+            "correlation will be skipped, so the exit code cannot be 0",
             file=sys.stderr,
         )
     try:
@@ -764,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
             f"probe_v2_e1_allowed: probe error ({type(exc).__name__})",
             file=sys.stderr,
         )
-        return 1
+        return EXIT_ERROR
     print(record)
     return code
 

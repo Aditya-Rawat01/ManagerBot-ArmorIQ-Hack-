@@ -772,7 +772,8 @@ def _run_probe_offline(
 
 
 def test_run_probe_executed_and_correlated__offline_fake_sdk_and_ledger() -> None:
-    _, record, lookup, _ = _run_probe_offline()
+    code, record, lookup, _ = _run_probe_offline()
+    assert code == probe.EXIT_PASS_CANDIDATE == 0
     assert "Ledger correlation: correlated: true (lookup: by jti)" in record
     assert "Ledger mismatches: none" in record
     assert "PASS candidate (EXECUTED and correlated): yes" in record
@@ -869,7 +870,8 @@ def test_run_probe_invalid_context_is_ambiguous_for_d05__offline_fake_sdk_and_le
         "isError": True,
         "content": [{"type": "text", "text": '{"code": "invalid_context", "message": "rejected"}'}],
     }
-    _, record, _, _ = _run_probe_offline(result=rejection)
+    code, record, _, _ = _run_probe_offline(result=rejection)
+    assert code == probe.EXIT_NOT_PASS
     assert "status=rejected_by_tool_server" in record
     assert "D-05 (`_ctx` forwarded): ambiguous" in record
     assert "rejecting tool call: missing _ctx" in record
@@ -878,10 +880,42 @@ def test_run_probe_invalid_context_is_ambiguous_for_d05__offline_fake_sdk_and_le
 
 
 def test_run_probe_ledger_mismatch_is_not_pass__offline_fake_sdk_and_ledger() -> None:
-    _, record, _, _ = _run_probe_offline(ledger_overrides={"plan_id": "p-someone-else"})
+    code, record, _, _ = _run_probe_offline(ledger_overrides={"plan_id": "p-someone-else"})
+    assert code == probe.EXIT_NOT_PASS
     assert "Ledger correlation: correlated: false" in record
     assert "row.plan_id='p-someone-else'" in record
-    assert "PASS candidate (EXECUTED and correlated): no" in record
+    assert "PASS candidate (EXECUTED and correlated): no (probe exit code 3)" in record
+
+
+def test_run_probe_without_ledger_dsn_never_exits_zero__offline_fake_sdk() -> None:
+    """M4: EXECUTED alone is not a PASS; without the ledger the exit code is 3."""
+    code, record, lookup, _ = _run_probe_offline(ledger_dsn=None)
+    assert code == probe.EXIT_NOT_PASS == 3
+    assert "status=executed" in record
+    assert "unavailable (no DATABASE_URL_TOOLSERVER)" in record
+    assert not lookup.calls
+
+
+def test_run_probe_plan_failure_exits_not_pass__offline_fake_sdk() -> None:
+    from services.authorization.armoriq_gateway import ArmorIQGateway
+
+    def no_client(member_id: str) -> object:
+        raise RuntimeError("client construction failed")
+
+    settings = _probe_settings()
+    gateway = ArmorIQGateway(settings, client_factory=no_client, ctx_signer=_Signer())
+    code, record = asyncio.run(REAL_RUN_PROBE(settings, ledger_dsn=FAKE_DSN, gateway=gateway))
+    assert code == probe.EXIT_NOT_PASS
+    assert "skipped (plan/mint did not reach invocation)" in record
+    assert "D-05 (`_ctx` forwarded): n.a." in record
+
+
+def test_main_returns_the_probe_exit_code__offline_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code, _ = _main_with_offline_probe(monkeypatch, ledger_overrides={"jti": "someone-else"})
+    assert code == probe.EXIT_NOT_PASS
+    assert "PASS candidate (EXECUTED and correlated): no" in capsys.readouterr().out
 
 
 def test_probe_drives_real_gateway_path() -> None:
