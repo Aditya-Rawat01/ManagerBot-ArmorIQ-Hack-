@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     ctx_secret: SecretStr | None = None
     database_url_toolserver: SecretStr | None = None
 
+    # Query-embedding model (PRD §12 name). Must equal
+    # services.knowledge.embeddings.MODEL_ID; the lifespan refuses to warm any
+    # other model (fail closed, never a hosted embedder).
+    embed_model: str = "BAAI/bge-small-en-v1.5"
+
     @field_validator("mcp_allowed_hosts", mode="before")
     @classmethod
     def _parse_csv(cls, value: object) -> object:

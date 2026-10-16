@@ -22,6 +22,10 @@ from services.toolserver import db
 DEFAULT_LIMIT = 10
 MAX_LIMIT = 25
 SNIPPET_CHARS = 400
+# Fusion depth per method and RRF constant (PROPOSED, recorded here for E17).
+FTS_CANDIDATES = 50
+VECTOR_CANDIDATES = 50
+RRF_K = 60
 
 _SEARCH_SQL = """SELECT c.id, c.chunk_text, s.source_id, s.title, s.author, s.tier,
     s.provenance, s.created_at,
@@ -33,6 +37,16 @@ _SEARCH_SQL = """SELECT c.id, c.chunk_text, s.source_id, s.title, s.author, s.ti
     AND s.provenance ->> 'review_status' = 'authoritative'
     AND c.content_tsv @@ websearch_to_tsquery('english', %s)
     ORDER BY score DESC, c.id ASC
+    LIMIT %s"""
+
+_VECTOR_SQL = """SELECT c.id, c.chunk_text, s.source_id, s.title, s.author, s.tier,
+    s.provenance, s.created_at
+    FROM public.knowledge_chunks AS c
+    JOIN public.source_records AS s ON s.id = c.source_id
+    WHERE c.workspace_id = %s AND c.tier = %s
+    AND s.status = 'active'
+    AND s.provenance ->> 'review_status' = 'authoritative'
+    ORDER BY c.embedding <=> %s::vector
     LIMIT %s"""
 
 
@@ -66,6 +80,40 @@ def _citation(row: dict[str, Any]) -> SourceCitation:
     )
 
 
+def fuse_candidates(
+    fts_ids: list[tuple[str, str]],
+    vector_ids: list[tuple[str, str]],
+    *,
+    limit: int,
+    min_score: float | None = None,
+) -> list[tuple[str, str, float]]:
+    """Reciprocal rank fusion over chunk ids (pure; no database).
+
+    Each list holds (chunk_id, source_id) in rank order. Scores sum
+    1/(RRF_K + rank) per list; chunks dedupe naturally by id, then sources
+    keep their best chunk. Ties break by (source_id, chunk_id): deterministic.
+    Returns (chunk_id, source_id, fused_score) cut to `limit`, or fewer when
+    `min_score` filters.
+    """
+    fused: dict[str, list[Any]] = {}
+    for ranked in (fts_ids, vector_ids):
+        for rank, (chunk_id, source_id) in enumerate(ranked, 1):
+            entry = fused.setdefault(chunk_id, [source_id, 0.0])
+            entry[1] += 1.0 / (RRF_K + rank)
+    ordered = sorted(fused.items(), key=lambda item: (-item[1][1], item[1][0], item[0]))
+    best_per_source: dict[str, tuple[str, float]] = {}
+    for chunk_id, (source_id, score) in ordered:
+        if source_id not in best_per_source:
+            best_per_source[source_id] = (chunk_id, score)
+    ranked_sources = sorted(
+        best_per_source.items(), key=lambda item: (-item[1][1], item[0], item[1][0])
+    )
+    out = [(chunk_id, source_id, score) for source_id, (chunk_id, score) in ranked_sources]
+    if min_score is not None:
+        out = [row for row in out if row[2] >= min_score]
+    return out[: max(1, limit)]
+
+
 def search(
     conn: Any,
     *,
@@ -73,28 +121,57 @@ def search(
     workspace_id: str,
     query: str,
     limit: int = DEFAULT_LIMIT,
+    min_score: float | None = None,
 ) -> list[KnowledgeSearchHit]:
-    """Full-text search at exactly one tier. Raises RetrievalError on DB failure."""
+    """Hybrid FTS + vector search at exactly one tier (P2-05 extends P2-04).
+
+    Fuses FTS_CANDIDATES lexical hits with VECTOR_CANDIDATES cosine hits by
+    RRF, dedupes by chunk then source, cuts to `limit`. `score` is the fused
+    RRF sum (scale UNRESOLVED, D-23/E17). `min_score` filters fused scores;
+    None (default) disables thresholding. Raises RetrievalError on DB or
+    embedding failure.
+    """
     if not isinstance(tier, DataTier):
         raise TypeError(f"tier must be a DataTier constant, got {tier!r}")
     if not workspace_id or not query.strip():
         return []
     bounded = max(1, min(int(limit), MAX_LIMIT))
     try:
+        from pgvector.psycopg import register_vector
+
+        from services.knowledge.embeddings import embed
+
+        query_vector = embed([query])[0]
+        register_vector(conn)
         with conn.cursor() as cur:
-            cur.execute(_SEARCH_SQL, (query, workspace_id, tier.value, query, bounded))
+            cur.execute(
+                _SEARCH_SQL, (query, workspace_id, tier.value, query, FTS_CANDIDATES)
+            )
             names = [d.name for d in cur.description or []]
-            rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+            fts_rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+            cur.execute(
+                _VECTOR_SQL, (workspace_id, tier.value, query_vector, VECTOR_CANDIDATES)
+            )
+            names = [d.name for d in cur.description or []]
+            vec_rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
     except Exception as exc:
-        raise RetrievalError("lexical retrieval failed") from exc
+        raise RetrievalError("hybrid retrieval failed") from exc
+    by_id = {str(row["id"]): row for row in fts_rows + vec_rows}
+    fused = fuse_candidates(
+        [(str(row["id"]), row["source_id"]) for row in fts_rows],
+        [(str(row["id"]), row["source_id"]) for row in vec_rows],
+        limit=bounded,
+        min_score=min_score,
+    )
     hits = []
-    for rank, row in enumerate(rows, 1):
+    for rank, (chunk_id, _source_id, score) in enumerate(fused, 1):
+        row = by_id[chunk_id]
         hits.append(
             KnowledgeSearchHit(
                 source=_citation(row),
-                chunk_id=str(row["id"]),
+                chunk_id=chunk_id,
                 snippet=_snippet(row["chunk_text"]),
-                score=float(row["score"]),
+                score=score,
                 rank=rank,
             )
         )
@@ -108,7 +185,11 @@ def search_with_pool(
     workspace_id: str,
     query: str,
     limit: int = DEFAULT_LIMIT,
+    min_score: float | None = None,
 ) -> list[KnowledgeSearchHit]:
     """Pool convenience wrapper (P2-06 handlers): one read transaction per call."""
     with db.transaction(pool) as conn:
-        return search(conn, tier=tier, workspace_id=workspace_id, query=query, limit=limit)
+        return search(
+            conn, tier=tier, workspace_id=workspace_id, query=query, limit=limit,
+            min_score=min_score,
+        )

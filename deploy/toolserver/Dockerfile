@@ -43,6 +43,12 @@ RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
+# FastEmbed model cache (P2-05): fixed path (the library default is a temp
+# dir, which would re-download on every cold start) baked at build time, so
+# the model loads from disk at startup with no network needed.
+ENV FASTEMBED_CACHE_PATH=/app/.fastembed-cache
+RUN python -c "from services.knowledge.embeddings import warm; warm()"
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python -c "import os,urllib.request;urllib.request.urlopen(f\"http://localhost:{os.environ.get('PORT','8100')}/health\")"
 

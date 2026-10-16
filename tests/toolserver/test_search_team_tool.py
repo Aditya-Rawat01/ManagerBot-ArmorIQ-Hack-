@@ -32,12 +32,14 @@ def test_team_only_results() -> None:
     assert result.tool == ToolName.KNOWLEDGE_SEARCH_TEAM
     assert result.tier is DataTier.TEAM
     assert result.query == QUERY
-    assert [hit.source.source_id for hit in result.hits] == ["team-friday-deploy-freeze"]
+    assert result.hits and result.hits[0].source.source_id == "team-friday-deploy-freeze"
     assert all(hit.source.tier is DataTier.TEAM for hit in result.hits)
 
 
 @NEEDS_DB
 def test_confidential_text_unreachable() -> None:
+    # Fused path: vector-similar TEAM rows may appear, but the confidential
+    # record itself never does (tier purity, not emptiness, is the property).
     from .test_tool_dispatch import live_client
 
     with live_client() as client:
@@ -46,7 +48,9 @@ def test_confidential_text_unreachable() -> None:
             {"query": "runway review", "limit": 5, "_ctx": make_ctx(jti=f"j-{uuid.uuid4().hex}")},
         )
     assert message["result"]["isError"] is False
-    assert json.loads(message["result"]["content"][0]["text"])["hits"] == []
+    hits = json.loads(message["result"]["content"][0]["text"])["hits"]
+    assert all(hit["source"]["tier"] == "team" for hit in hits)
+    assert "conf-runway-review" not in [hit["source"]["source_id"] for hit in hits]
 
 
 def test_db_error_is_a_tool_error_not_empty_success(monkeypatch: pytest.MonkeyPatch) -> None:

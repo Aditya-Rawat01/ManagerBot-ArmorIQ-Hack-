@@ -98,6 +98,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         type(exc).__name__,
                     )
             ctx_secret = settings.ctx_secret.get_secret_value() if settings.ctx_secret else None
+            # Embedding model, once per process (P2-05). A failed warm is loud
+            # in logs; every search then fails closed (no hosted fallback exists).
+            from services.knowledge import embeddings
+
+            if settings.embed_model != embeddings.MODEL_ID:
+                logging.getLogger(__name__).error(
+                    "refusing to warm unexpected embed model %r", settings.embed_model
+                )
+            else:
+                try:
+                    embeddings.warm()
+                    logging.getLogger(__name__).info(
+                        "embedding model ready (%s)", embeddings.model_version()
+                    )
+                except Exception as exc:
+                    logging.getLogger(__name__).error(
+                        "embedding model unavailable (%s); search fails closed",
+                        type(exc).__name__,
+                    )
             for endpoint, holder in holders.items():
                 holder["runtime"] = ToolRuntime(
                     endpoint=endpoint,

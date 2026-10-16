@@ -41,20 +41,38 @@ def _search(tier: DataTier, query: str):
 
 @NEEDS_DB
 def test_exact_tier_match_per_tier() -> None:
+    # Fused path (P2-05): the E1 record ranks first; vector-similar same-tier
+    # rows may follow. Isolation means every hit is the requested tier.
     team = _search(DataTier.TEAM, "quokka Friday deploy freeze")
-    assert [hit.source.source_id for hit in team] == ["team-friday-deploy-freeze"]
+    assert team and team[0].source.source_id == "team-friday-deploy-freeze"
+    assert all(hit.source.tier is DataTier.TEAM for hit in team)
     conf = _search(DataTier.CONFIDENTIAL, "runway review")
     assert "conf-runway-review" in [hit.source.source_id for hit in conf]
+    assert all(hit.source.tier is DataTier.CONFIDENTIAL for hit in conf)
     restr = _search(DataTier.RESTRICTED, "workforce planning")
     assert "restr-workforce-planning" in [hit.source.source_id for hit in restr]
+    assert all(hit.source.tier is DataTier.RESTRICTED for hit in restr)
 
 
 @NEEDS_DB
 def test_higher_tier_text_invisible_at_lower_tier() -> None:
-    assert _search(DataTier.TEAM, "runway review") == []
-    assert _search(DataTier.TEAM, "workforce planning") == []
-    assert _search(DataTier.CONFIDENTIAL, "workforce planning") == []
-    assert _search(DataTier.CONFIDENTIAL, "quokka") == []
+    # No foreign-tier ROWS leak, on either leg, for matching or nonsense
+    # queries alike. (Emptiness itself is E17's MIN_SCORE job: the vector leg
+    # returns nearest same-tier neighbors for any query.)
+    cases = [
+        (DataTier.TEAM, "runway review"),
+        (DataTier.TEAM, "workforce planning"),
+        (DataTier.TEAM, "quokka"),
+        (DataTier.CONFIDENTIAL, "workforce planning"),
+        (DataTier.CONFIDENTIAL, "quokka"),
+        (DataTier.RESTRICTED, "quokka Friday deploy freeze"),
+    ]
+    for tier, query in cases:
+        for hit in _search(tier, query):
+            assert hit.source.tier is tier, (tier, query, hit.source.source_id)
+    team_ids = [hit.source.source_id for hit in _search(DataTier.TEAM, "runway review")]
+    assert "conf-runway-review" not in team_ids
+    assert "restr-workforce-planning" not in team_ids
 
 
 @NEEDS_DB
@@ -67,7 +85,7 @@ def test_restricted_text_never_in_team_results() -> None:
 def test_no_tier_argument_path() -> None:
     """Tier is a DataTier constant: a caller-controlled string is rejected."""
     params = list(inspect.signature(retrieval.search).parameters)
-    assert params == ["conn", "tier", "workspace_id", "query", "limit"]
+    assert params == ["conn", "tier", "workspace_id", "query", "limit", "min_score"]
     with pytest.raises(TypeError):
         retrieval.search(None, tier="team", workspace_id=WS, query="q")  # type: ignore[arg-type]
 
