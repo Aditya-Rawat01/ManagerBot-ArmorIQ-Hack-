@@ -35,10 +35,10 @@ and never falls back to a thread post (R-64).
 Call contract for P3-04: :func:`deliver` and :func:`notify_hold` are
 BLOCKING (synchronous Slack and audit I/O) — call them with
 ``await asyncio.to_thread(...)``. Both return a :class:`DeliveryRecord`
-whose audit state is consistent; :class:`DeliveryError` means nothing was
-sent (bad input or configuration), and its subclass
-:class:`DeliveryAuditAfterSendError` means a message WAS sent but its final
-audit write failed (never re-send; treat as an audit gap / ERROR).
+whose audit state is consistent. Catch :class:`DeliveryAuditAfterSendError`
+first: a message WAS sent but its final audit write failed (never re-send;
+treat as an audit gap / ERROR). Any other :class:`DeliveryError` (its base
+class) means nothing was sent or written (bad input or configuration).
 
 Audit (SHARED_INTERFACES §10): only the answer is written with
 ``record_delivery`` — a ``delivered`` row advances ``plans.status`` to

@@ -2,9 +2,11 @@
 
 Offline: `__offline_fake_slack` sender, fake audit store, fake member table.
 Every test asserts on the actual DM text against the metadata allowlist —
-and on what is absent.
+and on what is absent. The `test_live_*` test needs a LOCAL migrated and
+seeded database (`DATABASE_URL_BACKEND` + `PROXYLEAD_DB_WRITE_TESTS=1`).
 """
 
+import uuid
 from datetime import UTC, datetime
 
 import pytest
@@ -25,7 +27,14 @@ from services.contracts import (
     ToolName,
 )
 from tests.api.conftest import make_settings
-from tests.api.test_delivery_channel import AuditSim
+from tests.api.test_delivery_channel import (
+    _LIVE_ATTEMPTS_SQL,
+    LIVE_DSN,
+    AuditSim,
+    live_request,
+    live_rows,
+    needs_live_write,
+)
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
 # Test-only console URL: proves the link comes from settings (never a
@@ -421,3 +430,46 @@ def test__offline_fake_slack_hold_events_carry_plan_id() -> None:
     notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
     assert db.events, "the HOLD DM must be audited"
     assert {event["plan_id"] for event in db.events} == {"plan-7"}
+
+
+# --- live (local database only): B1 against the real audit store ------------
+
+
+@needs_live_write
+def test_live_hold_dm_leaves_request_on_hold() -> None:
+    from apps.api.core.db import BackendDatabase
+    from services.audit.store import record_approval
+
+    db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
+    try:
+        ctx, plan_id = live_request(db)
+        approval = ApprovalStatus(
+            request_id=ctx.request_id,
+            plan_id=plan_id,
+            step_index=0,
+            tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL,
+            state=ApprovalState.PENDING,
+            delegation_id=f"dlg-{uuid.uuid4().hex[:12]}",
+            requested_at=datetime.now(UTC),
+            resolved_at=None,
+        )
+        record_approval(db, request_id=ctx.request_id, trace_id=ctx.trace_id, approval=approval)
+        before = live_rows(db, "SELECT status FROM plans WHERE id = %s", [plan_id])
+        sender = FakeSender()
+        record = notify_hold(ctx, approval, sender=sender, db=db, members=_members())
+        assert record.status == "delivered" and [u for u, _ in sender.dms] == ["U-maya"]
+        # Maya was notified, but the requester's request is still on HOLD.
+        after = live_rows(db, "SELECT status FROM plans WHERE id = %s", [plan_id])
+        assert after == before and after != [("delivered",)]
+        status = request_status(db, ctx.request_id, "m-sam")
+        assert status.delivered is False
+        assert status.pending_holds == 1
+        assert live_rows(
+            db, "SELECT COUNT(*) FROM delivery_events WHERE request_id = %s", [ctx.request_id]
+        ) == [(0,)]
+        assert live_rows(db, _LIVE_ATTEMPTS_SQL, [ctx.request_id]) == [
+            ("hold_notice", "pending", "team", "m-maya", plan_id),
+            ("hold_notice", "sent", "team", "m-maya", plan_id),
+        ]
+    finally:
+        db.close()

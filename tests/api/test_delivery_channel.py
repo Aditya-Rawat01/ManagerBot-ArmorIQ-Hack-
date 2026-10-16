@@ -2,9 +2,14 @@
 
 Offline: `__offline_fake_slack` sender and fake audit store (no Slack, no
 Neon). Leakage tests assert on the actual payloads handed to the sender —
-absence of protected text, not just return values.
+absence of protected text, not just return values. The `test_live_*` tests
+at the end need a LOCAL migrated and seeded database: `DATABASE_URL_BACKEND`
+and `PROXYLEAD_DB_WRITE_TESTS=1` (the DSN is captured at import because the
+API conftest scrubs settings variables, and is never printed).
 """
 
+import os
+import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
@@ -700,3 +705,155 @@ def test__offline_fake_slack_plan_id_defaults_to_none() -> None:
     deliver(_ctx(), _answer("x"), DataTier.CONFIDENTIAL, sender=FakeSender(), db=db)
     assert {row["plan_id"] for row in db.delivery_rows} == {None}
     assert {event["plan_id"] for event in db.events} == {None}
+
+
+# --- live (local database only): B1 against the real audit store ------------
+
+LIVE_DSN = os.environ.get("DATABASE_URL_BACKEND")
+DB_WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
+needs_live_write = pytest.mark.skipif(
+    not (LIVE_DSN and DB_WRITE_TESTS),
+    reason="needs DATABASE_URL_BACKEND and PROXYLEAD_DB_WRITE_TESTS=1 "
+    "(writes permanent append-only audit rows: local database only)",
+)
+
+
+def live_request(
+    db: object, entry: EntryPoint = EntryPoint.SLACK_MENTION
+) -> tuple[RequestContext, str]:
+    """A recorded request + plan on the seeded local database.
+
+    Uses the P2-03 seed identities (ADR-021: `workspace-primary`, `m-sam`).
+    """
+    from services.audit.store import create_request, record_plan
+    from tests.api.audit_fakes import make_plan
+
+    ctx = _ctx(entry).model_copy(
+        update={
+            "request_id": f"test-dlv-{uuid.uuid4().hex[:12]}",
+            "trace_id": f"test-trace-{uuid.uuid4().hex[:8]}",
+            "workspace_id": "workspace-primary",
+            "received_at": datetime.now(UTC),
+        }
+    )
+    create_request(db, ctx)  # type: ignore[arg-type]
+    plan_id = record_plan(
+        db,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        trace_id=ctx.trace_id,
+        plan=make_plan(),
+        plan_id=f"p-{uuid.uuid4().hex[:16]}",
+    )
+    return ctx, plan_id
+
+
+def live_rows(db: object, sql: str, params: list[object]) -> list[tuple[object, ...]]:
+    with db.tx() as cursor:  # type: ignore[attr-defined]
+        cursor.execute(sql, params)
+        return [tuple(row) for row in cursor.fetchall()]
+
+
+_LIVE_ATTEMPTS_SQL = (
+    "SELECT payload->>'purpose', payload->>'status', payload->>'tier_delivered', "
+    "payload->>'recipient_member_id', plan_id FROM request_events "
+    "WHERE request_id = %s AND event_type = 'delivery_attempted' "
+    "AND payload ? 'purpose' ORDER BY id"
+)
+
+
+def _live_answered(db: object, ctx: RequestContext, plan_id: str, tier: DataTier) -> None:
+    from services.audit.store import record_answer
+
+    record_answer(
+        db,  # type: ignore[arg-type]
+        request_id=ctx.request_id,
+        trace_id=ctx.trace_id,
+        citations=[],
+        highest_tier=tier,
+        abstained=False,
+        reason=None,
+        plan_id=plan_id,
+    )
+
+
+@needs_live_write
+def test_live_dm_failure_notice_leaves_request_undelivered() -> None:
+    from apps.api.core.db import BackendDatabase
+
+    db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
+    try:
+        ctx, plan_id = live_request(db)
+        _live_answered(db, ctx, plan_id, DataTier.CONFIDENTIAL)
+        sender = FakeSender(fail_dm=True)
+        answer = ResponderOutput(request_id=ctx.request_id, answer_text="confidential content")
+        record = deliver(ctx, answer, DataTier.CONFIDENTIAL, sender=sender, db=db, plan_id=plan_id)
+        assert record.status == "failed" and record.notice_posted is True
+        assert sender.thread_posts == [("C1", "1700000000.0001", DM_FAILURE_NOTICE)]
+        # The real store: plans did not advance, the read API says undelivered.
+        plans = live_rows(db, "SELECT status FROM plans WHERE id = %s", [plan_id])
+        assert plans == [("answered",)]
+        assert request_status(db, ctx.request_id, "m-sam").delivered is False
+        rows = live_rows(
+            db,
+            "SELECT delivery_channel, delivery_status, plan_id FROM delivery_events "
+            "WHERE request_id = %s ORDER BY id",
+            [ctx.request_id],
+        )
+        assert rows == [("slack_dm", "pending", plan_id), ("slack_dm", "failed", plan_id)]
+        assert live_rows(db, _LIVE_ATTEMPTS_SQL, [ctx.request_id]) == [
+            ("dm_failure_notice", "pending", "team", "m-sam", plan_id),
+            ("dm_failure_notice", "sent", "team", "m-sam", plan_id),
+        ]
+    finally:
+        db.close()
+
+
+@needs_live_write
+def test_live_delivered_answer_marks_request_delivered() -> None:
+    # Positive control: the same store DOES flip to delivered for the answer,
+    # so the negative B1 assertions above are not vacuous.
+    from apps.api.core.db import BackendDatabase
+
+    db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
+    try:
+        ctx, plan_id = live_request(db)
+        _live_answered(db, ctx, plan_id, DataTier.RESTRICTED)
+        sender = FakeSender()
+        answer = ResponderOutput(request_id=ctx.request_id, answer_text="restricted content")
+        record = deliver(ctx, answer, DataTier.RESTRICTED, sender=sender, db=db, plan_id=plan_id)
+        assert record.status == "delivered" and record.notice_posted is True
+        assert live_rows(db, "SELECT status FROM plans WHERE id = %s", [plan_id]) == [
+            ("delivered",)
+        ]
+        assert request_status(db, ctx.request_id, "m-sam").delivered is True
+        # Only the DM answer is a delivery row; the thread notice is an event.
+        rows = live_rows(
+            db,
+            "SELECT delivery_channel, delivery_status FROM delivery_events "
+            "WHERE request_id = %s ORDER BY id",
+            [ctx.request_id],
+        )
+        assert rows == [("slack_dm", "pending"), ("slack_dm", "delivered")]
+        assert [r[:2] for r in live_rows(db, _LIVE_ATTEMPTS_SQL, [ctx.request_id])] == [
+            ("private_response_notice", "pending"),
+            ("private_response_notice", "sent"),
+        ]
+    finally:
+        db.close()
+
+
+@needs_live_write
+def test_live_web_answer_stays_pending() -> None:
+    from apps.api.core.db import BackendDatabase
+
+    db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
+    try:
+        ctx, plan_id = live_request(db, EntryPoint.WEB)
+        _live_answered(db, ctx, plan_id, DataTier.TEAM)
+        answer = ResponderOutput(request_id=ctx.request_id, answer_text="web answer")
+        record = deliver(ctx, answer, DataTier.TEAM, db=db, plan_id=plan_id)
+        assert record.status == "pending"
+        assert live_rows(db, "SELECT status FROM plans WHERE id = %s", [plan_id]) == [("answered",)]
+        assert request_status(db, ctx.request_id, "m-sam").delivered is False
+    finally:
+        db.close()
