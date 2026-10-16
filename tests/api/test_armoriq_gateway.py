@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 from armoriq_sdk import exceptions as sdk_exceptions
 from armoriq_sdk.models import HoldInfo, MCPInvocationResult
+from armoriq_sdk.observability import ObservabilityConfig
+from armoriq_sdk.session import ArmorIQSession
 
 from apps.api.core.config import Settings
 from services.authorization.armoriq_gateway import ArmorIQGateway
@@ -361,6 +363,70 @@ def test_mint_failure_is_unverified__offline_fake_sdk() -> None:
     handle = asyncio.run(run())
     assert handle.decision is not None
     assert handle.decision.outcome is DecisionOutcome.UNVERIFIED
+
+
+class _RealSessionClient:
+    """Client stand-in under a REAL ``ArmorIQSession`` (offline).
+
+    The session runs the SDK's own plan builder; only the two network calls
+    (``capture_plan``, ``get_intent_token``) are replaced.
+    """
+
+    def __init__(self) -> None:
+        self.captured_plans: list[dict[str, Any]] = []
+
+    def for_user(self, email: str) -> Any:
+        client = self
+
+        class _Scope:
+            def start_session(self, opts: Any = None) -> ArmorIQSession:
+                # Offline: keep the SDK telemetry shipper out of the test.
+                opts.observability = ObservabilityConfig(enabled=False)
+                return ArmorIQSession(client, opts)  # type: ignore[arg-type]
+
+        return _Scope()
+
+    def capture_plan(self, llm: str, prompt: str, plan: Any, metadata: Any = None) -> Any:
+        self.captured_plans.append(plan)
+        return {"plan": plan}
+
+    def get_intent_token(self, plan_capture: Any, policy: Any = None, **_: Any) -> FakeToken:
+        return FakeToken()
+
+
+def test_mint_plan_names_each_steps_mcp__offline_fake_sdk() -> None:
+    """The real SDK plan builder accepts the gateway's tool calls.
+
+    ``build_plan_from_tool_calls`` (armoriq-sdk 0.6.10) raises ``ValueError``
+    for a tool name without an ``<mcp>__`` prefix when the session has no
+    ``default_mcp_name``, which failed every live mint closed. One plan can
+    span both endpoints, so each name carries its own MCP.
+    """
+    sdk = _RealSessionClient()
+    gateway = ArmorIQGateway(
+        _settings(), client_factory=lambda member_id: sdk, ctx_signer=_fake_signer
+    )
+    plan = PlanProposal(
+        summary="offline test plan",
+        steps=[
+            _call(0, ToolName.KNOWLEDGE_SEARCH_TEAM, query="q"),
+            _call(1, ToolName.CREATE_FOLLOWUP_TASK, query="q"),
+        ],
+    )
+
+    handle = asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.SAM, "m-sam")), plan))
+
+    assert handle.decision is None  # minted, not failed closed
+    (built,) = sdk.captured_plans
+    steps = [(s["mcp"], s["action"]) for s in built["steps"]]
+    assert steps == [
+        ("memory-mcp", "knowledge_search_team"),
+        ("workspace-mcp", "create_followup_task"),
+    ]
+    # `invoke_with_policy` later sends (step.mcp, step.tool); the SDK finds the
+    # plan step by `action`, so both sides must name the same pair.
+    assert steps == [(step.mcp.value, step.tool.value) for step in plan.steps]
+    assert [s["params"] for s in built["steps"]] == [{"query": "q"}, {"query": "q"}]
 
 
 def test_unknown_member_is_refused__offline_fake_sdk() -> None:

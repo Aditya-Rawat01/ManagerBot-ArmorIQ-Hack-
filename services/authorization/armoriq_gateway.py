@@ -331,8 +331,13 @@ class ArmorIQGateway:
             SessionOptions(mode="proxy", validity_seconds=self._token_validity_s, llm="proxylead")
         )
         try:
+            # The SDK plan builder needs `<mcp>__<action>` names (a plan can
+            # span both endpoints, so no single default MCP fits). It splits
+            # them back into each step's (mcp, action); `invoke` then finds
+            # the step by that action.
             tool_calls = [
-                {"name": step.tool.value, "args": dict(step.arguments)} for step in plan.steps
+                {"name": f"{step.mcp.value}__{step.tool.value}", "args": dict(step.arguments)}
+                for step in plan.steps
             ]
             return session.start_plan(tool_calls, goal=plan.summary[:500])
         finally:
