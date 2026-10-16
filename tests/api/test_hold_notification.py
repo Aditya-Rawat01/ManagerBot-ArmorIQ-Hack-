@@ -190,11 +190,38 @@ def test__offline_fake_slack_missing_maya_mapping_fails_safely() -> None:
     assert sender.dms == [] and sender.thread_posts == []
 
 
-def test__offline_fake_slack_no_members_table_fails_safely() -> None:
+@pytest.mark.parametrize("table", ["empty", "without_maya"])
+def test__offline_fake_slack_maya_missing_from_member_table_refuses(table: str) -> None:
+    # No hardcoded Maya fallback: she must come from the trusted member table.
+    members = {} if table == "empty" else {PersonaKey.SAM: _members()[PersonaKey.SAM]}
     sender, db = FakeSender(), AuditSim()
-    record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=None)
-    assert record.status == "failed"
-    assert sender.dms == []
+    with pytest.raises(DeliveryError):
+        notify_hold(_ctx(), _approval(), sender=sender, db=db, members=members)
+    assert sender.dms == [] and db.statements == []
+
+
+def test__offline_fake_slack_hold_requires_members_table() -> None:
+    with pytest.raises(TypeError):
+        notify_hold(_ctx(), _approval(), sender=FakeSender(), db=AuditSim())  # type: ignore[call-arg]
+
+
+def test__offline_fake_slack_maya_identity_comes_from_member_table() -> None:
+    members = _members()
+    custom = members[PersonaKey.MAYA]
+    members[PersonaKey.MAYA] = MemberRecord(
+        persona=custom.persona,
+        member_id="m-maya-from-table",
+        display_name=custom.display_name,
+        app_role=custom.app_role,
+        email=custom.email,
+        email_ref=custom.email_ref,
+        slack_user_id="U-maya-from-table",
+    )
+    sender, db = FakeSender(), AuditSim()
+    record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=members)
+    assert record.recipient_member_id == "m-maya-from-table"
+    assert [user for user, _ in sender.dms] == ["U-maya-from-table"]
+    assert {a["recipient_member_id"] for a in db.attempts("hold_notice")} == {"m-maya-from-table"}
 
 
 def test__offline_fake_slack_hold_dm_failure_recorded() -> None:

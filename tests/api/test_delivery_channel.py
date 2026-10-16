@@ -505,6 +505,20 @@ def test__offline_fake_slack_request_mismatch_refuses() -> None:
         deliver(_ctx(), other, DataTier.TEAM, sender=FakeSender(), db=AuditSim())
 
 
+def test__offline_fake_slack_non_responder_answer_refuses() -> None:
+    sender, db = FakeSender(), AuditSim()
+    fake = {"request_id": "req-1", "answer_text": "x"}
+    with pytest.raises(DeliveryError):
+        deliver(_ctx(), fake, DataTier.TEAM, sender=sender, db=db)  # type: ignore[arg-type]
+    assert sender.thread_posts == [] and db.statements == []
+
+
+def test__offline_fake_slack_deliver_has_no_members_parameter() -> None:
+    # Destinations resolve from the trusted ctx alone: no unused recipient table.
+    with pytest.raises(TypeError):
+        deliver(_ctx(), _answer("x"), DataTier.TEAM, db=AuditSim(), members={})  # type: ignore[call-arg]
+
+
 def test__offline_fake_slack_no_store_refuses() -> None:
     with pytest.raises(DeliveryError):
         deliver(_ctx(), _answer("x"), DataTier.TEAM, sender=FakeSender(), db=None)

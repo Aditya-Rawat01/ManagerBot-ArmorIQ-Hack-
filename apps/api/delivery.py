@@ -32,6 +32,14 @@ so this module defines the structural Protocol and tests with fakes; the
 real sender plugs in unchanged. A failed DM is recorded ``delivery_failed``
 and never falls back to a thread post (R-64).
 
+Call contract for P3-04: :func:`deliver` and :func:`notify_hold` are
+BLOCKING (synchronous Slack and audit I/O) — call them with
+``await asyncio.to_thread(...)``. Both return a :class:`DeliveryRecord`
+whose audit state is consistent; :class:`DeliveryError` means nothing was
+sent (bad input or configuration), and its subclass
+:class:`DeliveryAuditAfterSendError` means a message WAS sent but its final
+audit write failed (never re-send; treat as an audit gap / ERROR).
+
 Audit (SHARED_INTERFACES §10): only the answer is written with
 ``record_delivery`` — a ``delivered`` row advances ``plans.status`` to
 ``delivered`` and makes ``request_status().delivered`` true. Non-answer
@@ -52,7 +60,7 @@ until then the configured URL is linked as-is, never a fabricated deep link.
 """
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -62,6 +70,7 @@ from urllib.parse import urlsplit
 from apps.api.core.config import Settings, get_settings
 from apps.api.core.db import AuditDatabase
 from apps.api.identity import MemberRecord
+from apps.api.responder import ResponderOutput
 from services.audit.errors import AuditError
 from services.audit.store import DeliveryStatus, append_event, record_delivery
 from services.contracts import (
@@ -85,8 +94,6 @@ DM_FAILURE_NOTICE = "I couldn't deliver that privately. Please send me a direct 
 # ``request_status().delivered`` true, which only the answer itself may do.
 NoticePurpose = Literal["private_response_notice", "dm_failure_notice", "hold_notice"]
 NoticeStatus = Literal["pending", "sent", "failed"]
-
-_MAYA_MEMBER_ID = "m-maya"  # stable D-20/ADR-021 format, used only if unresolvable
 
 
 class DeliveryError(Exception):
@@ -361,24 +368,23 @@ def _post_thread_notice(
 
 def deliver(
     ctx: RequestContext,
-    answer: object,
+    answer: ResponderOutput,
     highest_tier: DataTier,
     *,
     sender: SlackSender | None = None,
     db: AuditDatabase | None = None,
-    members: dict[PersonaKey, MemberRecord] | None = None,
 ) -> DeliveryRecord:
     """Route one answer by entry point and highest tier (SHARED_INTERFACES §11).
 
     ``answer`` is the responder's output (its ``request_id`` must match
-    ``ctx``; anything else raises). ``members`` is accepted for interface
-    symmetry but unused here — destinations resolve from ``ctx`` alone.
+    ``ctx``; anything else raises). Destinations resolve from ``ctx`` alone.
     ``db`` is required: without persistence there is no delivery. Content
     leaves only after a ``pending`` audit row exists; a failed post-send
     audit write raises :class:`DeliveryAuditAfterSendError` (do not re-send).
-    """
-    from apps.api.responder import ResponderOutput
 
+    Blocking: Slack and audit I/O are synchronous. P3-04 (async) must call
+    it as ``await asyncio.to_thread(deliver, ...)``, never on the event loop.
+    """
     if db is None:
         raise DeliveryError("no audit store: refusing undocumented delivery")
     if not isinstance(answer, ResponderOutput):
@@ -514,16 +520,6 @@ def _deliver_dm_with_notice(
     return record
 
 
-def _maya_slack_id(
-    members: dict[PersonaKey, MemberRecord] | None,
-) -> tuple[str, str]:
-    """Maya's (member_id, slack_user_id). Missing mapping is a safe failure."""
-    record = (members or {}).get(PersonaKey.MAYA)
-    if record is None:
-        return (_MAYA_MEMBER_ID, "")
-    return (record.member_id, record.slack_user_id or "")
-
-
 # Characters that would let a configured URL break out of a Slack link or
 # message (``<url|label>``, mentions) or hide extra text.
 _URL_FORBIDDEN = frozenset("<>|\"'`\\")
@@ -575,7 +571,7 @@ def notify_hold(
     *,
     sender: SlackSender | None = None,
     db: AuditDatabase | None = None,
-    members: dict[PersonaKey, MemberRecord] | None = None,
+    members: Mapping[PersonaKey, MemberRecord],
     settings: Settings | None = None,
 ) -> DeliveryRecord:
     """DM Maya a minimal HOLD notice (SHARED_INTERFACES §11, R-44).
@@ -588,6 +584,13 @@ def notify_hold(
     fabricated deep links (D-22 open, decided by E4).
     The recorded tier is ``team``: the DM carries metadata only, never
     content of the held tool's tier (the held tool is on the HOLD record).
+
+    ``members`` is the trusted member table (``build_member_table``); Maya is
+    resolved from it only — no hardcoded fallback. Maya missing from the
+    table raises :class:`DeliveryError` (configuration error, nothing sent);
+    Maya without a Slack mapping is a recorded ``no_maya_mapping`` failure.
+
+    Blocking, like :func:`deliver`: P3-04 calls it via ``asyncio.to_thread``.
     """
     if db is None:
         raise DeliveryError("no audit store: refusing undocumented delivery")
@@ -598,7 +601,10 @@ def notify_hold(
     if approval.state is not ApprovalState.PENDING:
         # Only a live HOLD needs Maya's decision; a resolved one never pings her.
         raise DeliveryError("approval is not pending: refusing to notify")
-    maya_member_id, maya_slack_id = _maya_slack_id(members)
+    maya = members.get(PersonaKey.MAYA)
+    if maya is None:
+        raise DeliveryError("Maya is not in the member table: refusing to notify")
+    maya_member_id, maya_slack_id = maya.member_id, maya.slack_user_id
     text = _hold_text(ctx, approval, _console_link(settings or get_settings()))
     send: Callable[[], None] | None = None
     unavailable = "no_sender"
