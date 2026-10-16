@@ -9,12 +9,15 @@ import asyncio
 import base64
 import json
 import logging
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from armoriq_sdk import exceptions as sdk_exceptions
 from armoriq_sdk.models import HoldInfo, MCPInvocationResult
+from armoriq_sdk.observability import ObservabilityConfig
+from armoriq_sdk.session import ArmorIQSession
 
 from apps.api.core.config import Settings
 from services.authorization.armoriq_gateway import ArmorIQGateway
@@ -72,6 +75,7 @@ class FakeScope:
 
     def start_session(self, opts: Any = None) -> FakeSession:
         self._client.sessions_started.append(self.email)
+        self._client.session_options.append(opts)
         return self.session
 
 
@@ -84,6 +88,7 @@ class FakeClient:
         self.policy_calls: list[dict[str, Any]] = []
         self.invoke_calls: list[dict[str, Any]] = []
         self.sessions_started: list[str] = []
+        self.session_options: list[Any] = []
         self.hold_seen: list[Any] = []
 
     def for_user(self, email: str) -> FakeScope:
@@ -276,6 +281,38 @@ def test_mint_once_per_request__offline_fake_sdk() -> None:
     assert len(fake.policy_calls) == 2
 
 
+def test_sdk_telemetry_off_by_default__offline_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mint session disables the SDK observability shipper unless opted in.
+
+    The real ``ArmorIQSession`` is built offline only to check its local
+    disable switch; it never mints or touches the network.
+    """
+    gateway, fake = _gateway()
+    asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.MAYA, "m-maya")), _plan()))
+    (opts,) = fake.session_options
+    assert isinstance(opts.observability, ObservabilityConfig)
+    assert opts.observability.enabled is False
+    # Nothing else about the session changes.
+    assert (opts.mode, opts.validity_seconds, opts.llm) == ("proxy", 1200, "proxylead")
+    # Settings objects without the field stay off too.
+    assert ArmorIQGateway(object())._session_options().observability.enabled is False
+
+    # An explicit config beats a stray process env var, and no shipper starts.
+    monkeypatch.setenv("ARMORIQ_OBSERVABILITY", "true")
+    before = set(threading.enumerate())
+    session = ArmorIQSession(object(), opts)  # type: ignore[arg-type]
+    assert session.observability_recorder is None
+    started = {t.name for t in set(threading.enumerate()) - before}
+    assert "armoriq-observability-shipper" not in started
+
+
+def test_sdk_telemetry_opt_in_defers_to_sdk__offline_fake_sdk() -> None:
+    gateway, fake = _gateway(armoriq_observability=True)
+    asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.MAYA, "m-maya")), _plan()))
+    (opts,) = fake.session_options
+    assert opts.observability is None
+
+
 def test_concurrent_personas_do_not_share_identity__offline_fake_sdk() -> None:
     seen: dict[str, list[str]] = {}
 
@@ -361,6 +398,70 @@ def test_mint_failure_is_unverified__offline_fake_sdk() -> None:
     handle = asyncio.run(run())
     assert handle.decision is not None
     assert handle.decision.outcome is DecisionOutcome.UNVERIFIED
+
+
+class _RealSessionClient:
+    """Client stand-in under a REAL ``ArmorIQSession`` (offline).
+
+    The session runs the SDK's own plan builder; only the two network calls
+    (``capture_plan``, ``get_intent_token``) are replaced.
+    """
+
+    def __init__(self) -> None:
+        self.captured_plans: list[dict[str, Any]] = []
+
+    def for_user(self, email: str) -> Any:
+        client = self
+
+        class _Scope:
+            def start_session(self, opts: Any = None) -> ArmorIQSession:
+                # Offline: keep the SDK telemetry shipper out of the test.
+                opts.observability = ObservabilityConfig(enabled=False)
+                return ArmorIQSession(client, opts)  # type: ignore[arg-type]
+
+        return _Scope()
+
+    def capture_plan(self, llm: str, prompt: str, plan: Any, metadata: Any = None) -> Any:
+        self.captured_plans.append(plan)
+        return {"plan": plan}
+
+    def get_intent_token(self, plan_capture: Any, policy: Any = None, **_: Any) -> FakeToken:
+        return FakeToken()
+
+
+def test_mint_plan_names_each_steps_mcp__offline_fake_sdk() -> None:
+    """The real SDK plan builder accepts the gateway's tool calls.
+
+    ``build_plan_from_tool_calls`` (armoriq-sdk 0.6.10) raises ``ValueError``
+    for a tool name without an ``<mcp>__`` prefix when the session has no
+    ``default_mcp_name``, which failed every live mint closed. One plan can
+    span both endpoints, so each name carries its own MCP.
+    """
+    sdk = _RealSessionClient()
+    gateway = ArmorIQGateway(
+        _settings(), client_factory=lambda member_id: sdk, ctx_signer=_fake_signer
+    )
+    plan = PlanProposal(
+        summary="offline test plan",
+        steps=[
+            _call(0, ToolName.KNOWLEDGE_SEARCH_TEAM, query="q"),
+            _call(1, ToolName.CREATE_FOLLOWUP_TASK, query="q"),
+        ],
+    )
+
+    handle = asyncio.run(gateway.start_plan(_ctx(_user(PersonaKey.SAM, "m-sam")), plan))
+
+    assert handle.decision is None  # minted, not failed closed
+    (built,) = sdk.captured_plans
+    steps = [(s["mcp"], s["action"]) for s in built["steps"]]
+    assert steps == [
+        ("memory-mcp", "knowledge_search_team"),
+        ("workspace-mcp", "create_followup_task"),
+    ]
+    # `invoke_with_policy` later sends (step.mcp, step.tool); the SDK finds the
+    # plan step by `action`, so both sides must name the same pair.
+    assert steps == [(step.mcp.value, step.tool.value) for step in plan.steps]
+    assert [s["params"] for s in built["steps"]] == [{"query": "q"}, {"query": "q"}]
 
 
 def test_unknown_member_is_refused__offline_fake_sdk() -> None:
@@ -711,7 +812,7 @@ def _rejection(code: str, **meta: str) -> dict[str, Any]:
     return payload
 
 
-def _invoke_returning(payload: Any) -> Any:
+def _invoke_returning(payload: Any, tool: ToolName = ToolName.KNOWLEDGE_SEARCH_TEAM) -> Any:
     """invoke_step against a fake SDK whose proxy returned `payload` as the
     JSON-RPC result. Like the real SDK (client.py `invoke`), an
     isError/is_error/error payload gets status "error"."""
@@ -730,7 +831,7 @@ def _invoke_returning(payload: Any) -> Any:
 
     fake.invoke_with_policy = invoke_with_policy  # type: ignore[method-assign]
     ctx = _ctx(_user(PersonaKey.SAM, "m-sam"))
-    plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
+    plan = _plan(tool)
 
     async def run() -> Any:
         handle = await gateway.start_plan(ctx, plan)
@@ -761,13 +862,20 @@ def test_success_without_ledger_reference_is_never_executed__offline_fake_sdk() 
 @pytest.mark.parametrize(
     ("payload", "code", "ledger_entry_id"),
     [
+        (_rejection("unauthenticated"), "unauthenticated", None),
         (_rejection("invalid_context"), "invalid_context", None),
         (_rejection("context_expired"), "context_expired", None),
         (_rejection("invalid_arguments", ledger_entry_id="7"), "invalid_arguments", "7"),
         (_rejection("out_of_scope", ledger_entry_id="8"), "out_of_scope", "8"),
+        (_rejection("precondition_failed", ledger_entry_id="6"), "precondition_failed", "6"),
         (_rejection("internal", ledger_entry_id="9"), "internal", "9"),
         (_rejection("replay", original_entry_id="5"), "replay", "5"),
         (_rejection("replay"), "replay", None),
+        # `original_entry_id` belongs to replay only; never adopted elsewhere.
+        (_rejection("internal", original_entry_id="5"), "internal", None),
+        # `not_found` without its own ledger row cannot be an executed lookup.
+        (_rejection("not_found"), "internal", None),
+        (_rejection("not_found", original_entry_id="5"), "internal", None),
         # Never trust free text as a code; never treat isError as success.
         (_rejection("totally-made-up"), "internal", None),
         ({"content": _text("Unknown tool: x"), "isError": True}, "internal", None),
@@ -788,6 +896,38 @@ def test_tool_server_rejection_is_never_allow__offline_fake_sdk(
     assert outcome.invocation.tool_server_reached is True
     assert outcome.invocation.error_code == code
     assert outcome.invocation.ledger_entry_id == ledger_entry_id
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+    ],
+)
+def test_not_found_is_an_executed_empty_lookup__offline_fake_sdk(tool: ToolName) -> None:
+    """D-11 `not_found`: the tool server executed the authorized lookup (its
+    own accepted/executed ledger row) and found nothing visible. EXECUTED with
+    no result (no evidence); the ArmorIQ decision is kept, never converted
+    into a tool-server block."""
+    outcome = _invoke_returning(_rejection("not_found", ledger_entry_id="11"), tool)
+    assert outcome.decision.outcome is DecisionOutcome.ALLOW
+    assert outcome.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
+    invocation = outcome.invocation
+    assert invocation.tool is tool
+    assert invocation.status is ToolExecutionStatus.EXECUTED
+    assert invocation.tool_server_reached is True
+    assert invocation.ledger_entry_id == "11"
+    assert invocation.result is None
+    assert invocation.error_code == "not_found"
+
+
+def test_not_found_top_level_shape_keeps_its_ledger_row__offline_fake_sdk() -> None:
+    outcome = _invoke_returning({"error_code": "not_found", "ledger_entry_id": "12"})
+    assert outcome.invocation.status is ToolExecutionStatus.EXECUTED
+    assert outcome.invocation.ledger_entry_id == "12"
+    assert outcome.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
 
 
 def test_sdk_error_status_alone_is_a_rejection__offline_fake_sdk() -> None:
@@ -822,3 +962,22 @@ def test_parses_what_the_tool_server_emits__offline_fake_sdk() -> None:
         "out_of_scope",
         "3",
     )
+    assert denied.decision.source is DecisionSource.TOOL_SERVER_RULE
+    missing = _invoke_returning(
+        wire(error_result("not_found", ledger_entry_id=LedgerEntryId(4))),
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+    )
+    assert missing.invocation.status is ToolExecutionStatus.EXECUTED
+    assert (missing.invocation.error_code, missing.invocation.ledger_entry_id) == (
+        "not_found",
+        "4",
+    )
+    assert missing.invocation.result is None
+    assert missing.decision.outcome is DecisionOutcome.ALLOW
+    assert missing.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
+    # The tool server never emits a row-less not_found (it answers `internal`),
+    # and the gateway would refuse one anyway.
+    rowless = _invoke_returning(wire(error_result("not_found")), ToolName.KNOWLEDGE_GET_SOURCE_TEAM)
+    assert rowless.invocation.status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+    assert rowless.invocation.error_code == "internal"
+    assert rowless.decision.source is DecisionSource.TOOL_SERVER_RULE

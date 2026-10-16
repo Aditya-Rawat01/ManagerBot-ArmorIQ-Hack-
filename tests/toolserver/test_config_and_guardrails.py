@@ -69,7 +69,8 @@ def test_every_product_tool_goes_through_dispatch(endpoint: McpEndpoint) -> None
 
     from services.contracts import tool_spec
     from services.toolserver.servers import build_server, dispatch_table
-    from services.toolserver.tools_memory import PRODUCT_TOOLS
+    from services.toolserver.tools_memory import PRODUCT_TOOLS as MEMORY_TOOLS
+    from services.toolserver.tools_workspace import PRODUCT_TOOLS as WORKSPACE_TOOLS
 
     server = build_server(endpoint, enable_diagnostic_tools=True, holder={})
     listed = {tool.name for tool in anyio.run(server.list_tools)}
@@ -80,7 +81,7 @@ def test_every_product_tool_goes_through_dispatch(endpoint: McpEndpoint) -> None
     assert product_listed == set(table), "every registered ToolName must be dispatched"
     for name in ToolName:
         served_here = tool_spec(name).endpoint is endpoint
-        if served_here and name in PRODUCT_TOOLS:
+        if served_here and name in {**MEMORY_TOOLS, **WORKSPACE_TOOLS}:
             assert name in table, f"{name.value} implemented but not dispatched"
         else:
             assert name.value not in listed, f"{name.value} listed without dispatch"

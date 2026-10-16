@@ -12,15 +12,25 @@ workspace, recipient, permission, or security-context fields, and no field is
 ``_``-prefixed or named in :data:`FORBIDDEN_ARGUMENT_KEYS` — those are chosen
 by trusted code only.
 
+RESOLVED by D-11 (approved 16 Oct 2026, issue #22; no schema change):
+
+- ``source_ref`` is the server-issued ``source_id`` text. It grants nothing
+  by itself: every get-source call re-checks server-side the verified-ctx
+  workspace, the tool's exact tier, the caller's tier ceiling, ``active`` and
+  ``authoritative``, and missing / wrong-tier / inactive lookups share one
+  byte-identical ``not_found`` response.
+- ``view`` names ``approved_company_data_{team,confidential,restricted}`` are
+  final (P2-08, migration 0011).
+- ``include_superseded``: kept with default ``false``; the tool server rejects
+  ``true`` (``invalid_arguments``) until an ICR adds a structured status to
+  :class:`SourceRow` (D-09 rule 3).
+
 PROPOSED values recorded here for later ICRs (no live evidence yet):
 
 - ``limit`` cap 50 (search and read tools); ``excerpt``/``snippet`` 2000 chars;
   note ``content`` 2000 chars; titles 200 (note) / 120 (task); ``description``
   1000 chars; supersession ``reason`` / honeypot ``message`` 500 chars;
   record/task ``id`` and ``idempotency_key`` 128 chars.
-- ``source_ref``: opaque source reference, shape provisional pending D-11.
-- ``view`` names (``approved_company_data_<tier>``): placeholders pending
-  P2-08, which fixes them by ICR.
 - ``create_followup_task`` ``owner`` (:class:`PersonaKey`) and ``priority``
   (``low``/``medium``/``high``): PROPOSED pending D-17/ADR-024.
 - ``send_external_message`` follows resolved ADR-025 (D-29): fixed
@@ -85,15 +95,17 @@ class KnowledgeSearchRestrictedArgs(_SearchArgsBase):
 
 
 # ---------------------------------------------------------------------------
-# Get-source tools (opaque reference in, bounded record out; D-11 provisional)
+# Get-source tools (server-issued source_id in, bounded record out; D-11)
 # ---------------------------------------------------------------------------
 
 
 class _GetSourceArgsBase(ContractModel):
     """Shared shape; one concrete subclass per tool (see below).
 
-    PROPOSED pending D-11: ``source_ref`` is an opaque server-issued
-    reference. Its exact representation is revised by ICR once decided.
+    D-11 (resolved 16 Oct 2026): ``source_ref`` is the server-issued
+    ``source_id``. It is never trusted on its own: the handler re-checks the
+    verified-ctx workspace, its exact tier, the caller's ceiling, ``active``
+    and ``authoritative``, and answers ``not_found`` identically otherwise.
     """
 
     source_ref: str = Field(min_length=1, max_length=MAX_REF_CHARS)
@@ -156,7 +168,7 @@ class KnowledgeGetSourceRestrictedResult(_GetSourceResultBase):
 
 
 # ---------------------------------------------------------------------------
-# Read-source tools (allowlisted view + typed filters; views P2-08 provisional)
+# Read-source tools (allowlisted view + typed filters; view names final, D-11)
 # ---------------------------------------------------------------------------
 
 TeamView = Literal["approved_company_data_team"]
@@ -169,6 +181,8 @@ class _ReadSourceArgsBase(ContractModel):
 
     No table names, SQL, columns, sort expressions, or tier selectors: the
     view literal fixes the readable view and trusted code fixes the filter.
+    ``include_superseded=True`` is rejected by the tool server (no structured
+    status on :class:`SourceRow` yet; D-09 rule 3).
     """
 
     limit: int = Field(ge=1, le=MAX_RESULT_LIMIT)

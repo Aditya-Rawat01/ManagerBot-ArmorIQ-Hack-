@@ -36,9 +36,16 @@ from mcp.server.mcpserver.tools import Tool
 from mcp.types import CallToolRequestParams, CallToolResult
 
 from services.authorization.ctx_envelope import InMemoryReplayGuard
-from services.contracts import DataTier, McpEndpoint, ToolExecutionStatus, ToolName, tool_spec
+from services.contracts import (
+    AppRole,
+    DataTier,
+    McpEndpoint,
+    ToolExecutionStatus,
+    ToolName,
+    tool_spec,
+)
 from services.contracts.tool_args import TOOL_ARGUMENT_MODELS
-from services.toolserver import __version__
+from services.toolserver import __version__, tools_memory, tools_workspace
 from services.toolserver.ledger import (
     ACCEPTED,
     DuplicateJti,
@@ -51,14 +58,16 @@ from services.toolserver.ledger import (
 from services.toolserver.schemas import (
     INTERNAL,
     INVALID_ARGUMENTS,
+    NOT_FOUND,
     OUT_OF_SCOPE,
     InvalidArguments,
+    NotFound,
     error_result,
     ok_result,
     parse_tool_arguments,
 )
 from services.toolserver.security import REPLAY, CtxRejection, VerifiedCall, verify_tool_call
-from services.toolserver.tools_memory import PRODUCT_TOOLS, ProductTool
+from services.toolserver.tools_memory import ProductTool
 
 logger = logging.getLogger(__name__)
 
@@ -93,16 +102,46 @@ class OutOfScope(Exception):
     """Member tier-ceiling denial (`out_of_scope`); raised before the handler."""
 
 
-def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
-    """P2-06 §9 step 1.3, before any handler logic.
+_ROLE_CEILING: dict[AppRole, DataTier] = {
+    AppRole.MANAGER: DataTier.RESTRICTED,
+    AppRole.SENIOR: DataTier.CONFIDENTIAL,
+    AppRole.JUNIOR: DataTier.TEAM,
+}
+_TIER_RANK: dict[DataTier, int] = {
+    DataTier.TEAM: 0,
+    DataTier.CONFIDENTIAL: 1,
+    DataTier.RESTRICTED: 2,
+}
 
-    Team-tier and tier-less tools (maintenance/action tools check roles in
-    their own handlers, P2-09/P2-10) pass for every member. Elevated tiers
-    fail closed until P2-08 adds the per-role ceiling (SHARED_INTERFACES §6)
-    from `verified.ctx`.
+
+def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
+    """P2-08 per-role ceiling (SHARED_INTERFACES §6) from the verified `_ctx`
+    role, independent of ArmorIQ (R-26): manager → restricted, senior →
+    confidential, junior → team. Unknown roles fail closed.
+
+    Tier-less tools return here unchecked. P2-09's Maya-only maintenance
+    tools check the manager role in their own handlers. The P2-10 workspace
+    tools (`send_external_message`, `create_followup_task`) intentionally
+    have NO tool-server role check, here or in their handlers: ArmorIQ policy
+    is the deciding layer for them (ADR-025: it must BLOCK the honeypot for
+    every persona, and that BLOCK is the demo's evidence), so no application
+    rule may pre-empt or mask the ArmorIQ decision.
+
+    Follow-up (review M3, not implemented): the backend-signed `app_role` is
+    trusted for the `_ctx` lifetime (≤ 900 s). Cross-checking it against
+    `members.app_role` / `members.active` for `requester_member_id` would
+    stop a demoted or deactivated member's still-valid `_ctx` from clearing a
+    ceiling; it needs a toolserver `SELECT` grant on `members` (a migration)
+    and one query per call.
     """
     tier = tool_spec(tool).tier
-    if tier is not None and tier is not DataTier.TEAM:
+    if tier is None:
+        return
+    try:
+        ceiling = _ROLE_CEILING[AppRole(verified.ctx.app_role)]
+    except ValueError:
+        raise OutOfScope(tool.value) from None
+    if _TIER_RANK[tier] > _TIER_RANK[ceiling]:
         raise OutOfScope(tool.value)
 
 
@@ -137,11 +176,14 @@ def _schema_tool(spec: ProductTool) -> Tool:
 
 
 def dispatch_table(endpoint: McpEndpoint) -> dict[ToolName, ProductTool]:
-    """Implemented product tools served by `endpoint` (all behind dispatch)."""
+    """Implemented product tools served by `endpoint` (all behind dispatch).
+
+    Merged live from both tool modules on every call, so tests may swap a
+    handler via monkeypatch and P2-10-style registration stays one line.
+    """
+    combined = {**tools_memory.PRODUCT_TOOLS, **tools_workspace.PRODUCT_TOOLS}
     return {
-        name: spec
-        for name, spec in PRODUCT_TOOLS.items()
-        if tool_spec(spec.name).endpoint is endpoint
+        name: spec for name, spec in combined.items() if tool_spec(spec.name).endpoint is endpoint
     }
 
 
@@ -289,9 +331,12 @@ class GuardedDispatch(Extension):
                 rejection.original_entry_id if isinstance(rejection, ReplayRejection) else None
             )
             return error_result(rejection.code, original_entry_id=original)
-        # 1.2 business arguments (strict P2-02 model).
+        # 1.2 business arguments (strict P2-02 model, then the tool's own
+        # trusted-code argument policy, e.g. read_source_* include_superseded).
         try:
             args = parse_tool_arguments(tool, verified.business_arguments)
+            if spec.check_arguments is not None:
+                spec.check_arguments(args)
         except InvalidArguments:
             return await self._reject(runtime, verified, INVALID_ARGUMENTS)
         # 1.3 member tier ceiling.
@@ -305,6 +350,19 @@ class GuardedDispatch(Extension):
         # 1.4 handler.
         try:
             result_model = await spec.handler(verified, args, runtime)
+        except NotFound:
+            # Authorized lookup, nothing visible: an executed empty lookup
+            # (SHARED_INTERFACES §4: the gateway maps it to EXECUTED with no
+            # evidence, not to a tool-server block). Like a success, it is
+            # never reported without its stored row.
+            entry_id = await _record(
+                runtime,
+                _ledger_entry(verified, ACCEPTED, ToolExecutionStatus.EXECUTED, None),
+            )
+            if entry_id is None:
+                return error_result(INTERNAL)
+            logger.info("executed %s: not_found (entry %s)", tool.value, entry_id.value)
+            return error_result(NOT_FOUND, ledger_entry_id=entry_id)
         except Exception as exc:
             logger.error("tool %s failed (%s)", tool.value, type(exc).__name__)
             entry_id = await _record(

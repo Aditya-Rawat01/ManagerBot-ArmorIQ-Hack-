@@ -40,7 +40,7 @@ EMAILS = {
 
 def _corpus_files() -> list[Path]:
     """Files the ingest reads (seed/eval/, owned by P3-08, is never ingested)."""
-    names = ("decisions.json", "guidance.json", "notes.json")
+    names = ("decisions.json", "guidance.json", "notes.json", "company_projects.json")
     return sorted((SEED_DIR / "sources").glob("*.json")) + [SEED_DIR / name for name in names]
 
 
@@ -87,6 +87,18 @@ _NOTE_COLS = (
     "version",
     "content_hash",
 )
+_PROJECT_COLS = (
+    "workspace_id",
+    "project_key",
+    "project_name",
+    "status",
+    "tier",
+    "owner",
+    "summary",
+    "details",
+    "budget",
+    "internal_notes",
+)
 _MEMBER_COLS = (
     "id",
     "workspace_id",
@@ -114,6 +126,8 @@ class FakeDB:
         self.decisions: dict[int, dict[str, Any]] = {}
         self.guidance: dict[int, dict[str, Any]] = {}
         self.notes: dict[int, dict[str, Any]] = {}
+        # company_projects keyed like the SQL: (workspace_id, project_key).
+        self.projects: dict[tuple[str, str], dict[str, Any]] = {}
         self.statements: list[tuple[str, tuple]] = []
         self.events: list[str] = []
         self.embedded: list[str] = []
@@ -130,6 +144,7 @@ class FakeDB:
                 "decisions": self.decisions,
                 "guidance": self.guidance,
                 "notes": self.notes,
+                "projects": self.projects,
             }
         )
 
@@ -308,6 +323,15 @@ class FakeCursor:
                 coalesce=("author_member_id",),
                 insert_only=("review_status", "version"),
             )
+        elif q.startswith("INSERT INTO public.company_projects"):
+            assert "ON CONFLICT (workspace_id, project_key) DO UPDATE" in q
+            assert "IS DISTINCT FROM" in q
+            assert WS in db.workspaces, "FK violation: company_projects.workspace_id"
+            new = dict(zip(_PROJECT_COLS, p, strict=True))
+            key = (new["workspace_id"], new["project_key"])
+            if db.projects.get(key) != new:
+                db.projects[key] = new
+                self.rowcount = 1
         else:
             raise AssertionError(f"SQL not modelled by the fake: {q[:100]}")
 
@@ -523,6 +547,8 @@ def test_fresh_ingest_then_rerun_changes_nothing(fake: FakeDB) -> None:
     assert first["notes"] == len(corpus.notes) == len(fake.notes)
     assert first["members"] == 3 and first["links"] == 1 and first["claimed"] == 0
     assert first["chunks"] == len(fake.chunks) == len(fake.embedded)
+    assert first["projects"] == len(corpus.projects) == len(fake.projects) == 7
+    assert {row["tier"] for row in fake.projects.values()} == {"team", "confidential", "restricted"}
     for data in corpus.sources:
         pk, row = fake.source(data["source_id"])
         assert row["created_at"] == row["updated_at"] == _recorded(data["recorded_at"])
@@ -625,6 +651,57 @@ def test_items_upsert_in_place_by_key(fake: FakeDB, corpus_dir: Path) -> None:
     fake.keyed(fake.decisions, "decision-release-checklist-v1")["superseded_by_id"] = None
     assert ingest.run(corpus_dir, "fake-dsn", EMAILS)["links"] == 1
     assert _all_zero(ingest.run(corpus_dir, "fake-dsn", EMAILS))
+
+
+def test_projects_upsert_in_place_by_key(fake: FakeDB, corpus_dir: Path) -> None:
+    """0011 rows come from seed/company_projects.json (never the migration):
+    keyed by (workspace_id, project_key), rewritten only when a column differs."""
+    ingest.run(corpus_dir, "fake-dsn", EMAILS)
+    statements = [q for q, _ in fake.statements]
+    project_inserts = [
+        i for i, q in enumerate(statements) if q.startswith("INSERT INTO public.company_projects")
+    ]
+    workspace_insert = statements.index(
+        next(q for q in statements if q.startswith("INSERT INTO public.workspaces"))
+    )
+    assert len(project_inserts) == 7
+    assert workspace_insert < project_inserts[0], "the workspace FK target must exist first"
+
+    def edit(items: list[dict[str, Any]]) -> None:
+        items[0]["summary"] = "Atlas rolls out in four stages."
+
+    _edit_json(corpus_dir / "company_projects.json", edit)
+    stats = ingest.run(corpus_dir, "fake-dsn", EMAILS)
+    assert stats["projects"] == 1 and len(fake.projects) == 7, stats
+    assert fake.projects[(WS, "proj-atlas")]["summary"] == "Atlas rolls out in four stages."
+    assert _all_zero(ingest.run(corpus_dir, "fake-dsn", EMAILS))
+
+
+def test_project_rows_are_validated_before_any_write(fake: FakeDB, corpus_dir: Path) -> None:
+    corpus = ingest.load_corpus(SEED_DIR)
+    assert all(ingest.validate_project(item) == [] for item in corpus.projects)
+    good = dict(corpus.projects[0])
+    broken = [
+        {k: v for k, v in good.items() if k != "summary"},
+        {**good, "tier": "secret"},
+        {**good, "status": "draft"},
+        {**good, "owner": "someone-else"},
+        {**good, "project_key": "k" * 129},
+        {**good, "project_name": "n" * 201},
+        {**good, "budget": 5},
+        {**good, "case": "label"},
+        "not an object",
+    ]
+    for item in broken:
+        assert ingest.validate_project(item) != [], item
+
+    def duplicate(items: list[dict[str, Any]]) -> None:
+        items.append(dict(items[0]))
+
+    _edit_json(corpus_dir / "company_projects.json", duplicate)
+    with pytest.raises(ValueError, match="duplicate project_key"):
+        ingest.run(corpus_dir, "fake-dsn", EMAILS)
+    assert "connect" not in fake.events and fake.projects == {}
 
 
 def test_reseed_never_resets_a_confirmed_note(fake: FakeDB) -> None:
@@ -749,6 +826,9 @@ def test_upgrades_rows_written_by_the_previous_ingest(fake: FakeDB) -> None:
     assert stats["sources"] == 15 and stats["chunks"] == 0, stats
     assert stats["claimed"] == 9, stats
     assert stats["members"] == stats["decisions"] == stats["guidance"] == stats["notes"] == 0
+    # main's ingest wrote no company_projects (0011 is new): all of them load once.
+    assert stats["projects"] == len(ingest.load_corpus(SEED_DIR).projects) == 7, stats
+    counts["projects"] = stats["projects"]
     assert fake.embedded == [], "unchanged text must keep its vectors"
     assert {name: len(rows) for name, rows in fake.tables().items()} == counts
     corpus = ingest.load_corpus(SEED_DIR)
