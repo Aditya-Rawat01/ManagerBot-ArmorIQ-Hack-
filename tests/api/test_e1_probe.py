@@ -990,7 +990,8 @@ def test_probe_drives_real_gateway_path__offline_fake_sdk() -> None:
     assert invocation.status.value == "executed"
     assert invocation.ledger_entry_id == "7"
     planned = next(args for name, *args in calls if name == "start_plan")[0]
-    assert [call["name"] for call in planned] == ["knowledge_search_team"]
+    # Since #77 the gateway namespaces plan tool names as <mcp>__<action> (SDK requirement).
+    assert [call["name"] for call in planned] == ["memory-mcp__knowledge_search_team"]
     invoke_params = next(args for name, *args in calls if name == "invoke")[2]
     assert "_ctx" in invoke_params
     assert invoke_params["query"] == probe.E1_QUERY
