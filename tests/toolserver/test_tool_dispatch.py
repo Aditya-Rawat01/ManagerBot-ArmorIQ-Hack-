@@ -250,7 +250,17 @@ def list_tools(client: TestClient, path: str, token: str) -> list[dict]:
 
 
 def test_all_product_tools_registered_via_guard() -> None:
-    assert set(PRODUCT_TOOLS) == {ToolName.KNOWLEDGE_SEARCH_TEAM}
+    assert set(PRODUCT_TOOLS) == {
+        ToolName.KNOWLEDGE_SEARCH_TEAM,
+        ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_SEARCH_RESTRICTED,
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+        ToolName.READ_SOURCE_TEAM,
+        ToolName.READ_SOURCE_CONFIDENTIAL,
+        ToolName.READ_SOURCE_RESTRICTED,
+    }
     with dev_client() as client:
         # No _ctx: rejected by the dispatcher before any handler runs.
         message = call(client, {"query": "quokka", "limit": 5})
@@ -267,15 +277,24 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
         ("/workspace/mcp", WORKSPACE_TOKEN, McpEndpoint.WORKSPACE),
     ):
         implemented = tool in PRODUCT_TOOLS and endpoint is served_by
-        ctx = make_ctx(tool=tool.value, aud=served_by.value)
+        # Manager clears every ceiling: implemented tools reach the
+        # no-ledger refusal, unimplemented ones are refused earlier.
+        ctx = make_ctx(
+            tool=tool.value,
+            aud=served_by.value,
+            app_role="manager",
+            requester_member_id="m-maya",
+            armoriq_member_email_ref="PERSONA_MAYA_EMAIL",
+        )
+        if "read_source" in tool.value:
+            view = f"approved_company_data_{tool.value.rsplit('_', 1)[-1]}"
+            arguments = {"view": view, "limit": 1}
+        elif "get_source" in tool.value:
+            arguments = {"source_ref": "team-friday-deploy-freeze"}
+        else:
+            arguments = {"query": "q", "limit": 1}
         with dev_client() as client:
-            message = call(
-                client,
-                {"query": "q", "limit": 1, "_ctx": ctx},
-                token,
-                tool=tool.value,
-                path=path,
-            )
+            message = call(client, {**arguments, "_ctx": ctx}, token, tool=tool.value, path=path)
         # Implemented here: verified, then refused for lack of a ledger.
         # Not implemented here: refused before verification. Both `internal`.
         assert result_text(message)["code"] == "internal", (tool.value, path, implemented)
@@ -296,7 +315,8 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
             ran.append(endpoint.value)
             return "leaked"
 
-        server.add_tool(rogue, name=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value)
+        # A memory tool with no guarded handler (P2-09 owns it later).
+        server.add_tool(rogue, name=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value)
         return server
 
     monkeypatch.setattr(main, "build_server", build_with_rogue_tool)
@@ -306,9 +326,9 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
             client,
             {
                 "query": "q",
-                "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value),
+                "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value),
             },
-            tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value,
+            tool=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value,
         )
     assert result_text(message)["code"] == "internal"
     assert ran == []
@@ -389,14 +409,14 @@ REJECTIONS: dict[str, tuple[Callable[[], dict], str, str]] = {
         TOOL,
         "invalid_arguments",
     ),
-    "unknown_tool": (
+    "over_ceiling": (
         lambda: {
             "query": "q",
             "limit": 5,
             "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SEARCH_RESTRICTED.value),
         },
         ToolName.KNOWLEDGE_SEARCH_RESTRICTED.value,
-        "internal",
+        "out_of_scope",
     ),
     "no_ledger": (lambda: {"query": "q", "limit": 5, "_ctx": make_ctx()}, TOOL, "internal"),
 }
@@ -491,10 +511,10 @@ def test_invalid_arguments_are_recorded_as_rejections(monkeypatch: pytest.Monkey
 
 
 def test_tier_ceiling_denies_before_the_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec step 1.3: an elevated-tier tool is refused (`out_of_scope`) and
-    recorded as a rejection before any handler logic (P2-08 adds the
-    per-role ceiling; until then elevated tiers fail closed)."""
-    tool = ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL
+    """Spec step 1.3: an over-ceiling tool is refused (`out_of_scope`) and
+    recorded as a rejection before any handler logic (P2-08 per-role ceiling:
+    senior clears confidential but not restricted)."""
+    tool = ToolName.KNOWLEDGE_SEARCH_RESTRICTED
     spy = Spy()
     install_handler(monkeypatch, spy, tool)
     ledger = FakeLedger()

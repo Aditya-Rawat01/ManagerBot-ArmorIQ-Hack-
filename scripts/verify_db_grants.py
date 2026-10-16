@@ -54,6 +54,13 @@ BACKEND_ALLOWED_TABLES = (
 )
 KNOWLEDGE_TABLES = PROTECTED_TABLES
 EVENT_TABLES = ("request_events", "decision_events", "delivery_events")
+# P2-08 approved views (D-11): synthetic company data, toolserver reads only.
+COMPANY_PROJECTS_TABLE = "company_projects"
+APPROVED_VIEWS = (
+    "approved_company_data_team",
+    "approved_company_data_confidential",
+    "approved_company_data_restricted",
+)
 
 
 @dataclass
@@ -260,6 +267,19 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 "backend SELECT team_notes_id_seq (row-count leak)",
                 "SELECT last_value FROM public.team_notes_id_seq",
             )
+            _expect_denied(
+                report,
+                conn,
+                "backend SELECT company_projects",
+                "SELECT 1 FROM public.company_projects LIMIT 1",
+            )
+            for view in APPROVED_VIEWS:
+                _expect_denied(
+                    report,
+                    conn,
+                    f"backend SELECT {view}",
+                    f"SELECT 1 FROM public.{view} LIMIT 1",  # noqa: S608 -- view from module allowlist, never user input,
+                )
             for table in EVENT_TABLES:
                 _expect_denied(
                     report,
@@ -317,6 +337,31 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 ts_conn,
                 "toolserver DELETE tool_call_attempts",
                 "DELETE FROM public.tool_call_attempts WHERE id = -1",
+            )
+            _expect_allowed(
+                report,
+                ts_conn,
+                "toolserver SELECT company_projects",
+                "SELECT 1 FROM public.company_projects LIMIT 1",
+            )
+            for view in APPROVED_VIEWS:
+                _expect_allowed(
+                    report,
+                    ts_conn,
+                    f"toolserver SELECT {view}",
+                    f"SELECT 1 FROM public.{view} LIMIT 1",  # noqa: S608 -- view from module allowlist, never user input,
+                )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver UPDATE company_projects",
+                "UPDATE public.company_projects SET summary = summary WHERE project_key = ''",
+            )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver DELETE company_projects",
+                "DELETE FROM public.company_projects WHERE project_key = ''",
             )
     except Exception as exc:
         report.bad(f"verify ({type(exc).__name__})")

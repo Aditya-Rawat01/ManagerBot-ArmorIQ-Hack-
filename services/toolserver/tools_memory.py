@@ -19,11 +19,22 @@ from pydantic import BaseModel
 
 from services.contracts import (
     DataTier,
+    KnowledgeGetSourceConfidentialResult,
+    KnowledgeGetSourceRestrictedResult,
+    KnowledgeGetSourceTeamResult,
     KnowledgeSearchResult,
     KnowledgeSearchTeamArgs,
+    ReadSourceConfidentialResult,
+    ReadSourceRestrictedResult,
+    ReadSourceTeamResult,
+    SourceCitation,
+    SourceRow,
     ToolName,
 )
+from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.knowledge import retrieval
+from services.toolserver import db
+from services.toolserver.schemas import NotFound
 from services.toolserver.security import VerifiedCall
 
 
@@ -58,6 +69,288 @@ async def handle_knowledge_search_team(
     )
 
 
+async def _search_at_tier(
+    verified: VerifiedCall, args: Any, runtime: Any, tool: ToolName, tier: DataTier
+) -> KnowledgeSearchResult:
+    """Shared search body; each public handler passes its tier literal (R-22)."""
+    if runtime.pool is None:
+        raise _NoDatabase("knowledge search needs a database pool")
+    hits = await anyio.to_thread.run_sync(
+        partial(
+            retrieval.search_with_pool,
+            runtime.pool,
+            tier=tier,
+            workspace_id=verified.ctx.workspace_id,
+            query=args.query,
+            limit=args.limit,
+        )
+    )
+    return KnowledgeSearchResult(tool=tool, tier=tier, query=args.query, hits=hits, min_score=None)
+
+
+async def handle_knowledge_search_confidential(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> KnowledgeSearchResult:
+    """Run confidential-tier search (`DataTier.CONFIDENTIAL` literal)."""
+    return await _search_at_tier(
+        verified, args, runtime, ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL, DataTier.CONFIDENTIAL
+    )
+
+
+async def handle_knowledge_search_restricted(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> KnowledgeSearchResult:
+    """Run restricted-tier search (`DataTier.RESTRICTED` literal)."""
+    return await _search_at_tier(
+        verified, args, runtime, ToolName.KNOWLEDGE_SEARCH_RESTRICTED, DataTier.RESTRICTED
+    )
+
+
+def _citation_from_source_row(row: dict[str, Any]) -> SourceCitation:
+    """Build a citation from a source_records row (mirrors retrieval._citation:
+    recorded synthetic date preferred, stored timestamp as fallback)."""
+    from datetime import UTC, datetime
+
+    from services.contracts import ReviewStatus
+
+    provenance = row["provenance"] or {}
+    recorded = provenance.get("recorded_at") or ""
+    try:
+        created_at = datetime.fromisoformat(f"{recorded}T00:00:00+00:00")
+    except (ValueError, TypeError):
+        created_at = row["created_at"]
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+    return SourceCitation(
+        source_id=row["source_id"],
+        title=row["title"],
+        tier=DataTier(row["tier"]),
+        author=row["author"],
+        created_at=created_at,
+        version=int(provenance.get("version", 1)),
+        review_status=ReviewStatus(provenance.get("review_status", "authoritative")),
+        superseded_by=provenance.get("superseded_by"),
+        reference_url=None,
+    )
+
+
+def _fetch_source(pool: Any, workspace_id: str, source_ref: str, tier: DataTier) -> dict | None:
+    """Single re-check query (workspace + exact tier + active + authoritative);
+    None when missing, wrong-tier, or inactive — the cases share one response."""
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT s.source_id, s.title, s.author, s.tier, s.created_at,
+                      s.provenance,
+                      (SELECT c.chunk_text FROM public.knowledge_chunks AS c
+                        WHERE c.source_id = s.id ORDER BY c.id LIMIT 1) AS excerpt
+               FROM public.source_records AS s
+               WHERE s.workspace_id = %s AND s.source_id = %s AND s.tier = %s
+                 AND s.status = 'active'
+                 AND s.provenance ->> 'review_status' = 'authoritative'""",
+            (workspace_id, source_ref, tier.value),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        names = [d.name for d in cur.description or []]
+        return dict(zip(names, row, strict=True))
+
+
+async def _get_source(
+    verified: VerifiedCall,
+    args: Any,
+    runtime: Any,
+    tool: ToolName,
+    tier: DataTier,
+    result_model: Any,
+) -> Any:
+    if runtime.pool is None:
+        raise _NoDatabase("source read needs a database pool")
+    row = await anyio.to_thread.run_sync(
+        _fetch_source, runtime.pool, verified.ctx.workspace_id, args.source_ref, tier
+    )
+    if row is None:
+        raise NotFound(f"no visible source for {tool.value}")
+    excerpt = (row["excerpt"] or "")[:MAX_EXCERPT_CHARS]
+    return result_model(
+        tool=tool, tier=tier, source=_citation_from_source_row(row), excerpt=excerpt
+    )
+
+
+async def handle_knowledge_get_source_team(verified: VerifiedCall, args: Any, runtime: Any) -> Any:
+    """Read one team-tier source (D-11: `source_ref` is the source_id)."""
+    return await _get_source(
+        verified,
+        args,
+        runtime,
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        DataTier.TEAM,
+        KnowledgeGetSourceTeamResult,
+    )
+
+
+async def handle_knowledge_get_source_confidential(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> Any:
+    """Read one confidential-tier source."""
+    return await _get_source(
+        verified,
+        args,
+        runtime,
+        ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        DataTier.CONFIDENTIAL,
+        KnowledgeGetSourceConfidentialResult,
+    )
+
+
+async def handle_knowledge_get_source_restricted(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> Any:
+    """Read one restricted-tier source."""
+    return await _get_source(
+        verified,
+        args,
+        runtime,
+        ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+        DataTier.RESTRICTED,
+        KnowledgeGetSourceRestrictedResult,
+    )
+
+
+_VIEW_NAMES: tuple[str, ...] = (
+    "approved_company_data_team",
+    "approved_company_data_confidential",
+    "approved_company_data_restricted",
+)
+
+
+def _like_literal(text: str) -> str:
+    """Escape LIKE metacharacters for a literal substring match."""
+    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _read_view_rows(
+    pool: Any,
+    view: str,
+    workspace_id: str,
+    author: str | None,
+    include_superseded: bool,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Fixed per-view SQL (view name from the allowlist constant only)."""
+    from psycopg import sql
+
+    if view not in _VIEW_NAMES:
+        # Unreachable: P2-02 Literals admit only the three allowlisted names.
+        raise ValueError(f"unknown approved view: {view}")
+    table = sql.Identifier("public", view)
+    fragments = [sql.SQL("workspace_id = %s")]
+    params: list[Any] = [workspace_id]
+    if author:
+        # Escape LIKE metacharacters: the filter is a literal substring match.
+        fragments.append(sql.SQL("owner ILIKE %s ESCAPE '\\'"))
+        params.append(_like_literal(author))
+    if not include_superseded:
+        fragments.append(sql.SQL("status = 'active'"))
+    where = sql.SQL(" AND ").join(fragments)
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT count(*) FROM {} WHERE ").format(table) + where,
+            tuple(params),
+        )
+        row = cur.fetchone()
+        total = row[0] if row else 0
+        cur.execute(
+            sql.SQL(
+                "SELECT project_key, project_name, body, owner, tier, status FROM {} WHERE "
+            ).format(table)
+            + where
+            + sql.SQL(" ORDER BY project_name LIMIT %s"),
+            (*params, limit),
+        )
+        names = [d.name for d in cur.description or []]
+        rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+    return rows, total
+
+
+def _flagged_snippet(body: str, status: str) -> str:
+    text = f"[SUPERSEDED] {body}" if status == "superseded" else body
+    return text[:MAX_EXCERPT_CHARS]
+
+
+async def _read_source(
+    verified: VerifiedCall,
+    args: Any,
+    runtime: Any,
+    tool: ToolName,
+    tier: DataTier,
+    result_model: Any,
+) -> Any:
+    if runtime.pool is None:
+        raise _NoDatabase("source read needs a database pool")
+    rows, total = await anyio.to_thread.run_sync(
+        _read_view_rows,
+        runtime.pool,
+        args.view,
+        verified.ctx.workspace_id,
+        args.author,
+        args.include_superseded,
+        args.limit,
+    )
+    built = [
+        SourceRow(
+            source_id=row["project_key"],
+            title=row["project_name"],
+            snippet=_flagged_snippet(row["body"], row["status"]),
+        )
+        for row in rows
+    ]
+    return result_model(
+        tool=tool,
+        tier=tier,
+        view=args.view,
+        rows=built,
+        row_count=total,
+        truncated=len(built) < total,
+    )
+
+
+async def handle_read_source_team(verified: VerifiedCall, args: Any, runtime: Any) -> Any:
+    """Read the approved team-tier view."""
+    return await _read_source(
+        verified,
+        args,
+        runtime,
+        ToolName.READ_SOURCE_TEAM,
+        DataTier.TEAM,
+        ReadSourceTeamResult,
+    )
+
+
+async def handle_read_source_confidential(verified: VerifiedCall, args: Any, runtime: Any) -> Any:
+    """Read the approved confidential-tier view."""
+    return await _read_source(
+        verified,
+        args,
+        runtime,
+        ToolName.READ_SOURCE_CONFIDENTIAL,
+        DataTier.CONFIDENTIAL,
+        ReadSourceConfidentialResult,
+    )
+
+
+async def handle_read_source_restricted(verified: VerifiedCall, args: Any, runtime: Any) -> Any:
+    """Read the approved restricted-tier view."""
+    return await _read_source(
+        verified,
+        args,
+        runtime,
+        ToolName.READ_SOURCE_RESTRICTED,
+        DataTier.RESTRICTED,
+        ReadSourceRestrictedResult,
+    )
+
+
 @dataclass(frozen=True)
 class ProductTool:
     name: ToolName
@@ -73,5 +366,48 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
             "Returns matching sources with citations."
         ),
         handler=handle_knowledge_search_team,
+    ),
+    ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL: ProductTool(
+        name=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL,
+        description=(
+            "Search confidential-tier knowledge the requester is cleared for. "
+            "Member tier ceiling enforced server-side."
+        ),
+        handler=handle_knowledge_search_confidential,
+    ),
+    ToolName.KNOWLEDGE_SEARCH_RESTRICTED: ProductTool(
+        name=ToolName.KNOWLEDGE_SEARCH_RESTRICTED,
+        description=("Search restricted-tier knowledge. Maya-only via the tier ceiling."),
+        handler=handle_knowledge_search_restricted,
+    ),
+    ToolName.KNOWLEDGE_GET_SOURCE_TEAM: ProductTool(
+        name=ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        description="Read one team-tier source by its server-issued reference.",
+        handler=handle_knowledge_get_source_team,
+    ),
+    ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL: ProductTool(
+        name=ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        description="Read one confidential-tier source by its server-issued reference.",
+        handler=handle_knowledge_get_source_confidential,
+    ),
+    ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED: ProductTool(
+        name=ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+        description="Read one restricted-tier source by its server-issued reference.",
+        handler=handle_knowledge_get_source_restricted,
+    ),
+    ToolName.READ_SOURCE_TEAM: ProductTool(
+        name=ToolName.READ_SOURCE_TEAM,
+        description="Read rows from the approved team-tier company-data view.",
+        handler=handle_read_source_team,
+    ),
+    ToolName.READ_SOURCE_CONFIDENTIAL: ProductTool(
+        name=ToolName.READ_SOURCE_CONFIDENTIAL,
+        description="Read rows from the approved confidential-tier company-data view.",
+        handler=handle_read_source_confidential,
+    ),
+    ToolName.READ_SOURCE_RESTRICTED: ProductTool(
+        name=ToolName.READ_SOURCE_RESTRICTED,
+        description="Read rows from the approved restricted-tier company-data view.",
+        handler=handle_read_source_restricted,
     ),
 }

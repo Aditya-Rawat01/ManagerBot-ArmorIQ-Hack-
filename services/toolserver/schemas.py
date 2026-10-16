@@ -30,6 +30,7 @@ from services.toolserver.security import CONTEXT_EXPIRED, INVALID_CONTEXT, REPLA
 
 INTERNAL = "internal"
 INVALID_ARGUMENTS = "invalid_arguments"
+NOT_FOUND = "not_found"
 OUT_OF_SCOPE = "out_of_scope"
 
 _ERROR_MESSAGE: dict[str, str] = {
@@ -37,6 +38,7 @@ _ERROR_MESSAGE: dict[str, str] = {
     CONTEXT_EXPIRED: "The call was rejected: context expired.",
     REPLAY: "The call was rejected: duplicate invocation.",
     INVALID_ARGUMENTS: "The call was rejected: invalid arguments.",
+    NOT_FOUND: "No matching source found.",
     OUT_OF_SCOPE: "The call was rejected: out of scope.",
     INTERNAL: "The tool call could not be completed.",
 }
@@ -82,6 +84,14 @@ def ok_result(model: BaseModel, *, ledger_entry_id: LedgerEntryId) -> CallToolRe
 
 class InvalidArguments(Exception):
     """Business-argument validation failed (maps to `invalid_arguments`)."""
+
+
+class NotFound(Exception):
+    """Authorized lookup with no visible result (maps to `not_found`).
+
+    Missing, wrong-tier, and inactive sources share this response byte for
+    byte: existence is never disclosed (R-55).
+    """
 
 
 def parse_tool_arguments(tool: ToolName, business_arguments: dict[str, Any]) -> BaseModel:
