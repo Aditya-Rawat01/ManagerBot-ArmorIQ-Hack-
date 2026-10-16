@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import sys
@@ -218,6 +219,39 @@ def summarize_result(payload: Any) -> Any:
     if isinstance(payload, dict):
         return {str(key): summarize_value(value) for key, value in payload.items()}
     return summarize_value(payload)
+
+
+def _key_types(mapping: Mapping[Any, Any]) -> dict[str, str]:
+    return {str(key): type(value).__name__ for key, value in mapping.items()}
+
+
+def summarize_first_content(payload: Any) -> Any:
+    """Keys and value types of the first MCP `content` item (never values).
+
+    For a text item whose text is a JSON object, the object's top-level keys
+    and value types too (the P2-06 result model), so E1 step 7 can record the
+    real result shape.
+    """
+    if not isinstance(payload, Mapping):
+        return None
+    content = payload.get("content")
+    if not isinstance(content, list) or not content:
+        return "no content items"
+    first = content[0]
+    if not isinstance(first, Mapping):
+        return {"item_type": type(first).__name__}
+    shape: dict[str, Any] = {"keys": _key_types(first)}
+    text = first.get("text")
+    if isinstance(text, str):
+        try:
+            body = json.loads(text)
+        except (ValueError, RecursionError):
+            body = None
+        if isinstance(body, Mapping):
+            shape["text_json_keys"] = _key_types(body)
+        else:
+            shape["text_json_keys"] = "text is not a JSON object"
+    return shape
 
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
@@ -544,6 +578,10 @@ def build_record(
         f"error_code={described['error_code']} jti={described['jti']}",
         f"- `_meta` present: {meta_answer} ({meta_reason})",
         f"- Result shape (redacted): {summarize_result(payload)}",
+        f"- First content item (keys/types only): {summarize_first_content(payload)}",
+        "- SDK result fields not visible here: the gateway keeps only "
+        "MCPInvocationResult.result; status, verified, metadata, and execution_time "
+        "are dropped before the probe sees them",
         f"- Ledger correlation: correlated: {'true' if ledger['correlated'] else 'false'} "
         f"(lookup: {ledger['lookup']})",
         f"- Ledger row (safe subset): {ledger['row']}",

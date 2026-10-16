@@ -330,6 +330,34 @@ def test_summarize_result_redacts_content() -> None:
     assert shape["hits"]["length"] == 1
 
 
+def test_summarize_first_content_shows_keys_and_types_only() -> None:
+    """M3: the first content item's shape, never its text."""
+    payload = {
+        "content": [
+            {
+                "type": "text",
+                "text": '{"hits": [{"snippet": "private snippet"}], "abstained": false, '
+                '"min_score": 0.3}',
+            }
+        ],
+        "isError": False,
+    }
+    shape = probe.summarize_first_content(payload)
+    assert shape == {
+        "keys": {"type": "str", "text": "str"},
+        "text_json_keys": {"hits": "list", "abstained": "bool", "min_score": "float"},
+    }
+    assert "private snippet" not in str(shape)
+    plain = probe.summarize_first_content({"content": [{"type": "text", "text": "secret words"}]})
+    assert plain == {
+        "keys": {"type": "str", "text": "str"},
+        "text_json_keys": "text is not a JSON object",
+    }
+    assert "secret words" not in str(plain)
+    assert probe.summarize_first_content({"content": []}) == "no content items"
+    assert probe.summarize_first_content(None) is None
+
+
 def test_build_record_is_complete_and_redacted() -> None:
     described = {
         "decision_outcome": "allow",
@@ -750,6 +778,8 @@ def test_run_probe_executed_and_correlated__offline_fake_sdk_and_ledger() -> Non
     assert "PASS candidate (EXECUTED and correlated): yes" in record
     assert "`_meta` present: yes (keys ['ledger_entry_id'])" in record
     assert "D-05 (`_ctx` forwarded): yes" in record
+    assert "'text_json_keys': {'hits': 'list', 'abstained': 'bool'}" in record
+    assert "status, verified, metadata, and execution_time are dropped" in record
     assert lookup.calls and lookup.closed
     assert "arguments_sha256" not in record
     assert "d" * 64 not in record
