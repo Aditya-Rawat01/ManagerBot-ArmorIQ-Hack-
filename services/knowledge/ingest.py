@@ -20,6 +20,9 @@ Idempotent upserts on stable keys — re-running changes nothing:
   from each item's `key`. Rows written before keys existed are claimed once by
   their old exact-text identity, never duplicated. Supersession links are
   re-applied every run.
+* company projects (`seed/company_projects.json`, the rows behind the P2-08
+  approved views, migration 0011): `(workspace_id, project_key)`, updated in
+  place only when a column differs (counted in the `projects` stat).
 * workspace / members: from env (D-20/ADR-021). No raw emails are stored —
   only masked display values plus the env-key reference.
 """
@@ -46,6 +49,7 @@ from services.contracts import (
     PersonaKey,
     ReviewStatus,
 )
+from services.contracts.tool_args import MAX_REF_CHARS, MAX_TITLE_CHARS
 from services.knowledge.embeddings import EMBED_DIMS, MODEL_ID, embed, model_version, warm
 
 CHUNK_WORDS = 120
@@ -127,6 +131,13 @@ _DECISION_FIELDS = frozenset(
 )
 _GUIDANCE_FIELDS = frozenset({"key", "guidance_text", "scope", "authoritative", "approved_by"})
 _NOTE_FIELDS = frozenset({"key", "title", "content", "kind", "author", "review_status", "version"})
+# company_projects rows (0011). Every column is explicit text; `project_key` /
+# `project_name` must fit the `SourceRow` (`source_id` / `title`) they become
+# in `read_source_*` results.
+_PROJECT_REQUIRED = ("project_key", "project_name", "tier", "status", "owner", "summary")
+_PROJECT_TEXT = ("details", "budget", "internal_notes")
+_PROJECT_FIELDS = frozenset({*_PROJECT_REQUIRED, *_PROJECT_TEXT})
+_PROJECT_LIMITS = {"project_key": MAX_REF_CHARS, "project_name": MAX_TITLE_CHARS}
 
 
 class CorpusError(ValueError):
@@ -253,6 +264,28 @@ def _item_problems(
     return problems
 
 
+def validate_project(item: Any) -> list[str]:
+    """Problems with one `company_projects` row (0011). Empty means valid."""
+    if not isinstance(item, Mapping):
+        return ["item(object)"]
+    problems = [
+        name for name in _PROJECT_REQUIRED if not isinstance(item.get(name), str) or not item[name]
+    ]
+    problems += [name for name in _PROJECT_TEXT if not isinstance(item.get(name, ""), str)]
+    for name, limit in _PROJECT_LIMITS.items():
+        if isinstance(item.get(name), str) and len(item[name]) > limit:
+            problems.append(f"{name}(<= {limit} chars)")
+    if item.get("tier") not in _TIERS:
+        problems.append("tier(valid)")
+    if item.get("status") not in _SOURCE_STATUSES:
+        problems.append("status(valid)")
+    if item.get("owner") not in _PERSONAS:
+        problems.append("owner(persona)")
+    if unknown := sorted(set(item) - _PROJECT_FIELDS):
+        problems.append(f"unknown({', '.join(unknown)})")
+    return problems
+
+
 @dataclass
 class Corpus:
     """A validated seed corpus (nothing touches the database before this exists)."""
@@ -261,6 +294,7 @@ class Corpus:
     decisions: list[dict[str, Any]] = field(default_factory=list)
     guidance: list[dict[str, Any]] = field(default_factory=list)
     notes: list[dict[str, Any]] = field(default_factory=list)
+    projects: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _load_json(path: Path) -> Any:
@@ -337,7 +371,24 @@ def load_corpus(source_dir: str | os.PathLike[str]) -> Corpus:
         if problems:
             raise CorpusError(f"notes.json: invalid item {item.get('key')!r}: {problems}")
     _check_keys(corpus.notes, "notes.json")
+
+    corpus.projects = _load_items(root / "company_projects.json")
+    project_keys: set[str] = set()
+    for item in corpus.projects:
+        if problems := validate_project(item):
+            raise CorpusError(
+                f"company_projects.json: invalid item {_label(item, 'project_key')!r}: {problems}"
+            )
+        if item["project_key"] in project_keys:
+            raise CorpusError(
+                f"company_projects.json: duplicate project_key {item['project_key']!r}"
+            )
+        project_keys.add(item["project_key"])
     return corpus
+
+
+def _label(item: Any, key: str) -> Any:
+    return item.get(key) if isinstance(item, Mapping) else None
 
 
 def source_digest(data: Mapping[str, Any], version: str) -> str:
@@ -698,6 +749,49 @@ def _upsert_notes(
         stats["notes"] += cur.rowcount
 
 
+def _upsert_projects(cur: Any, items: list[dict[str, Any]], stats: dict[str, int]) -> None:
+    """Synthetic company-data rows behind the approved views (0011, P2-08).
+
+    Keyed by `(workspace_id, project_key)`; an existing row is rewritten only
+    when a column differs, so a re-run counts 0. Rows not in the file are
+    left alone (same rule as the other seeded tables)."""
+    for item in items:
+        cur.execute(
+            """INSERT INTO public.company_projects AS p
+               (workspace_id, project_key, project_name, status, tier, owner, summary,
+                details, budget, internal_notes)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (workspace_id, project_key) DO UPDATE SET
+                 project_name = EXCLUDED.project_name,
+                 status = EXCLUDED.status,
+                 tier = EXCLUDED.tier,
+                 owner = EXCLUDED.owner,
+                 summary = EXCLUDED.summary,
+                 details = EXCLUDED.details,
+                 budget = EXCLUDED.budget,
+                 internal_notes = EXCLUDED.internal_notes
+               WHERE (p.project_name, p.status, p.tier, p.owner, p.summary, p.details,
+                      p.budget, p.internal_notes)
+                 IS DISTINCT FROM
+                     (EXCLUDED.project_name, EXCLUDED.status, EXCLUDED.tier, EXCLUDED.owner,
+                      EXCLUDED.summary, EXCLUDED.details, EXCLUDED.budget,
+                      EXCLUDED.internal_notes)""",
+            (
+                DEFAULT_WORKSPACE_ID,
+                item["project_key"],
+                item["project_name"],
+                item["status"],
+                item["tier"],
+                item["owner"],
+                item["summary"],
+                item.get("details", ""),
+                item.get("budget", ""),
+                item.get("internal_notes", ""),
+            ),
+        )
+        stats["projects"] += cur.rowcount
+
+
 def run(source_dir: str | os.PathLike[str], dsn: str, env: Mapping[str, str]) -> dict[str, int]:
     """Ingest one corpus in a single transaction. Returns rows changed per area
     (all zero when the database already matches the corpus)."""
@@ -713,6 +807,7 @@ def run(source_dir: str | os.PathLike[str], dsn: str, env: Mapping[str, str]) ->
         "links": 0,
         "guidance": 0,
         "notes": 0,
+        "projects": 0,
     }
     with _connect(dsn) as conn:
         with conn.cursor() as cur:
@@ -725,6 +820,8 @@ def run(source_dir: str | os.PathLike[str], dsn: str, env: Mapping[str, str]) ->
             _upsert_decisions(cur, corpus.decisions, source_pks, members, stats)
             _upsert_guidance(cur, corpus.guidance, members, stats)
             _upsert_notes(cur, corpus.notes, members, stats)
+            # After the workspace upsert: company_projects.workspace_id is an FK.
+            _upsert_projects(cur, corpus.projects, stats)
         conn.commit()
     return stats
 

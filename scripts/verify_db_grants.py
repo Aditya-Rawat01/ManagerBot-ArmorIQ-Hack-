@@ -4,10 +4,13 @@ Usage (operator only, repository root):
     DATABASE_URL_BACKEND='<backend DSN>' DATABASE_URL_TOOLSERVER='<toolserver DSN>' \\
         python scripts/verify_db_grants.py
 
-Connects as each runtime login user and checks the 0005/0007/0008/0009 grant
-matrix: backend SELECT on every protected table/view must fail with permission
-denied; allowed tables must work; neither runtime role may UPDATE or DELETE
-the ledger; the toolserver may not DELETE jti claims nor UPDATE or DELETE
+Connects as each runtime login user and checks the 0005/0007/0008/0009/0011
+grant matrix: backend SELECT on every protected table/view must fail with
+permission denied (0011: the toolserver may SELECT the three approved views
+but never their base table ``company_projects``, which no runtime role reads
+or writes; the backend gets neither); allowed tables must work; neither
+runtime role may UPDATE or DELETE the ledger; the toolserver may not DELETE
+jti claims nor UPDATE or DELETE
 attempts; the backend cannot SELECT the ledger, jti claims, or attempts, nor
 INSERT attempts; the toolserver role must reach the knowledge tables and
 SELECT attempts; append-only audit events must not be deletable through
@@ -69,7 +72,8 @@ WORKSPACE_TABLE_INSERTS = {
         "VALUES ('grant_check', 'grant_check') RETURNING id"
     ),
 }
-# P2-08 approved views (D-11): synthetic company data, toolserver reads only.
+# P2-08 approved views (D-11): synthetic company data, toolserver reads the
+# views only (views run with their owner's privileges; no base-table grant).
 COMPANY_PROJECTS_TABLE = "company_projects"
 APPROVED_VIEWS = (
     "approved_company_data_team",
@@ -408,11 +412,22 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 "toolserver DELETE tool_call_attempts",
                 "DELETE FROM public.tool_call_attempts WHERE id = -1",
             )
-            _expect_allowed(
+            # 0011: the base table holds every tier's raw columns; the views
+            # read it with their owner's privileges, so the toolserver gets
+            # the views only (never the table).
+            _expect_denied(
                 report,
                 ts_conn,
-                "toolserver SELECT company_projects",
+                "toolserver SELECT company_projects (views only)",
                 "SELECT 1 FROM public.company_projects LIMIT 1",
+            )
+            _expect_denied(
+                report,
+                ts_conn,
+                "toolserver INSERT company_projects",
+                "INSERT INTO public.company_projects (workspace_id, project_key, project_name, "
+                "tier, owner, summary) VALUES ('grant_check', 'grant_check', 'grant_check', "
+                "'team', 'grant_check', 'grant_check') RETURNING id",
             )
             for view in APPROVED_VIEWS:
                 _expect_allowed(
