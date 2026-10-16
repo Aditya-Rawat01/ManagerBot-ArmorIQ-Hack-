@@ -4,6 +4,8 @@ Drives the real `ArmorIQGateway.start_plan` / `invoke_step` path against the
 deployed MCP tool server — never the raw SDK, never a direct MCP call
 (ADR-018). Prints the E1 record with secrets redacted; the PASS/FAIL verdict
 is assigned by the operator in `docs/EXPERIMENTS.md`, never by this script.
+Nothing runs on import or in CI: only an operator running this file directly
+(no arguments) makes a live call. Offline tests drive it with fakes only.
 
 Usage (operator only, repository root):
     python scripts/probe_v2_e1_allowed.py
@@ -601,7 +603,8 @@ def build_record(
         "### E1 — planned ArmorIQ call reaches the MCP tool server",
         f"- Run at (UTC): {run_at}",
         f"- SDK version: {sdk_version}",
-        f"- Agent / MCP names as registered: {agent_id} / memory-mcp (tool {E1_TOOL})",
+        f"- Agent / MCP names used by the probe: {agent_id} / memory-mcp (tool {E1_TOOL}); "
+        "confirm the registration in the ArmorIQ console",
         f"- Endpoint URL (no secrets): {endpoint_url}",
         f"- Plan / session IDs: plan_id={plan_id} armoriq_plan_id={armoriq_plan_id}",
         f"- Requester: Maya ({masked_email}); request_id={request_id}",
