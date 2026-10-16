@@ -134,21 +134,28 @@ def _citation_from_source_row(row: dict[str, Any]) -> SourceCitation:
     )
 
 
+# One fixed, parameterized re-check (D-11): verified-ctx workspace, the
+# handler's exact tier literal, active, authoritative (D-09). The excerpt
+# subquery requires the chunk's own workspace and tier to equal the source's,
+# so a mis-tiered chunk can never leak into another tier's excerpt.
+_GET_SOURCE_SQL = """SELECT s.source_id, s.title, s.author, s.tier, s.created_at,
+       s.provenance,
+       (SELECT c.chunk_text FROM public.knowledge_chunks AS c
+         WHERE c.source_id = s.id
+           AND c.workspace_id = s.workspace_id
+           AND c.tier = s.tier
+         ORDER BY c.id LIMIT 1) AS excerpt
+FROM public.source_records AS s
+WHERE s.workspace_id = %s AND s.source_id = %s AND s.tier = %s
+  AND s.status = 'active'
+  AND s.provenance ->> 'review_status' = 'authoritative'"""
+
+
 def _fetch_source(pool: Any, workspace_id: str, source_ref: str, tier: DataTier) -> dict | None:
     """Single re-check query (workspace + exact tier + active + authoritative);
     None when missing, wrong-tier, or inactive — the cases share one response."""
     with db.transaction(pool) as conn, conn.cursor() as cur:
-        cur.execute(
-            """SELECT s.source_id, s.title, s.author, s.tier, s.created_at,
-                      s.provenance,
-                      (SELECT c.chunk_text FROM public.knowledge_chunks AS c
-                        WHERE c.source_id = s.id ORDER BY c.id LIMIT 1) AS excerpt
-               FROM public.source_records AS s
-               WHERE s.workspace_id = %s AND s.source_id = %s AND s.tier = %s
-                 AND s.status = 'active'
-                 AND s.provenance ->> 'review_status' = 'authoritative'""",
-            (workspace_id, source_ref, tier.value),
-        )
+        cur.execute(_GET_SOURCE_SQL, (workspace_id, source_ref, tier.value))
         row = cur.fetchone()
         if row is None:
             return None
