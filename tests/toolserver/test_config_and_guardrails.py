@@ -43,25 +43,32 @@ def test_diagnostic_tool_names_never_collide_with_product_tools() -> None:
     assert {"memory_scaffold_ping", "workspace_scaffold_ping"}.isdisjoint(product)
 
 
-def test_every_product_tool_goes_through_dispatch() -> None:
+@pytest.mark.parametrize("endpoint", list(McpEndpoint))
+def test_every_product_tool_goes_through_dispatch(endpoint: McpEndpoint) -> None:
     """Catalog tools are exposed only when implemented behind guarded dispatch.
 
-    Implemented product tools (PRODUCT_TOOLS) appear on their endpoint's
-    tool list; catalog tools with no implementation are never listed, so no
-    product tool exists outside guarded dispatch.
+    On both endpoints: every listed ToolName is in that endpoint's dispatch
+    table, and every dispatch-table tool is listed; catalog tools with no
+    implementation are never listed. (Calls to ToolNames that are not in the
+    table are refused, never forwarded: test_tool_dispatch.)
     """
+    import anyio
+
     from services.contracts import tool_spec
-    from services.toolserver.servers import build_server
+    from services.toolserver.servers import build_server, dispatch_table
     from services.toolserver.tools_memory import PRODUCT_TOOLS
 
-    server = build_server(McpEndpoint.MEMORY, enable_diagnostic_tools=True, holder={})
-    listed = set(server._tool_manager._tools)
-    assert "memory_scaffold_ping" in listed
+    server = build_server(endpoint, enable_diagnostic_tools=True, holder={})
+    listed = {tool.name for tool in anyio.run(server.list_tools)}
+    table = dispatch_table(endpoint)
+    assert f"{endpoint.value.removesuffix('-mcp')}_scaffold_ping" in listed
+    tool_values = {name.value for name in ToolName}
+    product_listed = {ToolName(name) for name in listed if name in tool_values}
+    assert product_listed == set(table), "every registered ToolName must be dispatched"
     for name in ToolName:
-        if tool_spec(name).endpoint is not McpEndpoint.MEMORY:
-            continue
-        if name in PRODUCT_TOOLS:
-            assert name.value in listed, f"{name.value} implemented but not listed"
+        served_here = tool_spec(name).endpoint is endpoint
+        if served_here and name in PRODUCT_TOOLS:
+            assert name in table, f"{name.value} implemented but not dispatched"
         else:
             assert name.value not in listed, f"{name.value} listed without dispatch"
 

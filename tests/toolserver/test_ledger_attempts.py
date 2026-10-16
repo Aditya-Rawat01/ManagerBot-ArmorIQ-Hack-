@@ -179,6 +179,31 @@ def test_replay_is_recorded_with_reference_to_original_entry() -> None:
     assert_no_secrets(replay, token)
 
 
+def test_replay_rejection_carries_the_original_entry_for_the_caller() -> None:
+    """P2-06 surfaces it as `_meta.original_entry_id` (SHARED_INTERFACES §4)."""
+    fake = FakeAttemptLedger()
+    token = signed("jti-ref", now=time.time())
+    call(fake, token)
+    with pytest.raises(ledger_module.ReplayRejection) as no_row:
+        call(fake, token)
+    assert no_row.value.code == REPLAY and no_row.value.original_entry_id is None
+    fake.entries["jti-ref"] = LedgerEntryId(7)
+    with pytest.raises(ledger_module.ReplayRejection) as with_row:
+        call(fake, token)
+    assert with_row.value.original_entry_id == LedgerEntryId(7)
+
+
+def test_replay_reference_survives_a_recording_failure() -> None:
+    fake = FakeAttemptLedger()
+    token = signed("jti-ref-2", now=time.time())
+    call(fake, token)
+    fake.entries["jti-ref-2"] = LedgerEntryId(8)
+    fake.fail_record = True
+    with pytest.raises(ledger_module.ReplayRejection) as exc_info:
+        call(fake, token)
+    assert exc_info.value.original_entry_id == LedgerEntryId(8)
+
+
 def test_recording_failure_never_turns_a_rejection_into_an_execution() -> None:
     fake = FakeAttemptLedger(fail_record=True)
     with pytest.raises(CtxRejection) as exc_info:

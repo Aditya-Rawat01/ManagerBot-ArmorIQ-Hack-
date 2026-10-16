@@ -197,6 +197,16 @@ class DuplicateJti(Exception):
         self.existing_id = existing_id
 
 
+class ReplayRejection(CtxRejection):
+    """`replay` raised by `verify_and_record`, referencing the original call's
+    ledger entry (None when that call has no ledger row: still running, or it
+    was claimed but never recorded)."""
+
+    def __init__(self, original_entry_id: LedgerEntryId | None) -> None:
+        super().__init__(REPLAY)
+        self.original_entry_id = original_entry_id
+
+
 def _canonical(payload: Mapping[str, Any]) -> str:
     return json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -526,9 +536,11 @@ def verify_and_record(
     handler logic).
 
     Fail closed: a rejection is always re-raised, even when recording it
-    fails (logged by error class only). An accepted call whose attempt cannot
-    be recorded raises `CtxRejection(INTERNAL)` and must not execute (its jti
-    is already claimed, so it cannot be retried with the same `_ctx`).
+    fails (logged by error class only); a replay is re-raised as
+    `ReplayRejection` carrying the original entry id when it is known. An
+    accepted call whose attempt cannot be recorded raises
+    `CtxRejection(INTERNAL)` and must not execute (its jti is already claimed,
+    so it cannot be retried with the same `_ctx`).
     """
     guard = _CapturingGuard(ledger)
     try:
@@ -536,8 +548,10 @@ def verify_and_record(
             endpoint, tool, raw_arguments, ctx_secret=ctx_secret, replay_guard=guard, now=now
         )
     except CtxRejection as rejection:
+        replay_jti = guard.jti if rejection.code == REPLAY else None
+        original: LedgerEntryId | None = None
         try:
-            replay_jti = guard.jti if rejection.code == REPLAY else None
+            original = ledger.find_entry_id(replay_jti) if replay_jti else None
             ledger.record_attempt(
                 ToolCallAttempt(
                     credential_id=credential_id,
@@ -545,11 +559,13 @@ def verify_and_record(
                     tool_name=tool,
                     outcome=rejection.code,
                     jti=replay_jti,
-                    original_entry_id=ledger.find_entry_id(replay_jti) if replay_jti else None,
+                    original_entry_id=original,
                 )
             )
         except Exception as exc:
             logger.error("could not record rejected attempt (%s)", type(exc).__name__)
+        if rejection.code == REPLAY:
+            raise ReplayRejection(original) from None
         raise
     ctx = verified.ctx
     try:

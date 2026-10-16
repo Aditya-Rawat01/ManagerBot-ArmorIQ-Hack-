@@ -27,6 +27,10 @@ from psycopg import sql
 from psycopg_pool import ConnectionPool
 
 DEFAULT_STATEMENT_TIMEOUT_MS = 30000
+# Seconds a caller waits for a pooled connection before failing (psycopg_pool
+# default: 30). Short, so a database outage fails tool calls fast instead of
+# parking worker threads that the rest of the app (e.g. /health) shares.
+DEFAULT_POOL_TIMEOUT_S = 5.0
 
 
 def create_pool(
@@ -34,6 +38,7 @@ def create_pool(
     *,
     min_size: int = 1,
     max_size: int = 10,
+    timeout_s: float = DEFAULT_POOL_TIMEOUT_S,
 ) -> ConnectionPool:
     """Create the pool for a single role DSN (one pool per process).
 
@@ -42,13 +47,15 @@ def create_pool(
     handler (Arch §7.1: never bypass authorization because a query is slow).
     ``prepare_threshold=None`` disables psycopg's automatic server-side
     prepared statements, which a transaction-mode pooler (Neon ``-pooler``)
-    cannot keep bound to one server connection.
+    cannot keep bound to one server connection. ``timeout_s`` bounds the wait
+    for a connection (``PoolTimeout`` after it).
     """
     return ConnectionPool(
         dsn,
         min_size=min_size,
         max_size=max_size,
         kwargs={"prepare_threshold": None},
+        timeout=timeout_s,
         open=True,
     )
 

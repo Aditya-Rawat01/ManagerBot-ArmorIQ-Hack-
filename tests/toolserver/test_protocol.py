@@ -47,7 +47,7 @@ def test_tools_list_exposes_only_this_endpoints_diagnostic_tool(
     names = [t["name"] for t in tools["result"]["tools"]]
     assert tool in names
     if path == "/memory/mcp":
-        assert names == [tool, "knowledge_search_team"]
+        assert sorted(names) == sorted([tool, "knowledge_search_team"])
     else:
         assert names == [tool]
 
@@ -124,15 +124,18 @@ def test_json_only_accept_header_is_not_acceptable(client: TestClient) -> None:
 def test_product_tool_end_to_end_over_sse() -> None:
     """initialize → list → call with a signed _ctx (P2-06 §9-step-5).
 
-    Needs a LOCAL DATABASE_URL_TOOLSERVER with seeded data; skips otherwise.
+    Needs a LOCAL DATABASE_URL_TOOLSERVER with seeded data and
+    PROXYLEAD_DB_WRITE_TESTS=1 (the call writes permanent rows); skips otherwise.
     """
     import json as _json
 
     from .test_tool_dispatch import LIVE_DSN, TOOL, call, live_client, make_ctx
 
     if not LIVE_DSN:
-        pytest.skip("needs a local DATABASE_URL_TOOLSERVER")
+        pytest.skip("needs DATABASE_URL_TOOLSERVER and PROXYLEAD_DB_WRITE_TESTS=1")
     with live_client() as client:
+        initialized = rpc(client, "/memory/mcp", MEMORY_TOKEN, INITIALIZE)
+        assert initialized["result"]["serverInfo"]["name"] == "memory-mcp"
         listed = rpc(
             client, "/memory/mcp", MEMORY_TOKEN, {"jsonrpc": "2.0", "id": 6, "method": "tools/list"}
         )
@@ -141,3 +144,4 @@ def test_product_tool_end_to_end_over_sse() -> None:
     assert message["result"]["isError"] is False
     body = _json.loads(message["result"]["content"][0]["text"])
     assert body["tool"] == TOOL and body["tier"] == "team" and body["hits"]
+    assert message["result"]["_meta"]["ledger_entry_id"].isdigit()

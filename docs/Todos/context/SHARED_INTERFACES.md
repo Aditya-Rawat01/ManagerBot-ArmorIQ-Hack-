@@ -127,8 +127,44 @@ source (`unknown` if the layer cannot be determined). Never `allow`.
 | All other argument schemas | **PROPOSED** (P2-02, U-7) | Strict Pydantic models with `extra="forbid"`, length limits, no tier/identity fields |
 | Search result | **FIXED shape, open limits** | `KnowledgeSearchResult` / `KnowledgeSearchHit` / `SourceCitation`. Score scale, snippet limits, and `min_score`: **UNRESOLVED** (E17, U-10) |
 | `knowledge_get_source_*` / `read_source_*` results | **PROPOSED** (P2-02) | Bounded record with source ID, tier, and provenance; `read_source_*` returns rows only from named approved views (names PROPOSED by P2-01/P2-08) |
-| MCP result framing | **FIXED**: JSON-RPC 2.0, SSE, required text content shape (Arch §5.1). **PROPOSED**: the text content carries the JSON of the P2-02 result model | |
-| Tool-server rejection | **PROPOSED** (P1-04/P2-06) | MCP error result `{code, message}` with codes `unauthenticated`, `invalid_context`, `context_expired`, `replay`, `invalid_arguments`, `out_of_scope`, `precondition_failed`, `internal`. Gateway maps it to `ToolInvocationResult(status=rejected_by_tool_server)` + `DecisionSource.TOOL_SERVER_RULE`. No protected detail in messages |
+| MCP result framing | **FIXED**: JSON-RPC 2.0, SSE, required text content shape (Arch §5.1). **PROPOSED** (P2-06, shape below): the text content carries the JSON of the P2-02 result model; the ledger reference travels in the result's `_meta` | |
+| Tool-server rejection | **PROPOSED** (P1-04/P2-06, shape below) | MCP error result (`isError: true`) whose text block is `{code, message}` with codes `unauthenticated`, `invalid_context`, `context_expired`, `replay`, `invalid_arguments`, `out_of_scope`, `precondition_failed`, `internal`. Gateway maps it to `ToolInvocationResult(status=rejected_by_tool_server)` + `DecisionSource.TOOL_SERVER_RULE`, never ALLOW. No protected detail in messages |
+
+Tool result shape (P2-06 emits it, `services/toolserver/schemas.py`; the
+gateway, P1-02, parses it in `ArmorIQGateway._map_success`). The payload is
+the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`):
+
+```jsonc
+// success: exactly one ledger row (execution_status=executed) exists for this jti
+{"content": [{"type": "text", "text": "<JSON of the P2-02 result model>"}],
+ "isError": false,
+ "_meta": {"ledger_entry_id": "<tool_execution_ledger.id as a decimal string>"}}
+
+// rejection or failure
+{"content": [{"type": "text", "text": "{\"code\": \"<§4 code>\", \"message\": \"<fixed text>\"}"}],
+ "isError": true,
+ "_meta": {"ledger_entry_id": "<id>"}}      // only when THIS call has its own row:
+                                             // invalid_arguments / out_of_scope
+                                             // (rejected_by_tool_server) or a handler
+                                             // failure (code internal, execution_status=error)
+// replay: "_meta": {"original_entry_id": "<id>"} when the original call's row exists
+// no row (invalid_context, context_expired, unknown tool, no ledger, ...): no "_meta"
+```
+
+- `_meta` is the only place for correlation data: the text block of a success
+  is the bare result model (consumers parse it with the P2-02 models), and
+  `mcp==2.3.0`'s wire `CallToolResult` model ignores unknown top-level keys.
+- Gateway rules: `isError` (or the SDK's `status == "error"`) is always a
+  rejection; the code comes from the text block and anything outside the §4
+  set becomes `internal`; EXECUTED requires `_meta.ledger_entry_id`, otherwise
+  the status stays `unknown`. A rejection's `ledger_entry_id` is its own row,
+  or on replay the original entry. Top-level `ledger_entry_id`/`error_code`
+  keys (the earlier provisional reading) are still accepted.
+- Whether `_meta` survives the ArmorIQ proxy is unverified until E1 (P1-06);
+  without it a success degrades to `unknown`, never to a false EXECUTED.
+- `tools/list` advertises the enforced argument model (`model_json_schema()`:
+  limits, `additionalProperties: false`) plus `patternProperties: {"^_": {}}`,
+  so `_ctx` and the SDK's `_policy_context` are admitted but never declared (D-05).
 | Tool handler security hook | **PROPOSED** (P1-04 provides, P2-06 wires) | `verify_tool_call(endpoint, tool, raw_arguments) -> VerifiedCall(ctx, business_arguments, trace_metadata)`. Raises a rejection before any handler logic. Called for **every** product tool; there is no unguarded product tool |
 
 ## 5. Signed `_ctx` envelope
@@ -227,9 +263,14 @@ P2-06 wiring notes (`services/toolserver/ledger.py`; no handler calls
    never stored). A post-verification rejection (`invalid_arguments`,
    `out_of_scope`, `precondition_failed`) is appended with that
    `validation_outcome` and `execution_status=rejected_by_tool_server`;
-   handler failures use `execution_status=error` and `error_class=type(exc).__name__`.
+   handler failures use `validation_outcome=accepted`, `execution_status=error`
+   and `error_class=type(exc).__name__`.
    `DuplicateJti` means "do not execute; reject as `replay` referencing
-   `exc.existing_id`".
+   `exc.existing_id`". A replay caught during verification raises
+   `ReplayRejection` (a `CtxRejection`) whose `original_entry_id` is the
+   original row (or None); P2-06 returns it as `_meta.original_entry_id` (§4).
+4. No ledger (no `DATABASE_URL_TOOLSERVER`): rejections still answer with their
+   codes, but no product tool executes (`internal` before the handler).
 
 ## 10. Audit events (backend)
 

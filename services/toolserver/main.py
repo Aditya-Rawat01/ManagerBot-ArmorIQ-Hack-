@@ -79,8 +79,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for server in servers.values():
                 await stack.enter_async_context(server.session_manager.run())
             # One pool + ledger per process (SHARED_INTERFACES §9). Without a
-            # DSN the tools still register but every database-backed step
-            # fails closed (ledger None).
+            # DSN the tools still register and verification still rejects,
+            # but no product tool executes (ledger None → `internal`).
             pool = None
             ledger = None
             dsn = (
@@ -88,7 +88,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if settings.database_url_toolserver
                 else ""
             )
-            if dsn:
+            if not dsn:
+                logging.getLogger(__name__).warning(
+                    "DATABASE_URL_TOOLSERVER is not set: product tools refuse every call"
+                )
+            else:
                 try:
                     pool = db.create_pool(dsn)
                     ledger = Ledger(pool=pool)

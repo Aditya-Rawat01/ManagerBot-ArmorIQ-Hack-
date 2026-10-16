@@ -7,6 +7,7 @@ confirmed or corrected only by E1-E4.
 
 import asyncio
 import base64
+import json
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -691,3 +692,133 @@ def test_fake_gateway_is_scripted_and_test_only__offline_fake_sdk() -> None:
     assert outcome.decision.outcome is DecisionOutcome.BLOCK
     assert outcome.decision.reason == "fake block"
     assert [name for name, _ in fake.calls] == ["start_plan", "invoke_step"]
+
+
+# --- tool-result shape (SHARED_INTERFACES §4, emitted by P2-06) ---------------
+
+
+def _text(body: Any) -> list[dict[str, Any]]:
+    return [{"type": "text", "text": body if isinstance(body, str) else json.dumps(body)}]
+
+
+def _rejection(code: str, **meta: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "content": _text({"code": code, "message": "The call was rejected."}),
+        "isError": True,
+    }
+    if meta:
+        payload["_meta"] = meta
+    return payload
+
+
+def _invoke_returning(payload: Any) -> Any:
+    """invoke_step against a fake SDK whose proxy returned `payload` as the
+    JSON-RPC result. Like the real SDK (client.py `invoke`), an
+    isError/is_error/error payload gets status "error"."""
+    gateway, fake = _gateway()
+    status = (
+        "error"
+        if isinstance(payload, dict)
+        and (payload.get("isError") or payload.get("is_error") or payload.get("error"))
+        else "success"
+    )
+
+    def invoke_with_policy(
+        mcp: str, action: str, token: Any, params: Any = None, options: Any = None
+    ) -> Any:
+        return MCPInvocationResult(mcp=mcp, action=action, result=payload, status=status)
+
+    fake.invoke_with_policy = invoke_with_policy  # type: ignore[method-assign]
+    ctx = _ctx(_user(PersonaKey.SAM, "m-sam"))
+    plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
+
+    async def run() -> Any:
+        handle = await gateway.start_plan(ctx, plan)
+        return await gateway.invoke_step(handle, 0, ctx, plan)
+
+    return asyncio.run(run())
+
+
+def test_canonical_success_is_ledger_backed_execution__offline_fake_sdk() -> None:
+    payload = {
+        "content": _text({"tool": "knowledge_search_team", "tier": "team", "query": "q"}),
+        "isError": False,
+        "_meta": {"ledger_entry_id": "42"},
+    }
+    outcome = _invoke_returning(payload)
+    assert outcome.decision.outcome is DecisionOutcome.ALLOW
+    assert outcome.invocation.status is ToolExecutionStatus.EXECUTED
+    assert outcome.invocation.ledger_entry_id == "42"
+    assert outcome.invocation.tool_server_reached is True
+
+
+def test_success_without_ledger_reference_is_never_executed__offline_fake_sdk() -> None:
+    outcome = _invoke_returning({"content": _text({"tool": "x"}), "isError": False})
+    assert outcome.invocation.status is ToolExecutionStatus.UNKNOWN
+    assert outcome.invocation.ledger_entry_id is None
+
+
+@pytest.mark.parametrize(
+    ("payload", "code", "ledger_entry_id"),
+    [
+        (_rejection("invalid_context"), "invalid_context", None),
+        (_rejection("context_expired"), "context_expired", None),
+        (_rejection("invalid_arguments", ledger_entry_id="7"), "invalid_arguments", "7"),
+        (_rejection("out_of_scope", ledger_entry_id="8"), "out_of_scope", "8"),
+        (_rejection("internal", ledger_entry_id="9"), "internal", "9"),
+        (_rejection("replay", original_entry_id="5"), "replay", "5"),
+        (_rejection("replay"), "replay", None),
+        # Never trust free text as a code; never treat isError as success.
+        (_rejection("totally-made-up"), "internal", None),
+        ({"content": _text("Unknown tool: x"), "isError": True}, "internal", None),
+        ({"content": [], "isError": True}, "internal", None),
+        ({"content": _text([1, 2]), "is_error": True}, "internal", None),
+        ({"content": _text({"code": ["x"]}), "isError": True}, "internal", None),
+        # Earlier provisional shape (top-level key) keeps working.
+        ({"error_code": "invalid_context"}, "invalid_context", None),
+    ],
+)
+def test_tool_server_rejection_is_never_allow__offline_fake_sdk(
+    payload: dict[str, Any], code: str, ledger_entry_id: str | None
+) -> None:
+    outcome = _invoke_returning(payload)
+    assert outcome.decision.outcome is DecisionOutcome.BLOCK
+    assert outcome.decision.source is DecisionSource.TOOL_SERVER_RULE
+    assert outcome.invocation.status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+    assert outcome.invocation.tool_server_reached is True
+    assert outcome.invocation.error_code == code
+    assert outcome.invocation.ledger_entry_id == ledger_entry_id
+
+
+def test_sdk_error_status_alone_is_a_rejection__offline_fake_sdk() -> None:
+    outcome = _invoke_returning({"error": "proxy-side tool error"})
+    assert outcome.decision.outcome is DecisionOutcome.BLOCK
+    assert outcome.invocation.status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+    assert outcome.invocation.error_code == "internal"
+
+
+def test_parses_what_the_tool_server_emits__offline_fake_sdk() -> None:
+    """Contract round trip with P2-06's real result builders (needs both
+    extras; the isolated api job has no `mcp` and skips)."""
+    pytest.importorskip("mcp")
+    from services.contracts import DataTier, KnowledgeSearchResult
+    from services.toolserver.ledger import LedgerEntryId
+    from services.toolserver.schemas import error_result, ok_result
+
+    def wire(result: Any) -> dict[str, Any]:
+        return result.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+    model = KnowledgeSearchResult(
+        tool=ToolName.KNOWLEDGE_SEARCH_TEAM, tier=DataTier.TEAM, query="q", hits=[]
+    )
+    ok = _invoke_returning(wire(ok_result(model, ledger_entry_id=LedgerEntryId(41))))
+    assert ok.invocation.status is ToolExecutionStatus.EXECUTED
+    assert ok.invocation.ledger_entry_id == "41"
+    replay = _invoke_returning(wire(error_result("replay", original_entry_id=LedgerEntryId(41))))
+    assert replay.decision.outcome is DecisionOutcome.BLOCK
+    assert (replay.invocation.error_code, replay.invocation.ledger_entry_id) == ("replay", "41")
+    denied = _invoke_returning(wire(error_result("out_of_scope", ledger_entry_id=LedgerEntryId(3))))
+    assert (denied.invocation.error_code, denied.invocation.ledger_entry_id) == (
+        "out_of_scope",
+        "3",
+    )
