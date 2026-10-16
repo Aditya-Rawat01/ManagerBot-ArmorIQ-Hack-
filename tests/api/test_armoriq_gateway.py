@@ -711,7 +711,7 @@ def _rejection(code: str, **meta: str) -> dict[str, Any]:
     return payload
 
 
-def _invoke_returning(payload: Any) -> Any:
+def _invoke_returning(payload: Any, tool: ToolName = ToolName.KNOWLEDGE_SEARCH_TEAM) -> Any:
     """invoke_step against a fake SDK whose proxy returned `payload` as the
     JSON-RPC result. Like the real SDK (client.py `invoke`), an
     isError/is_error/error payload gets status "error"."""
@@ -730,7 +730,7 @@ def _invoke_returning(payload: Any) -> Any:
 
     fake.invoke_with_policy = invoke_with_policy  # type: ignore[method-assign]
     ctx = _ctx(_user(PersonaKey.SAM, "m-sam"))
-    plan = _plan(ToolName.KNOWLEDGE_SEARCH_TEAM)
+    plan = _plan(tool)
 
     async def run() -> Any:
         handle = await gateway.start_plan(ctx, plan)
@@ -761,13 +761,20 @@ def test_success_without_ledger_reference_is_never_executed__offline_fake_sdk() 
 @pytest.mark.parametrize(
     ("payload", "code", "ledger_entry_id"),
     [
+        (_rejection("unauthenticated"), "unauthenticated", None),
         (_rejection("invalid_context"), "invalid_context", None),
         (_rejection("context_expired"), "context_expired", None),
         (_rejection("invalid_arguments", ledger_entry_id="7"), "invalid_arguments", "7"),
         (_rejection("out_of_scope", ledger_entry_id="8"), "out_of_scope", "8"),
+        (_rejection("precondition_failed", ledger_entry_id="6"), "precondition_failed", "6"),
         (_rejection("internal", ledger_entry_id="9"), "internal", "9"),
         (_rejection("replay", original_entry_id="5"), "replay", "5"),
         (_rejection("replay"), "replay", None),
+        # `original_entry_id` belongs to replay only; never adopted elsewhere.
+        (_rejection("internal", original_entry_id="5"), "internal", None),
+        # `not_found` without its own ledger row cannot be an executed lookup.
+        (_rejection("not_found"), "internal", None),
+        (_rejection("not_found", original_entry_id="5"), "internal", None),
         # Never trust free text as a code; never treat isError as success.
         (_rejection("totally-made-up"), "internal", None),
         ({"content": _text("Unknown tool: x"), "isError": True}, "internal", None),
@@ -788,6 +795,38 @@ def test_tool_server_rejection_is_never_allow__offline_fake_sdk(
     assert outcome.invocation.tool_server_reached is True
     assert outcome.invocation.error_code == code
     assert outcome.invocation.ledger_entry_id == ledger_entry_id
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+    ],
+)
+def test_not_found_is_an_executed_empty_lookup__offline_fake_sdk(tool: ToolName) -> None:
+    """D-11 `not_found`: the tool server executed the authorized lookup (its
+    own accepted/executed ledger row) and found nothing visible. EXECUTED with
+    no result (no evidence); the ArmorIQ decision is kept, never converted
+    into a tool-server block."""
+    outcome = _invoke_returning(_rejection("not_found", ledger_entry_id="11"), tool)
+    assert outcome.decision.outcome is DecisionOutcome.ALLOW
+    assert outcome.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
+    invocation = outcome.invocation
+    assert invocation.tool is tool
+    assert invocation.status is ToolExecutionStatus.EXECUTED
+    assert invocation.tool_server_reached is True
+    assert invocation.ledger_entry_id == "11"
+    assert invocation.result is None
+    assert invocation.error_code == "not_found"
+
+
+def test_not_found_top_level_shape_keeps_its_ledger_row__offline_fake_sdk() -> None:
+    outcome = _invoke_returning({"error_code": "not_found", "ledger_entry_id": "12"})
+    assert outcome.invocation.status is ToolExecutionStatus.EXECUTED
+    assert outcome.invocation.ledger_entry_id == "12"
+    assert outcome.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
 
 
 def test_sdk_error_status_alone_is_a_rejection__offline_fake_sdk() -> None:
@@ -822,3 +861,22 @@ def test_parses_what_the_tool_server_emits__offline_fake_sdk() -> None:
         "out_of_scope",
         "3",
     )
+    assert denied.decision.source is DecisionSource.TOOL_SERVER_RULE
+    missing = _invoke_returning(
+        wire(error_result("not_found", ledger_entry_id=LedgerEntryId(4))),
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+    )
+    assert missing.invocation.status is ToolExecutionStatus.EXECUTED
+    assert (missing.invocation.error_code, missing.invocation.ledger_entry_id) == (
+        "not_found",
+        "4",
+    )
+    assert missing.invocation.result is None
+    assert missing.decision.outcome is DecisionOutcome.ALLOW
+    assert missing.decision.source is DecisionSource.ARMORIQ_POLICY_DECISION
+    # The tool server never emits a row-less not_found (it answers `internal`),
+    # and the gateway would refuse one anyway.
+    rowless = _invoke_returning(wire(error_result("not_found")), ToolName.KNOWLEDGE_GET_SOURCE_TEAM)
+    assert rowless.invocation.status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+    assert rowless.invocation.error_code == "internal"
+    assert rowless.decision.source is DecisionSource.TOOL_SERVER_RULE

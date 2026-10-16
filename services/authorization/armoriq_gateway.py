@@ -61,7 +61,15 @@ CTX_TTL_S = 300
 # `{"code", "message"}`, optional `_meta.ledger_entry_id` (the call's own row) or
 # `_meta.original_entry_id` (replay). Top-level `ledger_entry_id`/`error_code`
 # keys are still accepted (earlier provisional shape).
+#
+# `not_found` (D-11, P2-08) is the one `isError` code that is NOT a rejection:
+# the authorized lookup executed and found nothing visible, with its own
+# accepted/executed ledger row in `_meta.ledger_entry_id`. It maps to an
+# EXECUTED invocation with no result (no evidence) and keeps the ArmorIQ
+# decision; it is never turned into a `tool_server_rule` block. Without a
+# ledger reference it cannot be proven executed and becomes `internal`.
 _LEDGER_KEYS = ("ledger_entry_id", "ledgerEntryId")
+NOT_FOUND_CODE = "not_found"
 _TOOL_SERVER_CODES = frozenset(
     {
         "unauthenticated",
@@ -71,6 +79,7 @@ _TOOL_SERVER_CODES = frozenset(
         "invalid_arguments",
         "out_of_scope",
         "precondition_failed",
+        NOT_FOUND_CODE,
         "internal",
     }
 )
@@ -746,10 +755,19 @@ class ArmorIQGateway:
         payload = getattr(result, "result", None)
         ledger_id = self._ledger_ref(payload)
         error_code = self._error_code(payload, tool_error=self._is_tool_error(result, payload))
+        if error_code == NOT_FOUND_CODE:
+            if ledger_id is not None:
+                return self._map_not_found(handle, ctx, step, jti, ledger_id, holds)
+            # An empty lookup without its ledger row is unprovable: fail closed.
+            error_code = "internal"
         if error_code is not None:
             # A tool-server rejection is never an ALLOW (isError is honoured
-            # even without a parsable code). The ledger reference, if any, is
-            # the call's own rejection row or, on replay, the original entry.
+            # even without a parsable code; `not_found` is handled above). The
+            # ledger reference, if any, is the call's own rejection row or, on
+            # replay only, the original entry.
+            original = (
+                self._meta_ref(payload, "original_entry_id") if error_code == "replay" else None
+            )
             invocation = ToolInvocationResult(
                 request_id=ctx.request_id,
                 plan_id=handle.plan_id,
@@ -758,7 +776,7 @@ class ArmorIQGateway:
                 jti=jti,
                 status=ToolExecutionStatus.REJECTED_BY_TOOL_SERVER,
                 tool_server_reached=True,
-                ledger_entry_id=ledger_id or self._meta_ref(payload, "original_entry_id"),
+                ledger_entry_id=ledger_id or original,
                 error_code=error_code,
             )
             return StepOutcome(
@@ -814,6 +832,52 @@ class ArmorIQGateway:
                 handle,
             ),
             approval=approval,
+            invocation=invocation,
+        )
+
+    def _map_not_found(
+        self,
+        handle: PlanHandle,
+        ctx: RequestContext,
+        step: Any,
+        jti: str,
+        ledger_id: str,
+        holds: list[tuple[Any, datetime]],
+    ) -> StepOutcome:
+        """`not_found`: an executed, ledger-backed lookup that returned nothing.
+
+        The ArmorIQ decision stands (the call was authorized and reached the
+        tool server); the invocation is EXECUTED with ``result=None`` so no
+        evidence can be built from it, and ``error_code`` says why.
+        """
+        invocation = ToolInvocationResult(
+            request_id=ctx.request_id,
+            plan_id=handle.plan_id,
+            step_index=step.step_index,
+            tool=step.tool,
+            jti=jti,
+            status=ToolExecutionStatus.EXECUTED,
+            tool_server_reached=True,
+            ledger_entry_id=ledger_id,
+            result=None,
+            error_code=NOT_FOUND_CODE,
+        )
+        logger.info(
+            "gateway step not_found request_id=%s step=%d jti=%s ledger=%s",
+            ctx.request_id,
+            step.step_index,
+            jti,
+            ledger_id,
+        )
+        return StepOutcome(
+            decision=self._decision(
+                "allow",
+                DecisionSource.ARMORIQ_POLICY_DECISION,
+                "policy allowed the planned call (provisional until E1/E3); "
+                "the lookup found no visible source",
+                handle,
+            ),
+            approval=self._approved_hold(ctx, handle, step, holds),
             invocation=invocation,
         )
 

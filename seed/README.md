@@ -33,6 +33,16 @@ through the migration-role ingest into a database.
   both the lexical and the vector leg) only returns active records whose
   `review_status` is `authoritative` (missing or unknown = excluded); Maya
   reaches drafts through the review queue instead.
+- `company_projects.json` — synthetic `company_projects` rows behind the
+  P2-08 approved views `approved_company_data_{team,confidential,restricted}`
+  (migration 0011 creates the table, views, and grants only; it inserts no
+  rows, so a fresh `scripts/migrate.py` never needs a seeded workspace). Keys:
+  `project_key` (≤ 128 chars, unique; the `source_id` of a `read_source_*`
+  row), `project_name` (≤ 200 chars; the row `title`), `tier`, `status`
+  (`active`/`superseded`), `owner` (persona), `summary`, and the optional
+  text columns `details`, `budget`, `internal_notes` (each view exposes only
+  its tier's columns). Unknown keys are rejected
+  (`services/knowledge/ingest.py::validate_project`).
 - Members/workspace rows come from env at seed time (D-20/ADR-021), not files.
   A persona without `PERSONA_<NAME>_EMAIL` is not written (the run warns with
   the env-key name only) and its FKs stay NULL — an honest unknown, never a
@@ -68,6 +78,15 @@ in the printed stats is 0.
   `seed_key`) are never touched. A note's `review_status` and `version` are
   set on insert only: after that the draft lifecycle belongs to
   `knowledge_confirm_maya_decision` (P2-09, R-56).
+- `company_projects`: keyed by `(workspace_id, project_key)` (the 0011 unique
+  constraint), loaded after the workspace row exists (its FK target) and
+  rewritten in place only when a column differs; counted in the `projects`
+  stat (0 on a re-run). Rows that are no longer in the file are left alone,
+  like the other seeded tables. Upgrading a database that already has
+  0001–0010 and an older ingest: `scripts/migrate.py` applies 0011 (an empty
+  table), then one ingest run loads the rows (`projects` = the file's row
+  count; every other count is 0 when the earlier ingest used the same
+  layout version).
 
 ## Chunking (PROPOSED, recorded)
 
