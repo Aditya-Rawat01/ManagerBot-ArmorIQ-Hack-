@@ -918,68 +918,42 @@ def test_main_returns_the_probe_exit_code__offline_fake_sdk(
     assert "PASS candidate (EXECUTED and correlated): no" in capsys.readouterr().out
 
 
-def test_probe_drives_real_gateway_path() -> None:
-    import asyncio
+def test_build_maya_request_uses_the_trusted_maya_identity() -> None:
+    from services.contracts import EntryPoint, McpEndpoint, PersonaKey, ToolName
 
-    from apps.api.core.config import Settings
-    from apps.api.identity import mask_email
+    ctx, plan = probe.build_maya_request(_probe_settings())
+    assert ctx.requester.persona is PersonaKey.MAYA
+    assert ctx.requester.member_id == "m-maya"
+    assert ctx.requester.masked_email == "m***@e***.com"
+    assert ctx.entry_point is EntryPoint.WEB
+    assert ctx.trace_id == f"{ctx.request_id}-trace"
+    (step,) = plan.steps
+    assert step.step_index == 0
+    assert step.mcp is McpEndpoint.MEMORY
+    assert step.tool is ToolName.KNOWLEDGE_SEARCH_TEAM
+    assert dict(step.arguments) == {"query": probe.E1_QUERY, "limit": probe.E1_LIMIT}
+    _assert_no_fake_values(ctx.model_dump_json(), plan.model_dump_json())
+
+
+def test_build_maya_request_refuses_without_maya_email() -> None:
+    settings = Settings(_env_file=None, app_env="test")  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="Maya has no mapped ArmorIQ email"):
+        probe.build_maya_request(settings)
+
+
+def test_probe_drives_real_gateway_path__offline_fake_sdk() -> None:
+    """The probe's own request goes through the real gateway (fake SDK client):
+    one planned step, `_ctx` attached, EXECUTED read from `_meta`."""
     from services.authorization.armoriq_gateway import ArmorIQGateway
-    from services.contracts import (
-        AppRole,
-        AuthenticatedUser,
-        EntryPoint,
-        PersonaKey,
-    )
 
-    settings = Settings(
-        _env_file=None,
-        app_env="test",
-        armoriq_api_key="ak_test",
-        persona_maya_email="maya@example.com",
-        ctx_secret="test-ctx-secret",
-    )
+    settings = _probe_settings()
     calls: list = []
     gateway = ArmorIQGateway(
         settings,
         client_factory=lambda member_id: _FakeClient(calls),
-        ctx_signer=lambda fields, secret: f"signed-{fields['jti']}",
+        ctx_signer=_Signer(),
     )
-    user = AuthenticatedUser(
-        member_id="m-maya",
-        persona=PersonaKey.MAYA,
-        display_name="Maya",
-        app_role=AppRole.MANAGER,
-        masked_email=mask_email("maya@example.com"),
-    )
-    from services.contracts import (
-        DEFAULT_WORKSPACE_ID,
-        McpEndpoint,
-        PlannedToolCall,
-        PlanProposal,
-        RequestContext,
-        ToolName,
-    )
-
-    ctx = RequestContext(
-        request_id="r-e1",
-        trace_id="t-e1",
-        workspace_id=DEFAULT_WORKSPACE_ID,
-        requester=user,
-        entry_point=EntryPoint.WEB,
-        received_at=NOW,
-    )
-    plan = PlanProposal(
-        summary="E1 probe",
-        steps=[
-            PlannedToolCall(
-                step_index=0,
-                mcp=McpEndpoint.MEMORY,
-                tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
-                arguments={"query": probe.E1_QUERY, "limit": 5},
-                purpose="E1 probe step",
-            )
-        ],
-    )
+    ctx, plan = probe.build_maya_request(settings)
 
     async def run() -> object:
         handle = await gateway.start_plan(ctx, plan)
@@ -987,13 +961,16 @@ def test_probe_drives_real_gateway_path() -> None:
         return await gateway.invoke_step(handle, 0, ctx, plan)
 
     outcome = asyncio.run(run())
-    assert outcome.decision.outcome.value == "allow"
-    assert outcome.invocation is not None
-    assert outcome.invocation.status.value == "executed"
-    assert outcome.invocation.ledger_entry_id == "7"
+    assert outcome.decision.outcome.value == "allow"  # type: ignore[attr-defined]
+    invocation = outcome.invocation  # type: ignore[attr-defined]
+    assert invocation is not None
+    assert invocation.status.value == "executed"
+    assert invocation.ledger_entry_id == "7"
+    planned = next(args for name, *args in calls if name == "start_plan")[0]
+    assert [call["name"] for call in planned] == ["knowledge_search_team"]
     invoke_params = next(args for name, *args in calls if name == "invoke")[2]
     assert "_ctx" in invoke_params
     assert invoke_params["query"] == probe.E1_QUERY
     described = probe.describe_outcome(outcome)
-    assert described["jti"] == outcome.invocation.jti
+    assert described["jti"] == invocation.jti
     assert described["ledger_entry_id"] == "7"
