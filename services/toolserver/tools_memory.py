@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from typing import Any
 
 import anyio.to_thread
+from psycopg import sql
 from pydantic import BaseModel
 
 from services.contracts import (
@@ -27,6 +29,7 @@ from services.contracts import (
     ReadSourceConfidentialResult,
     ReadSourceRestrictedResult,
     ReadSourceTeamResult,
+    ReviewStatus,
     SourceCitation,
     SourceRow,
     ToolName,
@@ -109,10 +112,6 @@ async def handle_knowledge_search_restricted(
 def _citation_from_source_row(row: dict[str, Any]) -> SourceCitation:
     """Build a citation from a source_records row (mirrors retrieval._citation:
     recorded synthetic date preferred, stored timestamp as fallback)."""
-    from datetime import UTC, datetime
-
-    from services.contracts import ReviewStatus
-
     provenance = row["provenance"] or {}
     recorded = provenance.get("recorded_at") or ""
     try:
@@ -266,8 +265,6 @@ def _read_view_rows(
     """Fixed per-tier SQL: the tier's allowlisted view, the verified-ctx
     workspace, the exact tier again (defense in depth over the view's own
     filter), current rows only (D-09 rule 3)."""
-    from psycopg import sql
-
     table = sql.Identifier("public", _VIEW_BY_TIER[tier])
     fragments = [
         sql.SQL("workspace_id = %s"),

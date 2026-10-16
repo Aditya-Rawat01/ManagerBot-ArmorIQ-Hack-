@@ -189,6 +189,11 @@ why nothing was found.
   still accepted.
 - Whether `_meta` survives the ArmorIQ proxy is unverified until E1 (P1-06);
   without it a success degrades to `unknown`, never to a false EXECUTED.
+- Beyond the P2-02 model, the tool server rejects as `invalid_arguments` (a
+  recorded rejection, dispatch step 1.2): a NUL character in any string
+  argument (PostgreSQL text cannot hold it; never a driver `internal`), and
+  each tool's own argument policy (`read_source_*`: a foreign `view`,
+  `include_superseded=true`; §7).
 - `tools/list` advertises the enforced argument model (`model_json_schema()`:
   limits, `additionalProperties: false`) plus `patternProperties: {"^_": {}}`,
   so `_ctx` and the SDK's `_policy_context` are admitted but never declared (D-05).

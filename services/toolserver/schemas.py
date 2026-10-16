@@ -24,6 +24,7 @@ or protected details.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from mcp.types import CallToolResult, TextContent
@@ -100,9 +101,28 @@ class NotFound(Exception):
     """
 
 
+def _has_nul(value: Any) -> bool:
+    if isinstance(value, str):
+        return "\x00" in value
+    if isinstance(value, Mapping):
+        return any(_has_nul(key) or _has_nul(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(_has_nul(item) for item in value)
+    return False
+
+
 def parse_tool_arguments(tool: ToolName, business_arguments: dict[str, Any]) -> BaseModel:
-    """Validate business arguments against the tool's P2-02 model."""
+    """Validate business arguments against the tool's P2-02 model.
+
+    A NUL character in any string argument is `invalid_arguments`: PostgreSQL
+    text cannot hold it, so it would otherwise surface as a driver error
+    (`internal`) inside the handler. No stored value can contain NUL, so the
+    rejection discloses nothing about existence.
+    """
     try:
-        return tool_args.validate_arguments(tool, business_arguments)
+        model = tool_args.validate_arguments(tool, business_arguments)
     except ValidationError as exc:
         raise InvalidArguments(str(exc)) from None
+    if _has_nul(model.model_dump()):
+        raise InvalidArguments("NUL character in a string argument")
+    return model
