@@ -33,11 +33,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hooks. Slack Socket Mode is P3-05-owned, D-27 pending.
+    """Startup/shutdown hooks: the Slack Socket Mode client (P3-05).
 
-    The adapter starts only with tokens configured AND an orchestrator handle
-    (P3-04, not merged; it sets ``app.state.orchestrator_handle``): otherwise
-    the API serves HTTP only and `/health` stays green. Starting Slack can
+    D-27 (RESOLVED by VTCodeCraft, 17 Oct 2026, issue #26): the client runs
+    inside this API process, one uvicorn worker (never ``--workers N``: one
+    websocket per worker). The adapter starts only with tokens configured
+    AND an orchestrator handle (P3-04, not merged; it sets
+    ``app.state.orchestrator_handle``): otherwise the API serves HTTP only
+    and `/health` stays green. Starting Slack can
     never fail API startup: any exception (an invalid or revoked token makes
     Bolt's constructor ``auth.test`` raise; Slack may be unreachable) is
     logged by exception class and the API continues without Slack.

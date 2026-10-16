@@ -1,14 +1,16 @@
-"""Slack Socket Mode lifecycle (P3-05, D-27 pending).
+"""Slack Socket Mode lifecycle (P3-05; placement per D-27).
 
 Nothing connects at import time. :func:`start_slack_socket` returns ``None``
-whenever the bot/app tokens are unset (normal for local runs without Slack)
-or no dispatch ``handle`` is available yet (P3-04 owns the orchestrator) —
-`/health` stays green either way.
+whenever the bot/app tokens are unset (normal for local runs without Slack),
+no dispatch ``handle`` is available yet (P3-04 owns the orchestrator), or no
+API event loop was given — `/health` stays green either way.
 
-Process placement (D-27, unresolved): the handler currently runs on a daemon
-thread inside the API process. That placement is PROPOSED, not approved —
-do not treat it as the deployment answer, and do not start this in
-production without the D-27 decision.
+Process placement (D-27, RESOLVED by VTCodeCraft, 17 Oct 2026, issue #26):
+the Socket Mode client runs INSIDE the API process, started and stopped by
+the FastAPI lifespan with a single uvicorn worker; API startup and `/health`
+never depend on it. The websocket is opened from a daemon thread; Bolt runs
+listeners on its own worker threads and hands accepted events to ``handle``
+on the API event loop.
 """
 
 import asyncio
@@ -30,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SlackRuntime:
-    """A running Socket Mode handler plus its worker thread (D-27 interim)."""
+    """A running Socket Mode handler plus the thread that connected it."""
 
     handler: Any
     thread: threading.Thread
