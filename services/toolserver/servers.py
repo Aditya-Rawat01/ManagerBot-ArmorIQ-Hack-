@@ -314,9 +314,12 @@ class GuardedDispatch(Extension):
                 rejection.original_entry_id if isinstance(rejection, ReplayRejection) else None
             )
             return error_result(rejection.code, original_entry_id=original)
-        # 1.2 business arguments (strict P2-02 model).
+        # 1.2 business arguments (strict P2-02 model, then the tool's own
+        # trusted-code argument policy, e.g. read_source_* include_superseded).
         try:
             args = parse_tool_arguments(tool, verified.business_arguments)
+            if spec.check_arguments is not None:
+                spec.check_arguments(args)
         except InvalidArguments:
             return await self._reject(runtime, verified, INVALID_ARGUMENTS)
         # 1.3 member tier ceiling.

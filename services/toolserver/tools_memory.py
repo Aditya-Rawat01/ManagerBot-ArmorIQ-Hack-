@@ -34,7 +34,7 @@ from services.contracts import (
 from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.knowledge import retrieval
 from services.toolserver import db
-from services.toolserver.schemas import NotFound
+from services.toolserver.schemas import InvalidArguments, NotFound
 from services.toolserver.security import VerifiedCall
 
 
@@ -229,29 +229,39 @@ def _like_literal(text: str) -> str:
     return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
+def check_read_source_arguments(args: Any) -> None:
+    """Trusted-code argument policy for `read_source_*` (dispatch step 1.2).
+
+    `include_superseded=True` is rejected (`invalid_arguments`, fail closed):
+    `SourceRow` has no structured status field, so a superseded row would
+    reach the responder as current evidence (D-09 rule 3). Rows are always
+    `status = 'active'` until an ICR adds a status field to `SourceRow`.
+    """
+    if args.include_superseded:
+        raise InvalidArguments("include_superseded is not supported")
+
+
 def _read_view_rows(
     pool: Any,
     view: str,
     workspace_id: str,
     author: str | None,
-    include_superseded: bool,
     limit: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Fixed per-view SQL (view name from the allowlist constant only)."""
+    """Fixed per-view SQL (view name from the allowlist constant only).
+    Current rows only: superseded rows are never returned (D-09 rule 3)."""
     from psycopg import sql
 
     if view not in _VIEW_NAMES:
         # Unreachable: P2-02 Literals admit only the three allowlisted names.
         raise ValueError(f"unknown approved view: {view}")
     table = sql.Identifier("public", view)
-    fragments = [sql.SQL("workspace_id = %s")]
+    fragments = [sql.SQL("workspace_id = %s"), sql.SQL("status = 'active'")]
     params: list[Any] = [workspace_id]
     if author:
         # Escape LIKE metacharacters: the filter is a literal substring match.
         fragments.append(sql.SQL("owner ILIKE %s ESCAPE '\\'"))
         params.append(_like_literal(author))
-    if not include_superseded:
-        fragments.append(sql.SQL("status = 'active'"))
     where = sql.SQL(" AND ").join(fragments)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
@@ -273,9 +283,9 @@ def _read_view_rows(
     return rows, total
 
 
-def _flagged_snippet(body: str, status: str) -> str:
-    text = f"[SUPERSEDED] {body}" if status == "superseded" else body
-    return text[:MAX_EXCERPT_CHARS]
+def _snippet(body: str) -> str:
+    """Character cap for a returned row (P2-02 `SourceRow.snippet`)."""
+    return body[:MAX_EXCERPT_CHARS]
 
 
 async def _read_source(
@@ -288,20 +298,23 @@ async def _read_source(
 ) -> Any:
     if runtime.pool is None:
         raise _NoDatabase("source read needs a database pool")
+    if args.include_superseded:
+        # Never reached through dispatch (check_read_source_arguments); kept
+        # so a direct handler call fails closed too.
+        raise InvalidArguments("include_superseded is not supported")
     rows, total = await anyio.to_thread.run_sync(
         _read_view_rows,
         runtime.pool,
         args.view,
         verified.ctx.workspace_id,
         args.author,
-        args.include_superseded,
         args.limit,
     )
     built = [
         SourceRow(
             source_id=row["project_key"],
             title=row["project_name"],
-            snippet=_flagged_snippet(row["body"], row["status"]),
+            snippet=_snippet(row["body"]),
         )
         for row in rows
     ]
@@ -356,6 +369,10 @@ class ProductTool:
     name: ToolName
     description: str
     handler: Callable[..., Awaitable[BaseModel]]
+    # Trusted-code argument policy beyond the P2-02 schema. The dispatcher
+    # runs it right after schema validation (step 1.2, before the ceiling and
+    # the handler); InvalidArguments -> recorded `invalid_arguments`.
+    check_arguments: Callable[[Any], None] | None = None
 
 
 PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
@@ -397,17 +414,29 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
     ),
     ToolName.READ_SOURCE_TEAM: ProductTool(
         name=ToolName.READ_SOURCE_TEAM,
-        description="Read rows from the approved team-tier company-data view.",
+        description=(
+            "Read current rows from the approved team-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_team,
+        check_arguments=check_read_source_arguments,
     ),
     ToolName.READ_SOURCE_CONFIDENTIAL: ProductTool(
         name=ToolName.READ_SOURCE_CONFIDENTIAL,
-        description="Read rows from the approved confidential-tier company-data view.",
+        description=(
+            "Read current rows from the approved confidential-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_confidential,
+        check_arguments=check_read_source_arguments,
     ),
     ToolName.READ_SOURCE_RESTRICTED: ProductTool(
         name=ToolName.READ_SOURCE_RESTRICTED,
-        description="Read rows from the approved restricted-tier company-data view.",
+        description=(
+            "Read current rows from the approved restricted-tier company-data view. "
+            "include_superseded=true is rejected."
+        ),
         handler=handle_read_source_restricted,
+        check_arguments=check_read_source_arguments,
     ),
 }

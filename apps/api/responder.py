@@ -26,8 +26,9 @@ result returned to the model in this request:
   come from allowlisted approved company-data views (P2-08), which sit outside
   the D-09 draft workflow, so the documented default maps them as
   AUTHORITATIVE and current. They are never mislabeled as drafts. Because a
-  row cannot show supersession, P3-04 must not pass rows read with
-  `include_superseded=True`.
+  row cannot show supersession, the tool server rejects
+  `include_superseded=True` (`invalid_arguments`, P2-08) and returns only
+  `status='active'` rows, so every row it returns is current.
 - An empty excerpt or snippet does not crash. The item is kept for
   supersession, conflict, and leak bookkeeping, but it cannot ground a claim.
 - Tier and source IDs are copied unchanged. Write-side results (save, confirm,

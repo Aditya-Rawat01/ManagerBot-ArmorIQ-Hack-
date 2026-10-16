@@ -260,6 +260,14 @@ fragments around the matched terms, else the leading text. `decisions`,
 `manager_guidance`, `team_notes` carry a nullable `seed_key` (0010): set on
 seed rows, NULL on runtime rows. Eval case labels are never stored.
 
+Approved-view rows (`read_source_*`, P2-08, `services/toolserver/tools_memory.py`):
+current rows only (`status = 'active'`). `SourceRow` has no structured status
+or supersession field, so a superseded row would reach the responder as
+current evidence (D-09 rule 3). Until an ICR adds such a field,
+`include_superseded=true` is rejected with `invalid_arguments` (fail closed, at
+dispatch step 1.2, recorded as a rejection row); the argument stays in the
+P2-02 schema with default `false`, so no contract changes.
+
 No runtime role gets `UPDATE`/`DELETE` on ledger or audit tables (append-only, PROPOSED).
 
 ## 8. Approval lifecycle and execution semantics
