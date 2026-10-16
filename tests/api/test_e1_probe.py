@@ -8,6 +8,7 @@ ledger here is a fake; a guard fixture fails any test that would build the
 real SDK client.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,8 @@ from services.contracts import (
 )
 
 NOW = datetime(2026, 10, 16, 12, 0, tzinfo=UTC)
+# The real coroutine, kept before any test replaces `probe.run_probe`.
+REAL_RUN_PROBE = probe.run_probe
 
 # Fake values: none of them may ever appear in probe output.
 FAKE_API_KEY = "ak_fake_value_that_must_not_leak"
@@ -328,15 +331,41 @@ def _ledger_row(**overrides: object) -> dict[str, object]:
     return row
 
 
+ATTEMPT_ROW = {
+    "id": 11,
+    "credential_id": "toolserver_bearer_memory",
+    "mcp_endpoint": "memory-mcp",
+    "tool_name": "knowledge_search_team",
+    "outcome": "accepted",
+    "jti": "jti-abc",
+    "request_id": "r1",
+    "workspace_id": "ws-hidden",
+    "requester_member_id": "m-maya",
+    "created_at": NOW,
+}
+
+
 class _RowLookup:
     """Fake toolserver ledger returning fixed rows (offline, no Neon)."""
 
     def __init__(self, row: dict[str, object] | None) -> None:
         self.row = row
         self.closed = False
+        self.calls: list[tuple[str, object]] = []
 
     def by_jti(self, jti: str) -> dict[str, object] | None:
+        self.calls.append(("by_jti", jti))
         return dict(self.row) if self.row is not None and self.row["jti"] == jti else None
+
+    def by_request_id(self, request_id: str) -> list[dict[str, object]]:
+        self.calls.append(("by_request_id", request_id))
+        if self.row is not None and self.row["request_id"] == request_id:
+            return [dict(self.row)]
+        return []
+
+    def attempts(self, jti: str | None, request_id: str) -> list[dict[str, object]]:
+        self.calls.append(("attempts", (jti, request_id)))
+        return [dict(ATTEMPT_ROW)]
 
     def close(self) -> None:
         self.closed = True
@@ -408,6 +437,34 @@ def test_correlate_ledger_missing_row_is_not_correlated__offline_fake_ledger() -
     assert report["correlated"] is False
     assert report["row"] is None
     assert report["mismatches"]
+    assert report["lookup"] == "no row for jti; by request_id: 0 row(s)"
+
+
+def test_correlate_ledger_falls_back_to_request_id__offline_fake_ledger() -> None:
+    """I4: no invocation/jti from the gateway → the ledger is still searched by request_id."""
+    from dataclasses import replace
+
+    lookup = _RowLookup(_ledger_row())
+    run = replace(RUN, jti=None, ledger_entry_id=None)
+    report = probe.correlate_ledger(FAKE_DSN, run, lookup_factory=lambda dsn: lookup)
+    assert ("by_request_id", "r1") in lookup.calls
+    assert report["lookup"] == "no jti returned; by request_id: 1 row(s)"
+    assert report["rows_by_request_id"][0]["jti"] == "jti-abc"
+    assert report["row"]["id"] == 7
+    # A row exists for the run, but without the gateway's jti it never correlates.
+    assert report["correlated"] is False
+    assert "row.jti='jti-abc' vs jti=None" in report["mismatches"]
+
+
+def test_correlate_ledger_reports_attempts_safely__offline_fake_ledger() -> None:
+    lookup = _RowLookup(_ledger_row())
+    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: lookup)
+    assert ("attempts", ("jti-abc", "r1")) in lookup.calls
+    (attempt,) = report["attempts"]
+    assert attempt["credential_id"] == "toolserver_bearer_memory"
+    assert attempt["outcome"] == "accepted"
+    assert "workspace_id" not in attempt
+    assert "requester_member_id" not in attempt
 
 
 def test_pass_candidate_needs_executed_and_correlated() -> None:
@@ -525,6 +582,16 @@ class _CtxLedgerLookup:
             return self._row()
         return None
 
+    def by_request_id(self, request_id: str) -> list[dict[str, object]]:
+        self.calls.append(("by_request_id", request_id))
+        if self.signer.fields and self.signer.fields[-1]["request_id"] == request_id:
+            return [self._row()]
+        return []
+
+    def attempts(self, jti: str | None, request_id: str) -> list[dict[str, object]]:
+        self.calls.append(("attempts", (jti, request_id)))
+        return [dict(ATTEMPT_ROW, jti=jti, request_id=request_id)]
+
     def close(self) -> None:
         self.closed = True
 
@@ -547,8 +614,6 @@ def _run_probe_offline(
     ledger_dsn: str | None = FAKE_DSN,
 ) -> tuple[int, str, _CtxLedgerLookup, list]:
     """`probe.run_probe` over the real gateway with a fake SDK and fake ledger."""
-    import asyncio
-
     from services.authorization.armoriq_gateway import ArmorIQGateway
 
     settings = _probe_settings()
@@ -558,7 +623,7 @@ def _run_probe_offline(
     gateway = ArmorIQGateway(settings, client_factory=lambda member_id: client, ctx_signer=signer)
     lookup = _CtxLedgerLookup(signer, **(ledger_overrides or {}))
     code, record = asyncio.run(
-        probe.run_probe(
+        REAL_RUN_PROBE(
             settings,
             ledger_dsn=ledger_dsn,
             gateway=gateway,
@@ -578,6 +643,83 @@ def test_run_probe_executed_and_correlated__offline_fake_sdk_and_ledger() -> Non
     assert "d" * 64 not in record
     assert "private snippet text" not in record
     _assert_no_fake_values(record)
+
+
+def _main_with_offline_probe(
+    monkeypatch: pytest.MonkeyPatch, **run_kwargs: object
+) -> tuple[int, dict[str, object]]:
+    """Run `probe.main([])` with fake settings and the offline `run_probe`."""
+    for name, value in (
+        ("ARMORIQ_API_KEY", FAKE_API_KEY),
+        ("PERSONA_MAYA_EMAIL", FAKE_EMAIL),
+        ("CTX_SECRET", FAKE_CTX_SECRET),
+    ):
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(probe, "load_settings", _probe_settings, raising=False)
+    monkeypatch.setattr(probe, "load_ledger_dsn", lambda: FAKE_DSN, raising=False)
+    seen: dict[str, object] = {}
+
+    async def offline_run_probe(*args: object, **kwargs: object) -> tuple[int, str]:
+        code, record, lookup, calls = await asyncio.to_thread(_run_probe_offline, **run_kwargs)
+        seen.update(record=record, lookup=lookup, calls=calls)
+        return code, record
+
+    monkeypatch.setattr(probe, "run_probe", offline_run_probe)
+    return probe.main([]), seen
+
+
+def test_main_shows_gateway_log_lines_on_stderr__offline_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I4: the gateway's INFO line with jti and ledger reference reaches stderr."""
+    import logging
+
+    root_handlers = list(logging.getLogger().handlers)
+    gateway_logger = logging.getLogger(probe.GATEWAY_LOGGER)
+    gateway_handlers = list(gateway_logger.handlers)
+    _, seen = _main_with_offline_probe(monkeypatch)
+    err = capsys.readouterr().err
+    assert "[gateway INFO] gateway step ok request_id=e1-" in err
+    assert "ledger=7" in err
+    jti = seen["lookup"].calls[0][1]  # type: ignore[attr-defined]
+    assert f"jti={jti}" in err
+    _assert_no_fake_values(err)
+    # Handler scoped to the gateway logger and removed afterwards.
+    assert logging.getLogger().handlers == root_handlers
+    assert gateway_logger.handlers == gateway_handlers
+    for name in ("armoriq_sdk", "httpx"):
+        assert not logging.getLogger(name).handlers
+
+
+def test_main_keeps_jti_when_invocation_fails__offline_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I4: a proxy error leaves no invocation record; stderr still carries jti
+    and the exception class, and the ledger is searched by request_id."""
+    from armoriq_sdk import exceptions as sdk_exceptions
+
+    _, seen = _main_with_offline_probe(
+        monkeypatch,
+        raises=sdk_exceptions.MCPInvocationException(
+            "proxy returned 502", mcp="memory-mcp", action="knowledge_search_team"
+        ),
+    )
+    captured = capsys.readouterr()
+    assert "[gateway WARNING] gateway invoke sdk error request_id=e1-" in captured.err
+    assert "jti=" in captured.err
+    assert "err=MCPInvocationException" in captured.err
+    lookup_calls = seen["lookup"].calls  # type: ignore[attr-defined]
+    assert lookup_calls[0][0] == "by_request_id"
+    assert "no jti returned; by request_id: 1 row(s)" in captured.out
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def test_build_maya_request_ids_are_unique_per_run() -> None:
+    settings = _probe_settings()
+    first, _ = probe.build_maya_request(settings)
+    second, _ = probe.build_maya_request(settings)
+    assert first.request_id != second.request_id
+    assert first.request_id.startswith("e1-")
 
 
 def test_run_probe_ledger_mismatch_is_not_pass__offline_fake_sdk_and_ledger() -> None:

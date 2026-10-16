@@ -15,6 +15,10 @@ deployed tool server's). Optional: ARMORIQ_AGENT_ID (default `proxylead`).
 DATABASE_URL_TOOLSERVER (ledger correlation) is read from the environment or
 the same `.env` files, then `services/toolserver/.env`.
 
+Logs: only the gateway's own INFO/WARNING lines go to stderr (request_id,
+jti, ledger reference, exception class), so a failed call keeps its jti.
+SDK, httpx, and root logging are left alone.
+
 Exit codes: 0 the probe ran to completion (any observed outcome); 1 an
 unexpected error stopped it; 2 prerequisites missing (settings unreadable or
 required values unset: names only, never values).
@@ -23,8 +27,11 @@ required values unset: names only, never values).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import sys
-from collections.abc import Callable, Mapping
+import uuid
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +74,32 @@ LEDGER_FIELDS = (
     "execution_status",
     "created_at",
 )
+# `tool_call_attempts` columns (0008): `credential_id` is the NAME of the
+# bearer setting that passed (D-06 evidence), never a token value.
+ATTEMPT_FIELDS = (
+    "id",
+    "credential_id",
+    "mcp_endpoint",
+    "tool_name",
+    "outcome",
+    "jti",
+    "request_id",
+    "created_at",
+)
+_LEDGER_BY_REQUEST_SQL = (
+    "SELECT id, jti, request_id, trace_id, plan_id, step_index, tool_name, "
+    "requester_member_id, validation_outcome, execution_status, created_at "
+    "FROM public.tool_execution_ledger WHERE request_id = %s ORDER BY id LIMIT 5"
+)
+_ATTEMPTS_SQL = (
+    "SELECT id, credential_id, mcp_endpoint, tool_name, outcome, jti, request_id, "
+    "created_at FROM public.tool_call_attempts "
+    "WHERE jti = %s OR request_id = %s ORDER BY id LIMIT 5"
+)
+
+# Only the gateway's own logger is shown (request_id, jti, ledger reference,
+# exception class): never the root, SDK, or httpx loggers.
+GATEWAY_LOGGER = "services.authorization.armoriq_gateway"
 
 
 def load_settings() -> Any:
@@ -122,6 +155,29 @@ def load_ledger_dsn() -> str | None:
     return secret_text(value).strip() or None
 
 
+@contextlib.contextmanager
+def gateway_logs_to_stderr() -> Iterator[None]:
+    """Show the gateway's INFO+ lines on stderr for one run.
+
+    Only `services.authorization.armoriq_gateway` gets the handler (its lines
+    carry request_id, jti, the ledger reference, and exception class names:
+    no secrets), so "gateway step ok ... jti=... ledger=..." and the
+    no-invocation warnings keep their jti even when the call fails.
+    """
+    gateway_logger = logging.getLogger(GATEWAY_LOGGER)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("[gateway %(levelname)s] %(message)s"))
+    previous_level = gateway_logger.level
+    gateway_logger.addHandler(handler)
+    gateway_logger.setLevel(logging.INFO)
+    try:
+        yield
+    finally:
+        gateway_logger.removeHandler(handler)
+        gateway_logger.setLevel(previous_level)
+
+
 def summarize_value(value: Any, depth: int = 0) -> Any:
     """Redacted shape of one result value: type names and sizes, no content."""
     if isinstance(value, dict):
@@ -166,7 +222,11 @@ def describe_outcome(outcome: Any) -> dict[str, Any]:
         "jti": None,
     }
     if invocation is None:
-        described["assessment"] = "no invocation record; tool server reach unknown"
+        described["assessment"] = (
+            "no invocation record; tool server reach unknown (the gateway lines on "
+            "stderr carry the jti and exception class; the ledger is searched by "
+            "request_id)"
+        )
         return described
     described["tool_server_reached"] = invocation.tool_server_reached
     described["invocation_status"] = invocation.status.value
@@ -259,12 +319,33 @@ class NeonLedgerLookup:
     def by_jti(self, jti: str) -> dict[str, Any] | None:
         return self._ledger.get_by_jti(jti)
 
+    def _rows(self, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+        from services.toolserver import db
+
+        with db.transaction(self._pool) as conn, conn.cursor() as cur:
+            cur.execute(query, params)
+            names = [column.name for column in cur.description or []]
+            return [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
+
+    def by_request_id(self, request_id: str) -> list[dict[str, Any]]:
+        return self._rows(_LEDGER_BY_REQUEST_SQL, (request_id,))
+
+    def attempts(self, jti: str | None, request_id: str) -> list[dict[str, Any]]:
+        return self._rows(_ATTEMPTS_SQL, (jti, request_id))
+
     def close(self) -> None:
         self._pool.close()
 
 
 def _empty_ledger_report(lookup: str) -> dict[str, Any]:
-    return {"correlated": False, "lookup": lookup, "row": None, "mismatches": []}
+    return {
+        "correlated": False,
+        "lookup": lookup,
+        "row": None,
+        "mismatches": [],
+        "rows_by_request_id": None,
+        "attempts": None,
+    }
 
 
 def correlate_ledger(
@@ -273,36 +354,57 @@ def correlate_ledger(
     *,
     lookup_factory: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
-    """Find this run's ledger row by jti and check it against the run.
+    """Find this run's ledger row and check it against the run.
 
-    `correlated` is True only when the row matches every identifier of this
-    run (`ledger_mismatches` is empty). Output holds the allow-listed
-    `LEDGER_FIELDS` only: never arguments, hashes, or the DSN.
+    Lookup by jti; when the gateway returned no jti (no invocation record)
+    or no row has it, fall back to `request_id` (unique per run). Attempt
+    rows (`credential_id`, verification outcome) are fetched by jti or
+    request_id. `correlated` is True only when one row matches every
+    identifier of this run (`ledger_mismatches` is empty). Output holds the
+    allow-listed `LEDGER_FIELDS` / `ATTEMPT_FIELDS` only: never arguments,
+    hashes, or the DSN.
     """
     if not dsn:
         return _empty_ledger_report("unavailable (no DATABASE_URL_TOOLSERVER)")
-    if not run.jti:
-        return _empty_ledger_report("no jti to correlate")
+    report = _empty_ledger_report("not started")
     factory = lookup_factory or NeonLedgerLookup
+    row: Mapping[str, Any] | None = None
     try:
         lookup = factory(dsn)
-        try:
-            row = lookup.by_jti(run.jti)
-        finally:
-            lookup.close()
     except Exception as exc:
         return _empty_ledger_report(f"lookup error ({type(exc).__name__})")
-    if row is None:
-        report = _empty_ledger_report("no row for jti")
-        report["mismatches"] = ["no ledger row for this run's jti"]
-        return report
-    mismatches = ledger_mismatches(row, run)
-    return {
-        "correlated": not mismatches,
-        "lookup": "by jti",
-        "row": safe_fields(row, LEDGER_FIELDS),
-        "mismatches": mismatches,
-    }
+    try:
+        steps: list[str] = []
+        try:
+            if run.jti:
+                row = lookup.by_jti(run.jti)
+                steps.append("by jti" if row is not None else "no row for jti")
+            else:
+                steps.append("no jti returned")
+            if row is None:
+                rows = lookup.by_request_id(run.request_id)
+                report["rows_by_request_id"] = [safe_fields(item, LEDGER_FIELDS) for item in rows]
+                steps.append(f"by request_id: {len(rows)} row(s)")
+                if len(rows) == 1:
+                    row = rows[0]
+            report["lookup"] = "; ".join(steps)
+        except Exception as exc:
+            report["lookup"] = f"lookup error ({type(exc).__name__})"
+        try:
+            attempts = lookup.attempts(run.jti, run.request_id)
+            report["attempts"] = [safe_fields(item, ATTEMPT_FIELDS) for item in attempts]
+        except Exception as exc:
+            report["attempts"] = f"lookup error ({type(exc).__name__})"
+    finally:
+        with contextlib.suppress(Exception):
+            lookup.close()
+    if row is not None:
+        report["row"] = safe_fields(row, LEDGER_FIELDS)
+        report["mismatches"] = ledger_mismatches(row, run)
+        report["correlated"] = not report["mismatches"]
+    elif not str(report["lookup"]).startswith("lookup error"):
+        report["mismatches"] = ["no single ledger row for this run"]
+    return report
 
 
 def pass_candidate(described: Mapping[str, Any], ledger: Mapping[str, Any]) -> bool:
@@ -346,6 +448,13 @@ def build_record(
         f"(lookup: {ledger['lookup']})",
         f"- Ledger row (safe subset): {ledger['row']}",
         f"- Ledger mismatches: {ledger['mismatches'] or 'none'}",
+        *(
+            [f"- Ledger rows by request_id (fallback): {ledger['rows_by_request_id']}"]
+            if ledger.get("rows_by_request_id") is not None
+            else []
+        ),
+        "- Attempt rows (tool_call_attempts; credential_id answers D-06): "
+        f"{ledger.get('attempts')}",
         "- PASS candidate (EXECUTED and correlated): "
         f"{'yes' if pass_candidate(described, ledger) else 'no'}",
         "- Credential path observed: see deployed tool-server request log "
@@ -390,7 +499,8 @@ def build_maya_request(settings: Any) -> tuple[Any, Any]:
         slack_user_id=record.slack_user_id,
     )
     now = datetime.now(UTC)
-    request_id = f"e1-{now.strftime('%Y%m%dT%H%M%S')}"
+    # Unique per run: the ledger fallback correlates by request_id.
+    request_id = f"e1-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     ctx = RequestContext(
         request_id=request_id,
         trace_id=f"{request_id}-trace",
@@ -508,7 +618,8 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
     try:
-        code, record = asyncio.run(run_probe(settings, ledger_dsn=ledger_dsn))
+        with gateway_logs_to_stderr():
+            code, record = asyncio.run(run_probe(settings, ledger_dsn=ledger_dsn))
     except Exception as exc:
         print(
             f"probe_v2_e1_allowed: probe error ({type(exc).__name__})",
