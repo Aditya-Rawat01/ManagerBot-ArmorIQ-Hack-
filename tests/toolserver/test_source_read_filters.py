@@ -21,10 +21,18 @@ from types import SimpleNamespace
 from typing import Any
 
 import anyio
+import pytest
 
-from services.contracts import DataTier, KnowledgeGetSourceTeamArgs, ReadSourceTeamArgs
+from services.contracts import (
+    DataTier,
+    KnowledgeGetSourceTeamArgs,
+    ReadSourceTeamArgs,
+    ToolName,
+)
 from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.toolserver import tools_memory
+from services.toolserver.schemas import InvalidArguments
+from services.toolserver.tools_memory import PRODUCT_TOOLS
 
 from .conftest import OneShotPool
 from .test_tool_dispatch import LIVE_DSN, NEEDS_DB
@@ -335,3 +343,103 @@ def test_sam_cannot_read_a_restricted_source_through_the_confidential_tool() -> 
     assert own["result"]["isError"] is False
     body = json.loads(own["result"]["content"][0]["text"])
     assert (body["source"]["source_id"], body["tier"]) == ("conf-runway-review", "confidential")
+
+
+# --- M2: read_source view and tier come from the handler's tier literal --------
+
+VIEWS = {
+    DataTier.TEAM: "approved_company_data_team",
+    DataTier.CONFIDENTIAL: "approved_company_data_confidential",
+    DataTier.RESTRICTED: "approved_company_data_restricted",
+}
+READ_TOOLS = {
+    DataTier.TEAM: ToolName.READ_SOURCE_TEAM,
+    DataTier.CONFIDENTIAL: ToolName.READ_SOURCE_CONFIDENTIAL,
+    DataTier.RESTRICTED: ToolName.READ_SOURCE_RESTRICTED,
+}
+READ_HANDLERS = {
+    DataTier.TEAM: tools_memory.handle_read_source_team,
+    DataTier.CONFIDENTIAL: tools_memory.handle_read_source_confidential,
+    DataTier.RESTRICTED: tools_memory.handle_read_source_restricted,
+}
+
+
+def test_registered_read_tools_reject_a_foreign_view() -> None:
+    """Each tool's dispatch-time policy is bound to its own tier: any other
+    tier's view is `invalid_arguments` even if a schema ever admitted it."""
+    for tier, tool in READ_TOOLS.items():
+        check = PRODUCT_TOOLS[tool].check_arguments
+        assert check is not None
+        check(SimpleNamespace(view=VIEWS[tier], include_superseded=False))
+        for other_tier, other_view in VIEWS.items():
+            if other_tier is tier:
+                continue
+            with pytest.raises(InvalidArguments):
+                check(SimpleNamespace(view=other_view, include_superseded=False))
+
+
+def test_read_handlers_refuse_a_foreign_view_before_any_query() -> None:
+    """Direct handler call with schema-bypassing arguments: refused before the
+    pool is touched (`object()` has no `connection`)."""
+    for tier, handler in READ_HANDLERS.items():
+        foreign = next(view for other, view in VIEWS.items() if other is not tier)
+        args = SimpleNamespace(view=foreign, include_superseded=False, author=None, limit=5)
+        verified = SimpleNamespace(ctx=SimpleNamespace(workspace_id=WS))
+        with pytest.raises(InvalidArguments):
+            anyio.run(handler, verified, args, SimpleNamespace(pool=object()))
+
+
+class _CapturingCursor:
+    def __init__(self, log: list[tuple[str, tuple[Any, ...]]]) -> None:
+        self._log = log
+        self.description: list[Any] = []
+
+    def __enter__(self) -> "_CapturingCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, query: Any, params: tuple[Any, ...]) -> None:
+        self._log.append((query.as_string(None), tuple(params)))
+
+    def fetchone(self) -> tuple[int]:
+        return (0,)
+
+    def fetchall(self) -> list[Any]:
+        return []
+
+
+class _CapturingPool:
+    """Records every statement `_read_view_rows` sends (offline)."""
+
+    def __init__(self) -> None:
+        self.log: list[tuple[str, tuple[Any, ...]]] = []
+
+    @contextmanager
+    def connection(self) -> Iterator[Any]:
+        conn = SimpleNamespace(
+            transaction=lambda: _null_context(),
+            execute=lambda *args, **kwargs: None,
+            cursor=lambda: _CapturingCursor(self.log),
+        )
+        yield conn
+
+
+@contextmanager
+def _null_context() -> Iterator[None]:
+    yield
+
+
+def test_read_sql_uses_the_tier_view_and_binds_the_tier() -> None:
+    for tier in DataTier:
+        pool = _CapturingPool()
+        tools_memory._read_view_rows(pool, tier, "ws-x", "s_m", 7)
+        assert len(pool.log) == 2, "count + rows"
+        for statement, params in pool.log:
+            text = _normalized(statement)
+            assert f'FROM "public"."{VIEWS[tier]}" WHERE' in text
+            assert "workspace_id = %s AND tier = %s AND status = 'active'" in text
+            assert params[:2] == ("ws-x", tier.value)
+            assert params[2] == tools_memory._like_literal("s_m")
+        assert pool.log[1][1][-1] == 7

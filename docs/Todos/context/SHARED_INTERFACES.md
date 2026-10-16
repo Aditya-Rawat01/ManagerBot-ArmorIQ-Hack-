@@ -261,7 +261,12 @@ fragments around the matched terms, else the leading text. `decisions`,
 seed rows, NULL on runtime rows. Eval case labels are never stored.
 
 Approved-view rows (`read_source_*`, P2-08, `services/toolserver/tools_memory.py`):
-current rows only (`status = 'active'`). `SourceRow` has no structured status
+one fixed query per tier. The view and the tier filter come from the handler's
+tier literal (`_VIEW_BY_TIER[tier]` plus `AND tier = %s`), never from the
+arguments; a `view` naming another tier is `invalid_arguments`. The workspace
+comes from the verified `_ctx`; `author` is a literal (LIKE-escaped)
+substring match; rows are capped at `limit` and snippets at 2000 characters.
+Current rows only (`status = 'active'`). `SourceRow` has no structured status
 or supersession field, so a superseded row would reach the responder as
 current evidence (D-09 rule 3). Until an ICR adds such a field,
 `include_superseded=true` is rejected with `invalid_arguments` (fail closed, at
