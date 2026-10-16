@@ -144,14 +144,10 @@ def search(
         query_vector = embed([query])[0]
         register_vector(conn)
         with conn.cursor() as cur:
-            cur.execute(
-                _SEARCH_SQL, (query, workspace_id, tier.value, query, FTS_CANDIDATES)
-            )
+            cur.execute(_SEARCH_SQL, (query, workspace_id, tier.value, query, FTS_CANDIDATES))
             names = [d.name for d in cur.description or []]
             fts_rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
-            cur.execute(
-                _VECTOR_SQL, (workspace_id, tier.value, query_vector, VECTOR_CANDIDATES)
-            )
+            cur.execute(_VECTOR_SQL, (workspace_id, tier.value, query_vector, VECTOR_CANDIDATES))
             names = [d.name for d in cur.description or []]
             vec_rows = [dict(zip(names, row, strict=True)) for row in cur.fetchall()]
     except Exception as exc:
@@ -190,6 +186,10 @@ def search_with_pool(
     """Pool convenience wrapper (P2-06 handlers): one read transaction per call."""
     with db.transaction(pool) as conn:
         return search(
-            conn, tier=tier, workspace_id=workspace_id, query=query, limit=limit,
+            conn,
+            tier=tier,
+            workspace_id=workspace_id,
+            query=query,
+            limit=limit,
             min_score=min_score,
         )

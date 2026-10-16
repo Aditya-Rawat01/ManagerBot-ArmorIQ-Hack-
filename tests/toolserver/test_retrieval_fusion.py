@@ -17,7 +17,8 @@ _HOST = urlparse(_RAW_DSN).hostname or "" if _RAW_DSN else ""
 _WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
 LIVE_DSN = (
     _RAW_DSN
-    if _RAW_DSN and ("localhost" in _HOST or "127.0.0.1" in _HOST or _WRITE_TESTS)
+    if _RAW_DSN
+    and ("localhost" in _HOST or "127.0.0.1" in _HOST or _WRITE_TESTS)
     and "neon" not in _HOST
     else ""
 )
