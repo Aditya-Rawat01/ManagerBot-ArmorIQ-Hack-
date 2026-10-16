@@ -169,7 +169,10 @@ def match(db: AuditDatabase, workspace_id: str, message: str) -> TopicMatch | No
     Callers must not treat None as a denial; it only means "no elevated scope
     proposed". Stored rules that fail :func:`validate_topic` (for example a
     row written before that check existed) are skipped, never matched.
+    ``db=None`` is a wiring error and raises (no silent team-only fallback).
     """
+    if db is None:
+        raise TypeError("topic_map.match needs the backend database")
     message_tokens = set(topic_tokens(message))
     if not message_tokens:
         return None
