@@ -119,6 +119,13 @@ def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
     role, independent of ArmorIQ (R-26): manager → restricted, senior →
     confidential, junior → team. Tier-less tools (P2-09/P2-10) authorize in
     their own handlers. Unknown roles fail closed.
+
+    Follow-up (review M3, not implemented): the backend-signed `app_role` is
+    trusted for the `_ctx` lifetime (≤ 900 s). Cross-checking it against
+    `members.app_role` / `members.active` for `requester_member_id` would
+    stop a demoted or deactivated member's still-valid `_ctx` from clearing a
+    ceiling; it needs a toolserver `SELECT` grant on `members` (a migration)
+    and one query per call.
     """
     tier = tool_spec(tool).tier
     if tier is None:

@@ -305,7 +305,13 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ToolName registered on the server outside PRODUCT_TOOLS (e.g. a
-    future `server.tool(...)` line) must never run unguarded."""
+    future `server.tool(...)` line) must never run unguarded.
+
+    NOTE for P2-09: `knowledge_save_team_note` stands in for a fake
+    UNREGISTERED tool here only because it has no guarded handler yet. When
+    P2-09 adds it to PRODUCT_TOOLS, switch this test to a ToolName that is
+    still unimplemented (e.g. a workspace tool before P2-10), or it stops
+    testing the unregistered path."""
     ran: list[str] = []
     real_build = main.build_server
 
