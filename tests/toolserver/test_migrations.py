@@ -85,6 +85,37 @@ def test_backend_has_no_ledger_or_egress_access() -> None:
     assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
 
 
+def test_egress_sink_correlation_columns() -> None:
+    """0012 (P2-10 §9.1): sink rows carry the verified jti and requester; one
+    row per jti; the sink stays append-only and invisible to the backend."""
+    path = MIGRATIONS_DIR / "0012_egress_sink_correlation.sql"
+    text = path.read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS jti TEXT" in text
+    assert "ADD COLUMN IF NOT EXISTS requester_member_id TEXT" in text
+    assert (
+        "CREATE UNIQUE INDEX IF NOT EXISTS egress_sink_jti_uidx\n"
+        "    ON public.egress_sink (jti) WHERE jti IS NOT NULL" in text
+    )
+    assert "GRANT SELECT, INSERT ON public.egress_sink TO proxylead_toolserver" in text
+    assert "REVOKE UPDATE, DELETE ON public.egress_sink FROM proxylead_toolserver" in text
+    assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
+
+
+def test_workspace_tables_least_privilege() -> None:
+    """0012: the toolserver never rewrites follow-up tasks or sink rows, and
+    the grant check covers both tables."""
+    text = _sql_text()
+    for table in ("tasks", "egress_sink"):
+        assert f"REVOKE UPDATE, DELETE ON public.{table} FROM proxylead_toolserver" in text
+        assert f"GRANT SELECT, INSERT ON public.{table} TO proxylead_toolserver" in text
+    last_tasks_grant = text.rindex("ON public.tasks TO proxylead_toolserver")
+    assert text[last_tasks_grant - 30 : last_tasks_grant].endswith("GRANT SELECT, INSERT ")
+    assert text.rindex("REVOKE UPDATE, DELETE ON public.tasks FROM proxylead_toolserver") > (
+        text.rindex("GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO proxylead_toolserver")
+    )
+    assert set(verify_script.WORKSPACE_TABLE_INSERTS) == {"tasks", "egress_sink"}
+
+
 def test_ledger_followup_constraints() -> None:
     """0008: no explicit ledger ids; new rows carry a hex digest and no free text."""
     text = _sql_text()
