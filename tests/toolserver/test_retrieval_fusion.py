@@ -14,10 +14,10 @@ from services.knowledge.retrieval import RRF_K, fuse_candidates
 
 _RAW_DSN = os.environ.get("DATABASE_URL_TOOLSERVER", "")
 _HOST = urlparse(_RAW_DSN).hostname or "" if _RAW_DSN else ""
+_WRITE_TESTS = os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1"
 LIVE_DSN = (
     _RAW_DSN
-    if _RAW_DSN
-    and ("localhost" in _HOST or "127.0.0.1" in _HOST or os.environ.get("PROXYLEAD_DB_WRITE_TESTS") == "1")
+    if _RAW_DSN and ("localhost" in _HOST or "127.0.0.1" in _HOST or _WRITE_TESTS)
     and "neon" not in _HOST
     else ""
 )
@@ -93,7 +93,10 @@ def test_tier_isolation_on_fused_path() -> None:
     assert all(hit.source.tier is DataTier.TEAM for hit in team)
     # The vector leg always returns same-tier candidates (no MIN_SCORE until
     # E17): isolation means no FOREIGN-tier rows, not empty results.
-    for query, tier in (("runway review", DataTier.TEAM), ("workforce planning", DataTier.CONFIDENTIAL)):
+    for query, tier in (
+        ("runway review", DataTier.TEAM),
+        ("workforce planning", DataTier.CONFIDENTIAL),
+    ):
         for hit in _search(tier, query):
             assert hit.source.tier is tier
     assert "conf-runway-review" not in [
