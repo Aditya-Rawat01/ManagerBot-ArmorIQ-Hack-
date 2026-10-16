@@ -23,6 +23,7 @@ and the parsed remainder travels as ``store_this_content`` metadata for
 P3-04's future use (proposed handoff, no ``handle`` signature change).
 """
 
+import asyncio
 import logging
 import re
 import uuid
@@ -365,10 +366,13 @@ async def dispatch(
 ) -> str:
     """Forward to the orchestrator, then mark the event processed.
 
-    A handle failure propagates (no false `processed` row); P3-04 owns retry.
+    Runs on the API event loop (scheduled from Bolt's worker thread by
+    :mod:`services.slack_socket.app`); the blocking ``slack_events`` UPDATE
+    runs in a worker thread so it never stalls the loop. A handle failure
+    propagates (no false `processed` row); P3-04 owns retry.
     """
     request_id = await handle(incoming.ctx, incoming.message)
-    mark_processed(db, incoming.event_id)
+    await asyncio.to_thread(mark_processed, db, incoming.event_id)
     return request_id
 
 

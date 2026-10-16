@@ -8,6 +8,7 @@ A factory (instead of a module-level `app`) keeps imports side-effect free:
 tests build apps with explicit settings and never read a developer's `.env`.
 """
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -56,6 +57,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             workspace_id=None,  # resolved by P3-04 wiring; adapter refuses without it
             db=db,
             handle=None,  # P3-04 provides the orchestrator handle when merged
+            loop=asyncio.get_running_loop(),  # Bolt threads dispatch onto this loop
         )
         yield
     finally:

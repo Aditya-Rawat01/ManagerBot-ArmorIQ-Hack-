@@ -464,7 +464,19 @@ class _RecordingHandle:
         return f"req-{len(self.calls)}"
 
 
-def _wired_bolt_app(handle, db=None, **overrides):  # type: ignore[no-untyped-def]
+@pytest.fixture
+def api_loop():  # type: ignore[no-untyped-def]
+    """Stand-in for uvicorn's loop: runs forever on its own thread, like the API."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, name="fake-api-loop", daemon=True)
+    thread.start()
+    yield loop
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
+
+
+def _wired_bolt_app(handle, loop, db=None, **overrides):  # type: ignore[no-untyped-def]
     from tests.fakes.slack import offline_bolt_app
 
     bolt = offline_bolt_app()
@@ -476,6 +488,7 @@ def _wired_bolt_app(handle, db=None, **overrides):  # type: ignore[no-untyped-de
         "workspace_id": "ws-1",
         "db": db if db is not None else FakeDb(one=[(1,)]),
         "handle": handle,
+        "loop": loop,
         "app": bolt,
     }
     args.update(overrides)
@@ -489,10 +502,12 @@ def _bolt_dispatch(bolt, body):  # type: ignore[no-untyped-def]
     return bolt.dispatch(BoltRequest(body=body, mode="socket_mode"))
 
 
-def test__offline_fake_slack_bolt_dispatches_mention_and_dm_to_handle() -> None:
+def test__offline_fake_slack_bolt_dispatches_mention_and_dm_to_handle(
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
     """B2: both registered listeners run end-to-end on real-shaped bodies."""
     handle = _RecordingHandle(expected=2)
-    bolt = _wired_bolt_app(handle)
+    bolt = _wired_bolt_app(handle, api_loop)
     for body in (mention_body(event_id="Ev-m"), dm_body(event_id="Ev-d")):
         response = _bolt_dispatch(bolt, body)
         assert response is not None and response.status == 200
@@ -503,10 +518,12 @@ def test__offline_fake_slack_bolt_dispatches_mention_and_dm_to_handle() -> None:
     ]
 
 
-def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs() -> None:
+def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs(
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
     """A DM alone (no mention) reaches `handle` once; channel messages do not."""
     handle = _RecordingHandle(expected=1)
-    bolt = _wired_bolt_app(handle)
+    bolt = _wired_bolt_app(handle, api_loop)
     channel_message = dm_body(event_id="Ev-chan", channel="C1")
     channel_message["event"]["channel_type"] = "channel"
     _bolt_dispatch(bolt, channel_message)
@@ -514,6 +531,94 @@ def test__offline_fake_slack_bolt_dm_listener_accepts_its_kwargs() -> None:
     assert handle.done.wait(5)
     time.sleep(0.2)  # give a wrongly-routed channel message time to show up
     assert handle.calls == [("slack_dm", "Ev-dm-only", "hello bot")]
+
+
+class _BackgroundWorkHandle:
+    """P3-04-shaped handle: returns at once, the real work runs as a task."""
+
+    def __init__(self) -> None:
+        self.finished = threading.Event()
+        self.cancelled = threading.Event()
+        self.loops: list[asyncio.AbstractEventLoop] = []
+        self.tasks: set[asyncio.Task[None]] = set()
+
+    async def __call__(self, ctx, message):  # type: ignore[no-untyped-def]
+        loop = asyncio.get_running_loop()
+        self.loops.append(loop)
+
+        async def _work() -> None:
+            try:
+                await asyncio.sleep(0.1)
+                self.finished.set()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                raise
+
+        task = loop.create_task(_work())
+        self.tasks.add(task)  # keep a reference, as a real orchestrator would
+        return "req-background"
+
+
+def test__offline_fake_slack_handle_background_task_completes(
+    api_loop: asyncio.AbstractEventLoop,
+) -> None:
+    """I3: work scheduled by `handle` survives its return (no asyncio.run teardown)."""
+    handle = _BackgroundWorkHandle()
+    db = FakeDb(one=[(1,)])
+    bolt = _wired_bolt_app(handle, api_loop, db=db)
+    _bolt_dispatch(bolt, mention_body(event_id="Ev-bg"))
+    assert handle.finished.wait(5), "background task never completed"
+    assert not handle.cancelled.is_set()
+    assert handle.loops == [api_loop]  # dispatched onto the API loop, not a throwaway one
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not any(
+        "processed" in sql for cursor in db.cursors for sql, _ in cursor.statements
+    ):
+        time.sleep(0.01)
+    assert any("processed" in sql for cursor in db.cursors for sql, _ in cursor.statements)
+
+
+def test__offline_fake_slack_dispatch_failure_logged_by_class_only(
+    api_loop: asyncio.AbstractEventLoop, caplog: pytest.LogCaptureFixture
+) -> None:
+    failed = threading.Event()
+
+    async def _boom(ctx, message):  # type: ignore[no-untyped-def]
+        failed.set()
+        raise RuntimeError("orchestrator exploded with user text atlas budget")
+
+    db = FakeDb(one=[(1,)])
+    bolt = _wired_bolt_app(_boom, api_loop, db=db)
+    with caplog.at_level(logging.WARNING, logger="services.slack_socket.app"):
+        _bolt_dispatch(bolt, mention_body(event_id="Ev-boom"))
+        assert failed.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and "slack dispatch failed" not in caplog.text:
+            time.sleep(0.01)
+    assert "slack dispatch failed event_id=Ev-boom" in caplog.text
+    assert "error=RuntimeError" in caplog.text
+    assert "atlas budget" not in caplog.text
+    assert not any("processed" in sql for cursor in db.cursors for sql, _ in cursor.statements)
+
+
+def test__offline_fake_slack_disabled_without_loop() -> None:
+    async def _handle(ctx, message):  # type: ignore[no-untyped-def]
+        return "req-x"
+
+    assert (
+        start_slack_socket(
+            bot_token="xoxb-fake",
+            app_token="xapp-fake",
+            members=_members(),
+            expected_team_id="T1",
+            allowed_channels={"C1"},
+            workspace_id="ws-1",
+            db=FakeDb(),
+            handle=_handle,
+            loop=None,
+        )
+        is None
+    )
 
 
 def test__offline_fake_slack_api_health_without_slack() -> None:
