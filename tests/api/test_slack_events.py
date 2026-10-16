@@ -255,6 +255,30 @@ def test__offline_fake_slack_invalid_envelope_rejected() -> None:
     assert result.reason_code == "invalid_envelope"
 
 
+def test__offline_fake_slack_unusable_event_is_audited_and_never_claimed() -> None:
+    """No text / no channel: audited `invalid_envelope`, and no `slack_events`
+    row is claimed (nothing is left dangling in `received`)."""
+    no_text = _mention_body(event_id="Ev-nt")
+    del no_text["event"]["text"]
+    dm_no_channel = _dm_body(event_id="Ev-nc")
+    del dm_no_channel["event"]["channel"]
+    cases = (
+        (on_app_mention, no_text, False, "Ev-nt"),
+        (on_direct_message, dm_no_channel, True, "Ev-nc"),
+    )
+    for listener, body, dm, event_id in cases:
+        db = FakeDb(one=[(1,)])
+        result = listener(body, lambda: None, **_deps(db=db, dm=dm))
+        assert isinstance(result, SlackRejection)
+        assert result.reason_code == "invalid_envelope"
+        statements = [(sql, params) for c in db.cursors for sql, params in c.statements]
+        assert not any("slack_events" in sql for sql, _ in statements)
+        [(_, params)] = statements
+        assert params[2] == "slack_event_rejected"  # type: ignore[index]
+        assert params[3]["reason"] == "invalid_envelope"  # type: ignore[index]
+        assert params[3]["slack_event_id"] == event_id  # type: ignore[index]
+
+
 def test__offline_fake_slack_workspace_resolution() -> None:
     assert resolve_workspace_id(FakeDb(rows=[("ws-1",)])) == "ws-1"
     assert resolve_workspace_id(FakeDb(rows=[])) is None

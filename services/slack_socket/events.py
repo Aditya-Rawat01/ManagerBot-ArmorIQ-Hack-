@@ -1,8 +1,10 @@
 """Slack event validation, deduplication, and dispatch (P3-05, PRD §4.2, Arch §4).
 
 Every incoming event flows through :func:`on_app_mention` / :func:`on_direct_message`,
-which acknowledge FIRST and then validate in task order: team → (mentions)
-channel allowlist → mapped user → dedupe → trusted ``RequestContext``. Bot and
+which acknowledge FIRST and then validate in task order: envelope (outer
+``event_id``) → bot-ignore → team → (mentions) channel allowlist → mapped
+user → workspace/database → text + trusted ``RequestContext`` → atomic
+dedupe claim (last, so a claimed row always reaches dispatch). Bot and
 unsupported events are ignored without any database write (loop safety).
 Rejected events get a metadata-only ``slack_event_rejected`` audit row via
 ``services.audit.store.record_slack_event_rejected`` (Slack event/team/channel
@@ -297,6 +299,34 @@ def process_event(
         )
         return SlackRejection(event_id=event_id, reason_code="db_unavailable")
 
+    # Everything that can still reject the event (text, Slack refs, the
+    # RequestContext validator) runs BEFORE the dedupe claim, so a claimed
+    # `slack_events` row always belongs to an event handed to dispatch: an
+    # unusable event is audited and never leaves a dangling `received` row.
+    raw_text = event.get("text")
+    try:
+        if not isinstance(raw_text, str):
+            raise TypeError("event text is not a string")
+        message = _strip_bot_mention(raw_text, bot_user_id)
+        ctx, request_id = _build_context(
+            event=event,
+            event_id=event_id,
+            entry_point=entry_point,
+            requester=requester,
+            workspace_id=workspace_id,
+            team_id=team_id or "",
+        )
+    except Exception:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="invalid_envelope",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
+    store_this_content = parse_store_this(message)
+
     try:
         first = _claim_dedupe(
             db, event_id=event_id, workspace_id=workspace_id, channel_id=channel_id
@@ -319,23 +349,6 @@ def process_event(
             channel_id=channel_id,
         )
         return SlackRejection(event_id=event_id, reason_code="duplicate")
-
-    raw_text = event.get("text")
-    if not isinstance(raw_text, str):
-        return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
-    message = _strip_bot_mention(raw_text, bot_user_id)
-    store_this_content = parse_store_this(message)
-    try:
-        ctx, request_id = _build_context(
-            event=event,
-            event_id=event_id,
-            entry_point=entry_point,
-            requester=requester,
-            workspace_id=workspace_id,
-            team_id=team_id or "",
-        )
-    except Exception:
-        return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
     trace_id = ctx.trace_id
     logger.info(
         "slack event accepted event_id=%s request_id=%s trace_id=%s",
