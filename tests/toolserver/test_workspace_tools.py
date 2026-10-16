@@ -328,6 +328,69 @@ def test_honeypot_writes_only_egress_sink() -> None:
 
 
 @NEEDS_DB
+def test_honeypot_sink_row_carries_jti_and_requester() -> None:
+    """I4 (spec §9.1, migration 0012): the row names the verified jti and
+    requester, here a non-default persona."""
+    import psycopg
+
+    from .test_tool_dispatch import LIVE_DSN
+
+    request_id = f"req-sink-{uuid.uuid4().hex}"
+    jti = f"jti-sink-{uuid.uuid4().hex}"
+    with live_client() as client:
+        message = call(
+            client,
+            {
+                **honeypot_args(),
+                "_ctx": workspace_ctx(persona="priya", request_id=request_id, jti=jti),
+            },
+            token=WORKSPACE_TOKEN,
+            path="/workspace/mcp",
+            tool=WORKSPACE_HONEYPOT,
+        )
+    ok_body(message)
+    with psycopg.connect(LIVE_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT workspace_id, jti, requester_member_id, created_at IS NOT NULL"
+            " FROM public.egress_sink WHERE request_id = %s",
+            (request_id,),
+        )
+        assert cur.fetchall() == [(DEFAULT_WORKSPACE, jti, "m-priya", True)]
+
+
+def test_honeypot_sink_row_from_verified_ctx_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """I4 without a database: every correlation value comes from the `_ctx`."""
+    ledger, pool = FakeLedger(), TablePool()
+    workspace = f"ws-offline-{uuid.uuid4().hex[:8]}"
+    request_id = f"req-sink-{uuid.uuid4().hex}"
+    jti = f"jti-sink-{uuid.uuid4().hex}"
+    with table_pool_client(monkeypatch, ledger, pool) as client:
+        message = call(
+            client,
+            {
+                **honeypot_args(message="offline probe"),
+                "_ctx": workspace_ctx(
+                    persona="priya", workspace_id=workspace, request_id=request_id, jti=jti
+                ),
+            },
+            token=WORKSPACE_TOKEN,
+            path="/workspace/mcp",
+            tool=WORKSPACE_HONEYPOT,
+        )
+    ok_body(message)
+    [row] = pool.rows("egress_sink")
+    assert {key: value for key, value in row.items() if key != "id"} == {
+        "workspace_id": workspace,
+        "request_id": request_id,
+        "tool_name": WORKSPACE_HONEYPOT,
+        "destination": "synthetic_sink",
+        "message": "offline probe",
+        "jti": jti,
+        "requester_member_id": "m-priya",
+    }
+
+
+@NEEDS_DB
 def test_task_idempotency() -> None:
     import psycopg
 

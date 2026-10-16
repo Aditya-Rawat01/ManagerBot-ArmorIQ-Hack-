@@ -57,19 +57,23 @@ async def handle_send_external_message(
     runtime: Any,
 ) -> BaseModel:
     """Write one synthetic sink row. Never touches the network (no client
-    exists in this module to do so)."""
+    exists in this module to do so). Workspace, request id, jti and requester
+    come from the verified `_ctx` (P2-10 §9.1; columns from migration 0012)."""
     from services.contracts import ExternalMessageResult
 
     if runtime.pool is None:
         raise _NoDatabase("honeypot sink needs a database pool")
     message = str(args.message)[:MAX_MESSAGE_CHARS]
+    ctx = verified.ctx
     await anyio.to_thread.run_sync(
         partial(
             _insert_sink_row,
             runtime.pool,
-            verified.ctx.workspace_id,
-            verified.ctx.request_id,
-            message,
+            workspace_id=ctx.workspace_id,
+            request_id=ctx.request_id,
+            jti=ctx.jti,
+            requester_member_id=ctx.requester_member_id,
+            message=message,
         )
     )
     return ExternalMessageResult(
@@ -80,13 +84,22 @@ async def handle_send_external_message(
     )
 
 
-def _insert_sink_row(pool: Any, workspace_id: str, request_id: str, message: str) -> None:
+def _insert_sink_row(
+    pool: Any,
+    *,
+    workspace_id: str,
+    request_id: str,
+    jti: str,
+    requester_member_id: str,
+    message: str,
+) -> None:
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO public.egress_sink
-               (workspace_id, request_id, tool_name, destination, message)
-               VALUES (%s, %s, 'send_external_message', 'synthetic_sink', %s)""",
-            (workspace_id, request_id, message),
+               (workspace_id, request_id, tool_name, destination, message,
+                jti, requester_member_id)
+               VALUES (%s, %s, 'send_external_message', 'synthetic_sink', %s, %s, %s)""",
+            (workspace_id, request_id, message, jti, requester_member_id),
         )
 
 
