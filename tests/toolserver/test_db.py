@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
+from psycopg_pool import ConnectionPool as RealConnectionPool
 
 from services.toolserver import db
 
@@ -115,6 +116,7 @@ def test_create_pool_is_compatible_with_a_transaction_pooler(
         captured.update(kwargs)
         return object()
 
+    fake_pool.check_connection = RealConnectionPool.check_connection  # type: ignore[attr-defined]
     monkeypatch.setattr(db, "ConnectionPool", fake_pool)
     db.create_pool("postgresql://fake")
     connect_kwargs = dict(captured.get("kwargs") or {})  # type: ignore[call-overload]
@@ -133,9 +135,13 @@ def test_create_pool_bounds_the_connection_wait(monkeypatch: pytest.MonkeyPatch)
         captured.update(kwargs)
         return object()
 
+    fake_pool.check_connection = RealConnectionPool.check_connection  # type: ignore[attr-defined]
     monkeypatch.setattr(db, "ConnectionPool", fake_pool)
+    real_check_connection = RealConnectionPool.check_connection
     db.create_pool("postgresql://fake")
-    assert captured.get("timeout") == 5.0
+    assert captured.get("timeout") == db.DEFAULT_POOL_TIMEOUT_S
+    assert captured.get("check") is real_check_connection
+    assert captured["kwargs"]["connect_timeout"] == db.CONNECT_TIMEOUT_S
     db.create_pool("postgresql://fake", timeout_s=1.5)
     assert captured.get("timeout") == 1.5
 

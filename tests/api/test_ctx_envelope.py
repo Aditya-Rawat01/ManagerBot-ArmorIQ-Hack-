@@ -196,3 +196,27 @@ def test_ctx_envelope_does_not_import_armoriq_sdk() -> None:
     # Fixed interpreter and constant code, no external input.
     result = subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, check=False)  # noqa: S603
     assert result.returncode == 0
+
+
+def test_rejects_context_with_excessive_lifetime() -> None:
+    """A validly signed token valid for hours is not one the gateway mints."""
+    from services.authorization.ctx_envelope import MAX_CTX_LIFETIME_S, LifetimeTooLong
+
+    token = sign_ctx(make_envelope(iat=NOW, exp=NOW + MAX_CTX_LIFETIME_S + 1), SECRET)
+    with pytest.raises(LifetimeTooLong):
+        verify_ctx(
+            token,
+            SECRET,
+            expected_aud="memory-mcp",
+            expected_tool="knowledge_search_team",
+            now=NOW + 1,
+        )
+
+
+def test_accepts_gateway_lifetime() -> None:
+    from services.authorization.armoriq_gateway import CTX_TTL_S
+
+    token = sign_ctx(make_envelope(iat=NOW, exp=NOW + CTX_TTL_S), SECRET)
+    assert verify_ctx(
+        token, SECRET, expected_aud="memory-mcp", expected_tool="knowledge_search_team", now=NOW + 1
+    )
