@@ -13,9 +13,10 @@ Open decisions shape the conservative defaults (all PROPOSED, documented):
 - D-13 (plan limits): ``MAX_PLAN_STEPS = 3`` enforced in code. No
   ``services/contracts/models.py`` change was made.
 - D-14 (confirmation): :class:`EscalationConfirmation` is an opaque
-  ``{tier, token}`` minted and bound by P3-04. The planner only checks that
-  a confirmation was *passed in* and covers the requested tier — model text
-  claiming confirmation is never read and never counts.
+  ``{tier, token}`` minted by P3-04, but a token string alone authorizes
+  nothing. The planner honors a confirmation only when the caller also
+  supplies the ``confirmation_verifier`` hook and it returns True for this
+  request; default ``None`` denies all (fail closed until D-14 is approved).
 - D-15 (input scope): message + trusted context + catalog only. No
   conversation history is included (narrowest reading of Arch §5.3/§8.4).
 - D-30 (requester pre-filtering): ``restricted`` and Maya-only maintenance
@@ -30,6 +31,7 @@ through for ArmorIQ to judge — never silently relabeled, never blocked here.
 """
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -98,8 +100,10 @@ _TOOL_PURPOSES = {
 class EscalationConfirmation:
     """Trusted escalation consent, minted and bound by P3-04 (PROPOSED, D-14).
 
-    The planner checks shape (non-empty token) and tier coverage only.
-    Strength and binding live with the minter, not here.
+    A token string alone authorizes nothing: until D-14 approves a verifier,
+    the planner only honors a confirmation when the caller also supplies the
+    ``confirmation_verifier`` hook and it returns True for this exact
+    confirmation and request. Strength and binding live with the verifier.
     """
 
     tier: DataTier
@@ -108,6 +112,11 @@ class EscalationConfirmation:
     def __post_init__(self) -> None:
         if not self.token.strip():
             raise ValueError("confirmation token must be non-empty")
+
+
+ConfirmationVerifier = Callable[[EscalationConfirmation, RequestContext], bool]
+"""D-14 hook (owned by P3-04): return True only for a genuinely user-bound
+confirmation. Any exception or False denies. ``None`` (default) denies all."""
 
 
 @dataclass(frozen=True)
@@ -262,10 +271,28 @@ def _rejected(code: str, message: str) -> Rejected:
     return Rejected(reason_code=code, user_message=message)
 
 
-def _confirmation_covers(confirmation: EscalationConfirmation | None, tier: DataTier) -> bool:
-    return (
-        confirmation is not None and confirmation.tier is tier and bool(confirmation.token.strip())
-    )
+def _confirmation_covers(
+    confirmation: EscalationConfirmation | None,
+    tier: DataTier,
+    ctx: RequestContext,
+    verifier: ConfirmationVerifier | None,
+) -> bool:
+    """True only for a verifier-approved confirmation covering ``tier``.
+
+    Fail closed: no verifier, verifier False, or verifier error all deny.
+    A non-empty token string by itself never authorizes (D-14 pending).
+    """
+    if (
+        confirmation is None
+        or confirmation.tier is not tier
+        or not confirmation.token.strip()
+        or verifier is None
+    ):
+        return False
+    try:
+        return bool(verifier(confirmation, ctx))
+    except Exception:
+        return False
 
 
 def _parse_wire(wire_text: str) -> PlanProposal:
@@ -321,11 +348,15 @@ async def plan(
     *,
     model: ModelClient | None = None,
     db: AuditDatabase | None = None,
+    confirmation_verifier: ConfirmationVerifier | None = None,
     enforce_requester_tier: bool = False,
 ) -> PlanResult:
     """Propose and validate one plan (SHARED_INTERFACES §12, PROPOSED).
 
-    ``confirmation`` is trusted P3-04 input only — never model text.
+    ``confirmation`` is P3-04 input only — never model text — and it
+    authorizes nothing unless ``confirmation_verifier`` (the D-14 hook owned
+    by P3-04) approves it for this request. Default ``None`` denies all
+    confirmations (fail closed until D-14 is approved).
     ``enforce_requester_tier`` enables the D-30 confidential pre-filter
     (default off: ArmorIQ judges those plans for real BLOCKs).
     """
@@ -354,6 +385,7 @@ async def plan(
                 ),
                 confirmation=None,
                 matched=None,
+                confirmation_verifier=None,
                 enforce_requester_tier=enforce_requester_tier,
             )
 
@@ -379,6 +411,7 @@ async def plan(
         proposal,
         confirmation=confirmation,
         matched=matched,
+        confirmation_verifier=confirmation_verifier,
         enforce_requester_tier=enforce_requester_tier,
     )
 
@@ -393,6 +426,7 @@ def _validate_proposal(
     *,
     confirmation: EscalationConfirmation | None,
     matched: TopicMatch | None,
+    confirmation_verifier: ConfirmationVerifier | None,
     enforce_requester_tier: bool,
 ) -> PlanResult:
     # Gate 2: per-step argument schemas (P2-02, already sanitized errors).
@@ -449,7 +483,7 @@ def _validate_proposal(
         if tier is None or tier is DataTier.TEAM:
             continue
         covered = matched is not None and _TIER_RANK[matched.max_tier] >= _TIER_RANK[tier]
-        confirmed = _confirmation_covers(confirmation, tier)
+        confirmed = _confirmation_covers(confirmation, tier, ctx, confirmation_verifier)
         if covered or confirmed:
             used_confirmation = used_confirmation or (confirmed and not covered)
             continue
@@ -503,6 +537,7 @@ def _validate_proposal(
 __all__ = [
     "AnthropicPlanClient",
     "Clarification",
+    "ConfirmationVerifier",
     "Escalation",
     "EscalationConfirmation",
     "Failed",

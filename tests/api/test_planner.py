@@ -189,15 +189,76 @@ def test__offline_fake_llm_confidential_with_rule() -> None:
     asyncio.run(_scenario())
 
 
+def _approve_all(confirmation: EscalationConfirmation, ctx: RequestContext) -> bool:
+    """Test-only D-14 verifier stub: approves everything (never production)."""
+    return True
+
+
 def test__offline_fake_llm_confidential_with_confirmation() -> None:
     async def _scenario() -> None:
         model = FakeModelClient([_wire(_team_search(), _conf_search())])
         confirmation = EscalationConfirmation(tier=DataTier.CONFIDENTIAL, token="tok-" + "x" * 16)
         result = await plan(
-            _ctx(), "atlas budget?", model=model, db=None, confirmation=confirmation
+            _ctx(),
+            "atlas budget?",
+            model=model,
+            db=None,
+            confirmation=confirmation,
+            confirmation_verifier=_approve_all,
         )
         assert isinstance(result, Planned)
         assert result.escalation_confirmed is True
+
+    asyncio.run(_scenario())
+
+
+def test__offline_fake_llm_forged_confirmation_fails_closed() -> None:
+    """Audit core: a token string with no D-14 verifier authorizes nothing."""
+
+    async def _scenario() -> None:
+        model = FakeModelClient([_wire(_team_search(), _conf_search())])
+        forged = EscalationConfirmation(tier=DataTier.CONFIDENTIAL, token="forged-" + "x" * 16)
+        result = await plan(_ctx(), "atlas budget?", model=model, db=None, confirmation=forged)
+        assert isinstance(result, Escalation)
+        assert result.requested_tier is DataTier.CONFIDENTIAL
+
+    asyncio.run(_scenario())
+
+
+def test__offline_fake_llm_denying_verifier_fails_closed() -> None:
+    async def _scenario() -> None:
+        model = FakeModelClient([_wire(_team_search(), _conf_search())])
+        confirmation = EscalationConfirmation(tier=DataTier.CONFIDENTIAL, token="tok-" + "x" * 16)
+        denied = await plan(
+            _ctx(),
+            "atlas budget?",
+            model=model,
+            db=None,
+            confirmation=confirmation,
+            confirmation_verifier=lambda c, ctx: False,
+        )
+        assert isinstance(denied, Escalation)
+
+    asyncio.run(_scenario())
+
+
+def test__offline_fake_llm_throwing_verifier_fails_closed() -> None:
+    async def _scenario() -> None:
+        model = FakeModelClient([_wire(_team_search(), _conf_search())])
+        confirmation = EscalationConfirmation(tier=DataTier.CONFIDENTIAL, token="tok-" + "x" * 16)
+
+        def _boom(confirmation: EscalationConfirmation, ctx: RequestContext) -> bool:
+            raise RuntimeError("fake verifier outage")
+
+        result = await plan(
+            _ctx(),
+            "atlas budget?",
+            model=model,
+            db=None,
+            confirmation=confirmation,
+            confirmation_verifier=_boom,
+        )
+        assert isinstance(result, Escalation)
 
     asyncio.run(_scenario())
 
