@@ -57,6 +57,7 @@ from apps.api.identity import MemberRecord
 from services.audit.errors import AuditError
 from services.audit.store import DeliveryStatus, append_event, record_delivery
 from services.contracts import (
+    ApprovalState,
     ApprovalStatus,
     AuditEvent,
     AuditEventType,
@@ -568,6 +569,13 @@ def notify_hold(
     """
     if db is None:
         raise DeliveryError("no audit store: refusing undocumented delivery")
+    if not isinstance(approval, ApprovalStatus):
+        raise DeliveryError("approval must be an ApprovalStatus")
+    if approval.request_id != ctx.request_id:
+        raise DeliveryError("approval belongs to another request: refusing to notify")
+    if approval.state is not ApprovalState.PENDING:
+        # Only a live HOLD needs Maya's decision; a resolved one never pings her.
+        raise DeliveryError("approval is not pending: refusing to notify")
     maya_member_id, maya_slack_id = _maya_slack_id(members)
     text = _hold_text(ctx, approval, _console_link(settings or get_settings()))
     send: Callable[[], None] | None = None

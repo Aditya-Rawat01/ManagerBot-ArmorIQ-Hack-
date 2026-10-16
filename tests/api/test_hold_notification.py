@@ -210,6 +210,37 @@ def test__offline_fake_slack_hold_no_store_refuses() -> None:
         notify_hold(_ctx(), _approval(), sender=FakeSender(), db=None, members=_members())
 
 
+# --- I5: only this request's pending HOLD notifies Maya ----------------------
+
+
+def test__offline_fake_slack_hold_for_another_request_refuses() -> None:
+    sender, db = FakeSender(), AuditSim()
+    foreign = _approval().model_copy(update={"request_id": "req-OTHER"})
+    with pytest.raises(DeliveryError):
+        notify_hold(_ctx(), foreign, sender=sender, db=db, members=_members())
+    assert sender.dms == [] and db.statements == []
+
+
+@pytest.mark.parametrize("state", [s for s in ApprovalState if s is not ApprovalState.PENDING])
+def test__offline_fake_slack_hold_not_pending_refuses(state: ApprovalState) -> None:
+    sender, db = FakeSender(), AuditSim()
+    resolved = _approval().model_copy(update={"state": state, "resolved_at": NOW})
+    with pytest.raises(DeliveryError):
+        notify_hold(_ctx(), resolved, sender=sender, db=db, members=_members())
+    assert sender.dms == [] and db.statements == []
+
+
+def test__offline_fake_slack_hold_rejected_foreign_approval_refuses() -> None:
+    # The review's repro: a rejected approval from another request.
+    sender, db = FakeSender(), AuditSim()
+    stale = _approval().model_copy(
+        update={"request_id": "req-OTHER", "state": ApprovalState.REJECTED, "resolved_at": NOW}
+    )
+    with pytest.raises(DeliveryError):
+        notify_hold(_ctx(), stale, sender=sender, db=db, members=_members())
+    assert sender.dms == []
+
+
 def test__offline_fake_slack_hold_records_team_tier_not_held_tool_tier() -> None:
     sender, db = FakeSender(), AuditSim()
     record = notify_hold(_ctx(), _approval(), sender=sender, db=db, members=_members())
