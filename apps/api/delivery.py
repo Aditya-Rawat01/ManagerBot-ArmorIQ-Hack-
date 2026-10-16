@@ -124,6 +124,17 @@ class DeliveryAuditAfterSendError(DeliveryError):
         self.record = record
 
 
+def _slack_escape(text: str) -> str:
+    """Neutralize Slack control sequences in untrusted (model) text.
+
+    Slack parses ``<...>`` as mentions, broadcasts, and links
+    (``<!channel>``, ``<!here>``, ``<@U…>``, ``<url|label>``); escaping
+    ``&``, ``<``, ``>`` (``&`` first) renders them as literal text. Fixed
+    notices are trusted constants and are sent as-is.
+    """
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _record(
     db: AuditDatabase,
     *,
@@ -388,27 +399,15 @@ def deliver(
             delivery_ids=(delivery_id,) if delivery_id is not None else (),
         )
 
+    # Model text is untrusted: Slack control sequences are escaped (I6).
+    text = _slack_escape(answer.answer_text)
     if ctx.entry_point is EntryPoint.SLACK_DM:
-        return _deliver_dm(
-            ctx,
-            answer.answer_text,
-            highest_tier,
-            sender=sender,
-            db=db,
-            recipient=recipient,
-        )
+        return _deliver_dm(ctx, text, highest_tier, sender=sender, db=db, recipient=recipient)
     if highest_tier is DataTier.TEAM:
         # The shared thread is allowed for team-tier data only (R-62).
-        return _deliver_thread(
-            ctx,
-            answer.answer_text,
-            highest_tier,
-            sender=sender,
-            db=db,
-            recipient=recipient,
-        )
+        return _deliver_thread(ctx, text, highest_tier, sender=sender, db=db, recipient=recipient)
     return _deliver_dm_with_notice(
-        ctx, answer.answer_text, highest_tier, sender=sender, db=db, recipient=recipient
+        ctx, text, highest_tier, sender=sender, db=db, recipient=recipient
     )
 
 
@@ -541,7 +540,7 @@ def _hold_text(ctx: RequestContext, approval: ApprovalStatus, link: str | None) 
     )
     return (
         "ProxyLead needs your review.\n"
-        f"Request {ctx.request_id} from {ctx.requester.persona.value} "
+        f"Request {_slack_escape(ctx.request_id)} from {ctx.requester.persona.value} "
         f"needs a decision on {approval.tool.value}.\n"
         f"{console}"
     )

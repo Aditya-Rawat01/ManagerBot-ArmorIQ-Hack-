@@ -555,3 +555,30 @@ def test__offline_fake_slack_notice_records_team_tier(fail_dm: bool) -> None:
         if e["type"] in ("delivery_succeeded", "delivery_failed")
     }
     assert answer_tiers == {"restricted"}
+
+
+# --- I6: model text cannot inject Slack control sequences -------------------
+
+_INJECTION = "Hi <!channel> <!here> <@U999> <https://evil.example.test|click> & &lt;"
+_ESCAPED = (
+    "Hi &lt;!channel&gt; &lt;!here&gt; &lt;@U999&gt; "
+    "&lt;https://evil.example.test|click&gt; &amp; &amp;lt;"
+)
+
+
+@pytest.mark.parametrize(("entry", "tier"), _ROUTES)
+def test__offline_fake_slack_model_text_is_slack_escaped(entry: EntryPoint, tier: DataTier) -> None:
+    sender, db = FakeSender(), AuditSim()
+    deliver(_ctx(entry), _answer(_INJECTION), tier, sender=sender, db=db)
+    answers = [text for _, _, text in sender.thread_posts if text != GENERIC_THREAD_NOTICE]
+    answers += [text for _, text in sender.dms]
+    assert answers == [_ESCAPED]
+    for _, _, text in sender.thread_posts + [("", "", t) for _, t in sender.dms]:
+        assert "<" not in text and ">" not in text
+
+
+def test__offline_fake_slack_fixed_notice_stays_literal() -> None:
+    sender, db = FakeSender(), AuditSim()
+    deliver(_ctx(), _answer(_INJECTION), DataTier.CONFIDENTIAL, sender=sender, db=db)
+    assert sender.thread_posts == [("C1", "1700000000.0001", GENERIC_THREAD_NOTICE)]
+    assert sender.dms == [("U-sam", _ESCAPED)]
