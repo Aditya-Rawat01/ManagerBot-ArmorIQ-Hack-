@@ -9,6 +9,7 @@ import inspect
 import logging
 import threading
 import time
+from typing import ClassVar
 
 import pytest
 
@@ -996,6 +997,68 @@ def test__offline_fake_slack_invalid_token_constructor_never_breaks_startup(
         assert client.get("/health").status_code == 200
     assert "error=BoltError" in caplog.text
     assert "offline-fake-token" not in caplog.text
+
+
+class _FakeBackendDatabase(FakeDb):
+    """Stands in for `BackendDatabase(dsn)` (one seeded workspace, no network)."""
+
+    instances: ClassVar[list["_FakeBackendDatabase"]] = []
+
+    def __init__(self, dsn: str) -> None:
+        super().__init__(rows=[("workspace-primary",)])
+        self.closed = False
+        type(self).instances.append(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test__offline_fake_slack_lifespan_resolves_workspace_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    import services.slack_socket.app as slack_app
+    from apps.api.main import create_app
+
+    captured: dict[str, object] = {}
+
+    def _start(**kwargs: object) -> None:
+        captured.update(kwargs)
+        return None
+
+    _FakeBackendDatabase.instances = []
+    monkeypatch.setattr("apps.api.core.db.BackendDatabase", _FakeBackendDatabase)
+    monkeypatch.setattr(slack_app, "start_slack_socket", _start)
+    app = create_app(_slack_settings(database_url_backend="postgresql://fake@127.0.0.1:9/x"))
+    app.state.orchestrator_handle = _noop_handle
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+    [db] = _FakeBackendDatabase.instances
+    assert captured["workspace_id"] == "workspace-primary"
+    assert captured["db"] is db
+    assert captured["handle"] is _noop_handle
+    assert db.closed  # not started (runtime None) -> the pool is closed again
+
+
+def test__offline_fake_slack_disabled_slack_never_opens_the_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without tokens (or without a handle) startup never touches the database."""
+    from fastapi.testclient import TestClient
+
+    from apps.api.main import create_app
+    from tests.api.conftest import make_settings
+
+    _FakeBackendDatabase.instances = []
+    monkeypatch.setattr("apps.api.core.db.BackendDatabase", _FakeBackendDatabase)
+    dsn = "postgresql://fake@127.0.0.1:9/x"
+    no_tokens = create_app(make_settings(database_url_backend=dsn))
+    no_handle = create_app(_slack_settings(database_url_backend=dsn))
+    for app in (no_tokens, no_handle):
+        with TestClient(app) as client:
+            assert client.get("/health").status_code == 200
+    assert _FakeBackendDatabase.instances == []
 
 
 def test__offline_fake_slack_connect_failure_logged_not_raised(

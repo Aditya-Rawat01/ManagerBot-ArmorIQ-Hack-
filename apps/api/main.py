@@ -57,8 +57,10 @@ async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
     """Start the Socket Mode adapter if configured. Never raises.
 
     Returns ``(runtime, db)``; both are None when Slack is disabled or failed
-    to start. The blocking parts (Bolt's ``auth.test``, the database) run in
-    a worker thread so the event loop is never stalled.
+    to start. The backend database is opened, and the single workspace ID
+    resolved (``resolve_workspace_id``), only when Slack will actually start
+    (tokens AND handle). The blocking parts (the workspace query, Bolt's
+    ``auth.test``) run in a worker thread so the event loop is never stalled.
     """
     settings: Settings = app.state.settings
     db = None
@@ -66,23 +68,35 @@ async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
         from apps.api.core.db import BackendDatabase, BackendDbNotConfiguredError
         from apps.api.identity import build_member_table
         from services.slack_socket.app import start_slack_socket
+        from services.slack_socket.events import resolve_workspace_id
 
-        members = build_member_table(settings)
-        if settings.database_url_backend is not None:
-            try:
-                db = BackendDatabase(settings.database_url_backend.get_secret_value())
-            except BackendDbNotConfiguredError:
-                db = None
+        bot_token = _secret(settings.slack_bot_token)
+        app_token = _secret(settings.slack_app_token)
+        handle = getattr(app.state, "orchestrator_handle", None)  # P3-04 sets it
+        workspace_id = None
+        if bot_token and app_token and handle is not None:
+            if settings.database_url_backend is not None:
+                try:
+                    db = BackendDatabase(settings.database_url_backend.get_secret_value())
+                except BackendDbNotConfiguredError:
+                    db = None
+            if db is not None:
+                workspace_id = await asyncio.to_thread(resolve_workspace_id, db)
+            if workspace_id is None:
+                logger.warning(
+                    "slack socket mode: no single workspace resolved; "
+                    "events will be refused (db_unavailable)"
+                )
         runtime = await asyncio.to_thread(
             start_slack_socket,
-            bot_token=_secret(settings.slack_bot_token),
-            app_token=_secret(settings.slack_app_token),
-            members=members,
+            bot_token=bot_token,
+            app_token=app_token,
+            members=build_member_table(settings),
             expected_team_id=settings.slack_team_id,
             allowed_channels=set(settings.slack_allowed_channels),
-            workspace_id=None,  # resolved by P3-04 wiring; adapter refuses without it
+            workspace_id=workspace_id,
             db=db,
-            handle=getattr(app.state, "orchestrator_handle", None),  # P3-04 sets it
+            handle=handle,
             loop=asyncio.get_running_loop(),  # Bolt threads dispatch onto this loop
         )
     except Exception as exc:
@@ -90,9 +104,10 @@ async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
             "slack socket mode failed to start; API continues without Slack error=%s",
             type(exc).__name__,
         )
-        if db is not None:
-            db.close()
-        return None, None
+        runtime = None
+    if runtime is None and db is not None:
+        db.close()
+        db = None
     return runtime, db
 
 
