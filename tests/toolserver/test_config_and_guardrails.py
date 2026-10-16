@@ -101,6 +101,29 @@ def test_mcp_server_never_imports_armoriq_sdk() -> None:
     assert offenders == []
 
 
+def test_toolserver_image_bakes_the_model_and_runs_offline() -> None:
+    """Static Dockerfile checks (P2-05 review): model layer before the source,
+    no runtime download, low-arena malloc, a start period for a slow warm."""
+    text = (REPO_ROOT / "deploy" / "toolserver" / "Dockerfile").read_text(encoding="utf-8")
+    lines = [line.strip() for line in text.splitlines()]
+    steps = [line for line in lines if line and not line.startswith("#")]
+
+    def first(prefix: str) -> int:
+        return next(i for i, line in enumerate(steps) if line.startswith(prefix))
+
+    warm = first('RUN python -c "from services.knowledge.embeddings import warm; warm()"')
+    source = first("COPY --chown=appuser:appuser services ./services")
+    assert first("COPY pyproject.toml") < first('RUN pip install --no-cache-dir ".[toolserver]"')
+    assert first('RUN pip install --no-cache-dir ".[toolserver]"') < warm < source
+    assert not any(line.startswith("COPY services ./services") for line in steps[:warm])
+    assert first("ENV FASTEMBED_CACHE_PATH=") < warm < first("ENV HF_HUB_OFFLINE=1")
+    assert "ENV MALLOC_ARENA_MAX=2" in steps
+    healthcheck = steps[first("HEALTHCHECK")]
+    start_period = healthcheck.split("--start-period=")[1].split("s")[0]
+    assert int(start_period) >= 120
+    assert "not downloaded" not in text  # stale pre-P2-05 header
+
+
 def _pins() -> dict[str, str]:
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     project = pyproject["project"]
