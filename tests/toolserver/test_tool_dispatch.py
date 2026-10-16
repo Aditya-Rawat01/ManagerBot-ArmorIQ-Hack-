@@ -293,6 +293,13 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
             arguments = {"source_ref": "team-friday-deploy-freeze"}
         elif tool.value == "send_external_message":
             arguments = {"destination": "synthetic_sink", "message": "x"}
+        elif tool.value == "create_followup_task":
+            arguments = {
+                "title": "T",
+                "owner": "sam",
+                "priority": "low",
+                "idempotency_key": "k",
+            }
         else:
             arguments = {"query": "q", "limit": 1}
         with dev_client() as client:
