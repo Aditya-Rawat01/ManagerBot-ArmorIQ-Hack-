@@ -1,0 +1,378 @@
+"""Slack event validation, deduplication, and dispatch (P3-05, PRD §4.2, Arch §4).
+
+Every incoming event flows through :func:`on_app_mention` / :func:`on_direct_message`,
+which acknowledge FIRST and then validate in task order: team → (mentions)
+channel allowlist → mapped user → dedupe → trusted ``RequestContext``. Bot and
+unsupported events are ignored without any database write (loop safety).
+Rejected events get a metadata-only audit row (``slack_event_rejected`` —
+event IDs and reason codes, never message bodies); the ``AuditEventType``
+enum gains no new member here (ICR requested for formalization instead).
+
+Identity comes only from ``resolve_slack_user`` over the Slack user ID.
+Message text — including "I am Maya" claims — never influences identity,
+tier, or routing (R-10, R-11, SC-03).
+
+Deduplication is atomic: ``INSERT ... ON CONFLICT DO NOTHING RETURNING``
+makes concurrent duplicates collapse to exactly one processing attempt; the
+row moves ``received`` → ``processed`` only after the orchestrator returns.
+Any database/dedupe failure fails closed (the event is not processed).
+
+``store this``: the text after the bot mention is forwarded verbatim, so the
+P3-02 planner's prefix detection keeps working with no orchestrator change,
+and the parsed remainder travels as ``store_this_content`` metadata for
+P3-04's future use (proposed handoff, no ``handle`` signature change).
+"""
+
+import logging
+import re
+import uuid
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Literal
+
+from apps.api.core.db import AuditDatabase
+from apps.api.identity import MemberRecord, resolve_slack_user
+from services.audit.redaction import redact_payload
+from services.contracts import AuthenticatedUser, EntryPoint, PersonaKey, RequestContext
+
+logger = logging.getLogger(__name__)
+
+MappingEvent = dict[str, Any]
+
+STORE_THIS_PREFIX = "store this"
+_MENTION_PREFIX = re.compile(r"^<@[^>]+>\s*")
+_BOT_SUBTYPES = frozenset({"bot_message", "message_changed", "message_deleted"})
+
+OrchestratorHandle = Callable[[RequestContext, str], Awaitable[str]]
+"""P3-04 entry point (fake until merged): returns the request ID it accepted."""
+
+
+@dataclass(frozen=True)
+class IncomingSlackEvent:
+    """A validated event ready for the orchestrator."""
+
+    request_id: str
+    trace_id: str
+    ctx: RequestContext
+    message: str
+    store_this_content: str | None
+    event_id: str
+
+
+@dataclass(frozen=True)
+class SlackRejection:
+    """Why an event was dropped. Carries IDs only, never message text."""
+
+    event_id: str
+    reason_code: str
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:16]}"
+
+
+def _is_bot_event(event: MappingEvent) -> bool:
+    return event.get("subtype") in _BOT_SUBTYPES or "bot_id" in event or "bot_profile" in event
+
+
+def _strip_mention(text: str) -> str:
+    return _MENTION_PREFIX.sub("", text, count=1)
+
+
+def parse_store_this(message: str) -> str | None:
+    """Remainder after a case-insensitive `store this` prefix, else None."""
+    text = message.strip()
+    if text[: len(STORE_THIS_PREFIX)].lower() != STORE_THIS_PREFIX:
+        return None
+    return text[len(STORE_THIS_PREFIX) :].lstrip(" :\n\t")
+
+
+def resolve_workspace_id(db: AuditDatabase) -> str | None:
+    """The single workspace ID, or None unless exactly one workspace exists."""
+    try:
+        with db.tx() as cursor:
+            cursor.execute("SELECT id FROM workspaces ORDER BY id")
+            rows = cursor.fetchall()
+    except Exception:
+        return None
+    if len(rows) != 1:
+        return None
+    return str(rows[0][0])
+
+
+def _audit_rejection(
+    db: AuditDatabase | None,
+    *,
+    event_id: str,
+    reason_code: str,
+    team_id: str | None,
+    channel_id: str | None,
+) -> None:
+    """Best-effort metadata-only audit row. Never raises, never stores bodies."""
+    if db is None:
+        return
+    try:
+        with db.tx() as cursor:
+            cursor.execute(
+                "INSERT INTO request_events "
+                "(request_id, trace_id, event_type, payload, occurred_at) "
+                "VALUES (%s, %s, 'slack_event_rejected', %s, %s)",
+                [
+                    f"rej-{event_id}",
+                    f"trace-{event_id}",
+                    redact_payload(
+                        {
+                            "reason": reason_code,
+                            "slack_event_id": event_id,
+                            "team_id": team_id,
+                            "channel_id": channel_id,
+                        }
+                    ),
+                    datetime.now(UTC),
+                ],
+            )
+    except Exception:
+        logger.warning("slack rejection audit failed", extra={"event_id": event_id})
+
+
+def _claim_dedupe(
+    db: AuditDatabase,
+    *,
+    event_id: str,
+    workspace_id: str,
+    channel_id: str | None,
+) -> bool:
+    """Atomically claim an event ID. True exactly once per ID (even concurrently)."""
+    with db.tx() as cursor:
+        cursor.execute(
+            "INSERT INTO slack_events (slack_event_id, workspace_id, channel_id) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (slack_event_id) DO NOTHING RETURNING id",
+            [event_id, workspace_id, channel_id],
+        )
+        return cursor.fetchone() is not None
+
+
+def mark_processed(db: AuditDatabase, event_id: str) -> None:
+    """Move a claimed event to `processed` after successful dispatch."""
+    with db.tx() as cursor:
+        cursor.execute(
+            "UPDATE slack_events SET status = 'processed', processed_at = now() "
+            "WHERE slack_event_id = %s",
+            [event_id],
+        )
+
+
+def _build_context(
+    *,
+    event: MappingEvent,
+    entry_point: Literal["slack_mention", "slack_dm"],
+    requester: AuthenticatedUser,
+    workspace_id: str,
+    team_id: str,
+) -> tuple[RequestContext, str]:
+    request_id, trace_id = _new_id("req"), _new_id("trace")
+    ctx = RequestContext(
+        request_id=request_id,
+        trace_id=trace_id,
+        workspace_id=workspace_id,
+        requester=requester,
+        entry_point=EntryPoint(entry_point),
+        received_at=datetime.now(UTC),
+        slack_team_id=team_id,
+        slack_channel_id=event.get("channel"),
+        slack_thread_ts=event.get("thread_ts") or event.get("ts"),
+        slack_event_id=event.get("event_id"),
+    )
+    return ctx, request_id
+
+
+def process_event(
+    event: MappingEvent,
+    *,
+    team_id: str | None,
+    entry_point: Literal["slack_mention", "slack_dm"],
+    members: dict[PersonaKey, MemberRecord],
+    expected_team_id: str | None,
+    allowed_channels: set[str],
+    workspace_id: str | None,
+    db: AuditDatabase | None,
+) -> IncomingSlackEvent | SlackRejection:
+    """Validate one event (ack already sent by the caller). Never raises."""
+    event_id = event.get("event_id") if isinstance(event, dict) else None
+    if not isinstance(event, dict) or not event_id or not isinstance(event_id, str):
+        return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
+    channel_id = event.get("channel")
+    logger.info("slack event received", extra={"event_id": event_id})
+
+    if _is_bot_event(event):
+        return SlackRejection(event_id=event_id, reason_code="bot_ignored")
+    if not expected_team_id or team_id != expected_team_id:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="wrong_team",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="wrong_team")
+    if entry_point == "slack_mention" and channel_id not in allowed_channels:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="channel_not_allowed",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="channel_not_allowed")
+
+    requester = resolve_slack_user(members, team_id, event.get("user"), expected_team_id)
+    if requester is None:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="unmapped_user",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="unmapped_user")
+    if workspace_id is None or db is None:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="db_unavailable",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="db_unavailable")
+
+    try:
+        first = _claim_dedupe(
+            db, event_id=event_id, workspace_id=workspace_id, channel_id=channel_id
+        )
+    except Exception:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="db_unavailable",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="db_unavailable")
+    if not first:
+        _audit_rejection(
+            db,
+            event_id=event_id,
+            reason_code="duplicate",
+            team_id=team_id,
+            channel_id=channel_id,
+        )
+        return SlackRejection(event_id=event_id, reason_code="duplicate")
+
+    raw_text = event.get("text")
+    if not isinstance(raw_text, str):
+        return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
+    message = _strip_mention(raw_text) if entry_point == "slack_mention" else raw_text
+    store_this_content = parse_store_this(message) or None
+    try:
+        ctx, request_id = _build_context(
+            event=event,
+            entry_point=entry_point,
+            requester=requester,
+            workspace_id=workspace_id,
+            team_id=team_id or "",
+        )
+    except Exception:
+        return SlackRejection(event_id=event_id, reason_code="invalid_envelope")
+    trace_id = ctx.trace_id
+    logger.info("slack event accepted", extra={"event_id": event_id, "request_id": request_id})
+    return IncomingSlackEvent(
+        request_id=request_id,
+        trace_id=trace_id,
+        ctx=ctx,
+        message=message,
+        store_this_content=store_this_content,
+        event_id=event_id,
+    )
+
+
+def on_app_mention(
+    body: dict[str, Any],
+    ack: Callable[[], None],
+    *,
+    members: dict[PersonaKey, MemberRecord],
+    expected_team_id: str | None,
+    allowed_channels: set[str],
+    workspace_id: str | None,
+    db: AuditDatabase | None,
+) -> IncomingSlackEvent | SlackRejection:
+    """Bolt `app_mention` listener: ack immediately, then validate."""
+    ack()
+    event = body.get("event") if isinstance(body, dict) else None
+    if not isinstance(event, dict):
+        return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
+    return process_event(
+        event,
+        team_id=body.get("team_id"),
+        entry_point="slack_mention",
+        members=members,
+        expected_team_id=expected_team_id,
+        allowed_channels=allowed_channels,
+        workspace_id=workspace_id,
+        db=db,
+    )
+
+
+def on_direct_message(
+    body: dict[str, Any],
+    ack: Callable[[], None],
+    *,
+    members: dict[PersonaKey, MemberRecord],
+    expected_team_id: str | None,
+    workspace_id: str | None,
+    db: AuditDatabase | None,
+) -> IncomingSlackEvent | SlackRejection:
+    """Bolt `message` listener for DMs: ack immediately, then validate."""
+    ack()
+    event = body.get("event") if isinstance(body, dict) else None
+    if not isinstance(event, dict):
+        return SlackRejection(event_id=_new_id("rej"), reason_code="invalid_envelope")
+    return process_event(
+        event,
+        team_id=body.get("team_id") or event.get("team"),
+        entry_point="slack_dm",
+        members=members,
+        expected_team_id=expected_team_id,
+        allowed_channels=set(),
+        workspace_id=workspace_id,
+        db=db,
+    )
+
+
+async def dispatch(
+    handle: OrchestratorHandle,
+    incoming: IncomingSlackEvent,
+    db: AuditDatabase,
+) -> str:
+    """Forward to the orchestrator, then mark the event processed.
+
+    A handle failure propagates (no false `processed` row); P3-04 owns retry.
+    """
+    request_id = await handle(incoming.ctx, incoming.message)
+    mark_processed(db, incoming.event_id)
+    return request_id
+
+
+__all__ = [
+    "IncomingSlackEvent",
+    "OrchestratorHandle",
+    "SlackRejection",
+    "dispatch",
+    "mark_processed",
+    "on_app_mention",
+    "on_direct_message",
+    "parse_store_this",
+    "process_event",
+    "resolve_workspace_id",
+]
