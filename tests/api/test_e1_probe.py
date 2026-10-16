@@ -411,14 +411,18 @@ def test_build_record_is_complete_and_redacted() -> None:
     assert "private hit" not in record
 
 
-RUN = probe.RunIdentifiers(
-    request_id="r1",
-    trace_id="t1",
-    plan_id="p-1",
-    requester_member_id="m-maya",
-    jti="jti-abc",
-    ledger_entry_id="7",
-)
+def _run_ids(**changes: object) -> object:
+    """This run's identifiers (built per test, so collection never needs them)."""
+    values: dict[str, object] = {
+        "request_id": "r1",
+        "trace_id": "t1",
+        "plan_id": "p-1",
+        "requester_member_id": "m-maya",
+        "jti": "jti-abc",
+        "ledger_entry_id": "7",
+    }
+    values.update(changes)
+    return probe.RunIdentifiers(**values)  # type: ignore[arg-type]
 
 
 def _ledger_row(**overrides: object) -> dict[str, object]:
@@ -483,7 +487,7 @@ class _RowLookup:
 
 
 def test_correlate_ledger_without_dsn() -> None:
-    report = probe.correlate_ledger(None, RUN)
+    report = probe.correlate_ledger(None, _run_ids())
     assert report["correlated"] is False
     assert report["lookup"] == "unavailable (no DATABASE_URL_TOOLSERVER)"
 
@@ -492,7 +496,7 @@ def test_correlate_ledger_reports_classes_not_secrets__offline_fake_ledger() -> 
     def boom(dsn: str) -> object:
         raise ConnectionError(f"db down at {dsn}")
 
-    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=boom)
+    report = probe.correlate_ledger(FAKE_DSN, _run_ids(), lookup_factory=boom)
     assert report["correlated"] is False
     assert report["lookup"] == "lookup error (ConnectionError)"
     _assert_no_fake_values(str(report))
@@ -500,7 +504,7 @@ def test_correlate_ledger_reports_classes_not_secrets__offline_fake_ledger() -> 
 
 def test_correlate_ledger_matches_every_identifier__offline_fake_ledger() -> None:
     lookup = _RowLookup(_ledger_row())
-    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: lookup)
+    report = probe.correlate_ledger(FAKE_DSN, _run_ids(), lookup_factory=lambda dsn: lookup)
     assert report["correlated"] is True
     assert report["mismatches"] == []
     assert lookup.closed
@@ -534,9 +538,7 @@ def test_correlate_ledger_matches_every_identifier__offline_fake_ledger() -> Non
 def test_correlate_ledger_reports_mismatches__offline_fake_ledger(
     overrides: dict[str, object], run_changes: dict[str, object], expected: str
 ) -> None:
-    from dataclasses import replace
-
-    run = replace(RUN, **run_changes)  # type: ignore[arg-type]
+    run = _run_ids(**run_changes)
     lookup = _RowLookup(_ledger_row(**overrides))
     report = probe.correlate_ledger(FAKE_DSN, run, lookup_factory=lambda dsn: lookup)
     assert report["correlated"] is False
@@ -544,7 +546,8 @@ def test_correlate_ledger_reports_mismatches__offline_fake_ledger(
 
 
 def test_correlate_ledger_missing_row_is_not_correlated__offline_fake_ledger() -> None:
-    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: _RowLookup(None))
+    lookup = _RowLookup(None)
+    report = probe.correlate_ledger(FAKE_DSN, _run_ids(), lookup_factory=lambda dsn: lookup)
     assert report["correlated"] is False
     assert report["row"] is None
     assert report["mismatches"]
@@ -553,10 +556,8 @@ def test_correlate_ledger_missing_row_is_not_correlated__offline_fake_ledger() -
 
 def test_correlate_ledger_falls_back_to_request_id__offline_fake_ledger() -> None:
     """I4: no invocation/jti from the gateway → the ledger is still searched by request_id."""
-    from dataclasses import replace
-
     lookup = _RowLookup(_ledger_row())
-    run = replace(RUN, jti=None, ledger_entry_id=None)
+    run = _run_ids(jti=None, ledger_entry_id=None)
     report = probe.correlate_ledger(FAKE_DSN, run, lookup_factory=lambda dsn: lookup)
     assert ("by_request_id", "r1") in lookup.calls
     assert report["lookup"] == "no jti returned; by request_id: 1 row(s)"
@@ -569,7 +570,7 @@ def test_correlate_ledger_falls_back_to_request_id__offline_fake_ledger() -> Non
 
 def test_correlate_ledger_reports_attempts_safely__offline_fake_ledger() -> None:
     lookup = _RowLookup(_ledger_row())
-    report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=lambda dsn: lookup)
+    report = probe.correlate_ledger(FAKE_DSN, _run_ids(), lookup_factory=lambda dsn: lookup)
     assert ("attempts", ("jti-abc", "r1")) in lookup.calls
     (attempt,) = report["attempts"]
     assert attempt["credential_id"] == "toolserver_bearer_memory"
@@ -598,7 +599,7 @@ def test_ledger_lookup_mutes_driver_logs__offline_fake_ledger(
 
     levels = {name: logging.getLogger(name).level for name in probe.QUIET_DB_LOGGERS}
     with caplog.at_level(logging.DEBUG):
-        report = probe.correlate_ledger(FAKE_DSN, RUN, lookup_factory=factory)
+        report = probe.correlate_ledger(FAKE_DSN, _run_ids(), lookup_factory=factory)
     assert report["correlated"] is True
     assert leak not in caplog.text
     assert not [r for r in caplog.records if r.name.startswith("psycopg")]
