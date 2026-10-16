@@ -46,11 +46,12 @@ Pools: one pool per process. Pass the process's toolserver pool
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
@@ -311,6 +312,27 @@ def validate_attempt(attempt: ToolCallAttempt) -> None:
         raise ValueError("only a replay references an original entry")
 
 
+def _retry_once_on_disconnect(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run once more after a dead pooled connection (Neon cold start).
+
+    Only `psycopg.OperationalError` (connection-level) is retried, exactly
+    once, never other errors. The jti claim is INSERT ... ON CONFLICT DO
+    NOTHING, so a retry after a committed first attempt sees the conflict
+    (replay: fail closed, never double-executes). A retried attempt INSERT
+    can, in the commit-then-drop edge, leave a duplicate attempt row:
+    evidence noise only, never an execution (attempt rows don't execute).
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except _pg_errors.OperationalError:
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 class Ledger:
     """Toolserver-role ledger access. `seen_jti` implements P1-04's
     `ReplayGuard` protocol with the same check-and-record semantics as
@@ -416,6 +438,7 @@ class Ledger:
             raise RuntimeError("duplicate jti has no original entry")
         raise DuplicateJti(original)
 
+    @_retry_once_on_disconnect
     def seen_jti(self, jti: str) -> bool:
         """Atomically claim `jti`. False = first use (claimed now; the caller may
         execute). True = replay or concurrent duplicate (caller must reject).
@@ -435,6 +458,7 @@ class Ledger:
             )
             return cur.fetchone() is None
 
+    @_retry_once_on_disconnect
     def record_attempt(self, attempt: ToolCallAttempt) -> int:
         """Append one verification outcome to `tool_call_attempts`; return its
         id. Never stores raw arguments or `_ctx` tokens (there is no column for
@@ -466,6 +490,7 @@ class Ledger:
                 raise RuntimeError("attempt insert returned no id")
             return int(row[0])
 
+    @_retry_once_on_disconnect
     def find_entry_id(self, jti: str) -> LedgerEntryId | None:
         """Id of the ledger entry for `jti`, or None (not yet appended)."""
         with db.transaction(self._pool) as conn, conn.cursor() as cur:
@@ -567,6 +592,11 @@ def verify_and_record(
         if rejection.code == REPLAY:
             raise ReplayRejection(original) from None
         raise
+    except _pg_errors.OperationalError as exc:
+        # The jti claim or replay lookup died twice (the ledger methods retry
+        # once). The outcome is unknown: fail closed without executing.
+        logger.error("claim lookup failed (%s)", type(exc).__name__)
+        raise CtxRejection(INTERNAL) from None
     ctx = verified.ctx
     try:
         ledger.record_attempt(
