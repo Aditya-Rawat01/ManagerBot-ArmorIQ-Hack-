@@ -55,6 +55,13 @@ Read from the installed `mcp==2.3.0` source and confirmed by direct probes:
   rejects with `invalid_context`. Whether `_ctx` survives the ArmorIQ proxy is
   the deferred half, decided by E1 (P1-06) and E2 (P1-07); a negative result
   triggers a follow-up ICR, never weaker verification.
+- P2-06 wiring: the hook is the SDK's supported `tools/call` interceptor
+  (`mcp.server.mcpserver.Extension.intercept_tool_call`, passed as
+  `MCPServer(extensions=[...])` in `services/toolserver/servers.py`), which
+  sees the raw `params.arguments` before any argument model. It answers every
+  `ToolName` call itself (no `ToolName` is ever forwarded to the SDK tool
+  path); the registered product-tool bodies are canaries that raise if the
+  interceptor is ever bypassed.
 
 ## ArmorIQ SDK surface (verified offline from installed source)
 
@@ -133,7 +140,7 @@ source, not live**: live behavior is confirmed or corrected only by E1–E4
 
 | SDK result / exception | `ArmorIQDecision` | `ApprovalStatus` | `ToolInvocationResult` |
 |---|---|---|---|
-| `invoke_with_policy` returns `MCPInvocationResult`, no hold observed | `ALLOW` + `armoriq_policy_decision` (E1/E3 confirm the source is really the policy) | none | `executed` only with `tool_server_reached=True` + `ledger_entry_id`; else `unknown` (never claim ledger-backed execution without the reference) |
+| `invoke_with_policy` returns `MCPInvocationResult`, no hold observed | `ALLOW` + `armoriq_policy_decision` (E1/E3 confirm the source is really the policy) | none | `executed` only with `tool_server_reached=True` + `ledger_entry_id` (read from the result's `_meta.ledger_entry_id`, SHARED_INTERFACES §4); else `unknown` (never claim ledger-backed execution without the reference). A result with `isError: true` (or SDK `status="error"`) is never this row: see "Tool-server error/rejection shape" |
 | `invoke_with_policy` returns success after `on_hold` fired with a `delegation_id` | `ALLOW` + `armoriq_policy_decision` | `approved` with that `delegation_id` (`requested_at` = hold-callback time, `resolved_at` = resume time) | `executed` only on ledger evidence |
 | `PolicyBlockedException` | `BLOCK` + `armoriq_policy_decision`, `enforcement_action` kept verbatim | none | `not_reached`, `tool_server_reached=False` |
 | `PolicyHoldException` (SDK did not wait) → rejected/expired/timeout/unverifiable | terminal non-ALLOW (`BLOCK` + policy source for rejected/expired; `UNVERIFIED` + `unknown` otherwise) | `rejected`/`expired`/`timeout` where the shape validates | `not_reached`, never executed |
@@ -142,7 +149,7 @@ source, not live**: live behavior is confirmed or corrected only by E1–E4
 | Any other `DelegationException` | `UNVERIFIED` + `unknown` | none | `not_reached`, never executed |
 | `IntentMismatchException` before network | `BLOCK` + `armoriq_sdk_plan_check` | none | `not_reached`, tool server never called |
 | Mint/transport/unknown failure | `UNVERIFIED` + `unknown` (`armoriq_issuance` only when minting failed at ArmorIQ) | none or `unverified` | `not_reached`/`error`/`unknown` |
-| Tool-server error/rejection shape | `BLOCK` or `UNVERIFIED` + `tool_server_rule` | none | `rejected_by_tool_server` / `error` |
+| Tool-server error/rejection shape (`isError: true`, text `{code, message}`; SHARED_INTERFACES §4) | `BLOCK` + `tool_server_rule` (code outside the §4 set → `internal`) | none | `rejected_by_tool_server` with `error_code`; `ledger_entry_id` = the rejection's own row, or the original entry on `replay` |
 
 Rules that never change: `armoriq_sdk_plan_check` outcomes are BLOCK-only;
 HOLD is carried only with an ArmorIQ source (`ARMORIQ_DECISION_SOURCES`);
