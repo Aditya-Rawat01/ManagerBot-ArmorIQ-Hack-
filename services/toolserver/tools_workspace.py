@@ -11,8 +11,6 @@ keeps it (16 Oct 12:00); otherwise it is not registered.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -23,6 +21,7 @@ from services.contracts import ToolName
 from services.contracts.tool_args import MAX_MESSAGE_CHARS
 from services.toolserver import db
 from services.toolserver.security import VerifiedCall
+from services.toolserver.tools_memory import ProductTool
 
 
 class _NoDatabase(Exception):
@@ -144,13 +143,6 @@ def _insert_followup_task(
             row = cur.fetchone()
         names = [d.name for d in cur.description or []]
         return dict(zip(names, row, strict=True))
-
-
-@dataclass(frozen=True)
-class ProductTool:
-    name: ToolName
-    description: str
-    handler: Callable[..., Awaitable[BaseModel]]
 
 
 PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
