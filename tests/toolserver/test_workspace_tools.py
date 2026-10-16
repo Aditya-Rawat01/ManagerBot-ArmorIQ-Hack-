@@ -436,6 +436,28 @@ def test_honeypot_registered_on_workspace_only() -> None:
     }
 
 
+def test_single_product_tool_type_and_disjoint_registries() -> None:
+    """One `ProductTool` definition; the two registries never overlap (the
+    dispatch merge would otherwise let one silently shadow the other)."""
+    from services.contracts import McpEndpoint, tool_spec
+    from services.toolserver import tools_memory, tools_workspace
+    from services.toolserver.servers import dispatch_table
+
+    assert tools_workspace.ProductTool is tools_memory.ProductTool
+    assert not set(tools_memory.PRODUCT_TOOLS) & set(tools_workspace.PRODUCT_TOOLS)
+    for registry, endpoint in (
+        (tools_memory.PRODUCT_TOOLS, McpEndpoint.MEMORY),
+        (tools_workspace.PRODUCT_TOOLS, McpEndpoint.WORKSPACE),
+    ):
+        for name, spec in registry.items():
+            assert isinstance(spec, tools_memory.ProductTool) and spec.name is name
+            assert tool_spec(name).endpoint is endpoint, name.value
+    memory, workspace = dispatch_table(McpEndpoint.MEMORY), dispatch_table(McpEndpoint.WORKSPACE)
+    assert not set(memory) & set(workspace)
+    assert set(workspace) == set(tools_workspace.PRODUCT_TOOLS)
+    assert set(memory) == set(tools_memory.PRODUCT_TOOLS)
+
+
 def test_honeypot_module_imports_no_network_client() -> None:
     source = Path("services/toolserver/tools_workspace.py").read_text()
     imports: set[str] = set()

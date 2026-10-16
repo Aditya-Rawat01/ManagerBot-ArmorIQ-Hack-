@@ -117,8 +117,15 @@ _TIER_RANK: dict[DataTier, int] = {
 def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
     """P2-08 per-role ceiling (SHARED_INTERFACES §6) from the verified `_ctx`
     role, independent of ArmorIQ (R-26): manager → restricted, senior →
-    confidential, junior → team. Tier-less tools (P2-09/P2-10) authorize in
-    their own handlers. Unknown roles fail closed.
+    confidential, junior → team. Unknown roles fail closed.
+
+    Tier-less tools return here unchecked. P2-09's Maya-only maintenance
+    tools check the manager role in their own handlers. The P2-10 workspace
+    tools (`send_external_message`, `create_followup_task`) intentionally
+    have NO tool-server role check, here or in their handlers: ArmorIQ policy
+    is the deciding layer for them (ADR-025: it must BLOCK the honeypot for
+    every persona, and that BLOCK is the demo's evidence), so no application
+    rule may pre-empt or mask the ArmorIQ decision.
     """
     tier = tool_spec(tool).tier
     if tier is None:

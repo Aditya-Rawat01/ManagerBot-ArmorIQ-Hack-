@@ -12,8 +12,6 @@ recorded under ADR-024 in docs/ARCHITECTURE_DECISIONS.md).
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -24,6 +22,7 @@ from services.contracts import PersonaKey, ToolName
 from services.contracts.tool_args import MAX_MESSAGE_CHARS
 from services.toolserver import db
 from services.toolserver.security import VerifiedCall
+from services.toolserver.tools_memory import ProductTool
 
 # Joins the parts of a scoped idempotency key (ASCII unit separator: never in
 # a workspace/member id, so ("a", "b\x1fc") and ("a\x1fb", "c") cannot collide).
@@ -192,13 +191,8 @@ def _insert_followup_task(
         return dict(zip(names, row, strict=True))
 
 
-@dataclass(frozen=True)
-class ProductTool:
-    name: ToolName
-    description: str
-    handler: Callable[..., Awaitable[BaseModel]]
-
-
+# One registry record type for both endpoints (`tools_memory.ProductTool`);
+# servers.dispatch_table merges the two PRODUCT_TOOLS maps, which never overlap.
 PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
     ToolName.SEND_EXTERNAL_MESSAGE: ProductTool(
         name=ToolName.SEND_EXTERNAL_MESSAGE,
