@@ -52,7 +52,16 @@ MappingEvent = dict[str, Any]
 _BOT_SUBTYPES = frozenset({"bot_message", "message_changed", "message_deleted"})
 
 OrchestratorHandle = Callable[[RequestContext, str], Awaitable[str]]
-"""P3-04 entry point (fake until merged): returns the request ID it accepted."""
+"""P3-04 entry point (fake until merged): returns the request ID it accepted.
+
+Slack can never set request options. SHARED_INTERFACES §12 proposes
+``handle(ctx, message, options: RequestOptions)``; until P3-04 lands it, the
+adapter calls ``handle(ctx, message)`` and nothing else. When ``RequestOptions``
+exists, Slack must pass one FIXED default built here (``simulate_hijacked_model
+=False``, which is web-only, and no ``confirmation_token``), never anything
+derived from event text or payload fields. Pinned by
+``test__offline_fake_slack_handle_gets_only_ctx_and_message``.
+"""
 
 UNMAPPED_USER_REFUSAL = (
     "Sorry, I can only help members of this team who are set up in ProxyLead. "
