@@ -45,7 +45,7 @@ from services.contracts import (
     tool_spec,
 )
 from services.contracts.tool_args import TOOL_ARGUMENT_MODELS
-from services.toolserver import __version__
+from services.toolserver import __version__, tools_memory, tools_workspace
 from services.toolserver.ledger import (
     ACCEPTED,
     DuplicateJti,
@@ -67,7 +67,7 @@ from services.toolserver.schemas import (
     parse_tool_arguments,
 )
 from services.toolserver.security import REPLAY, CtxRejection, VerifiedCall, verify_tool_call
-from services.toolserver.tools_memory import PRODUCT_TOOLS, ProductTool
+from services.toolserver.tools_memory import ProductTool
 
 logger = logging.getLogger(__name__)
 
@@ -162,11 +162,14 @@ def _schema_tool(spec: ProductTool) -> Tool:
 
 
 def dispatch_table(endpoint: McpEndpoint) -> dict[ToolName, ProductTool]:
-    """Implemented product tools served by `endpoint` (all behind dispatch)."""
+    """Implemented product tools served by `endpoint` (all behind dispatch).
+
+    Merged live from both tool modules on every call, so tests may swap a
+    handler via monkeypatch and P2-10-style registration stays one line.
+    """
+    combined = {**tools_memory.PRODUCT_TOOLS, **tools_workspace.PRODUCT_TOOLS}
     return {
-        name: spec
-        for name, spec in PRODUCT_TOOLS.items()
-        if tool_spec(spec.name).endpoint is endpoint
+        name: spec for name, spec in combined.items() if tool_spec(spec.name).endpoint is endpoint
     }
 
 
