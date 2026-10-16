@@ -1,9 +1,19 @@
 """MCP result framing for product tools (P2-06, SHARED_INTERFACES §4).
 
-Success: ``CallToolResult(isError=False)`` with one text block carrying the
-JSON of the P2-02 result model. Failure: ``CallToolResult(isError=True)`` with
-one text block carrying ``{"code", "message"}`` (codes from SHARED_INTERFACES
-§4). Messages never echo argument values or protected details.
+Canonical shape (what the gateway, P1-02, parses):
+
+- Success: ``CallToolResult(isError=false)`` with one text block carrying the
+  JSON of the P2-02 result model, and ``_meta.ledger_entry_id`` = the decimal
+  string of the ``tool_execution_ledger.id`` row that records the execution.
+- Rejection or failure: ``CallToolResult(isError=true)`` with one text block
+  carrying ``{"code", "message"}`` (codes from SHARED_INTERFACES §4).
+  ``_meta.ledger_entry_id`` is present when this call has its own ledger row
+  (``invalid_arguments``, ``out_of_scope``, handler errors);
+  ``_meta.original_entry_id`` is present on ``replay`` when the original
+  call's ledger row exists.
+
+Messages are fixed per code: they never echo argument values, exception text,
+or protected details.
 """
 
 from __future__ import annotations
@@ -15,7 +25,8 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import BaseModel, ValidationError
 
 from services.contracts import ToolName, tool_args
-from services.toolserver.security import CONTEXT_EXPIRED, INVALID_CONTEXT, REPLAY, CtxRejection
+from services.toolserver.ledger import LedgerEntryId
+from services.toolserver.security import CONTEXT_EXPIRED, INVALID_CONTEXT, REPLAY
 
 INTERNAL = "internal"
 INVALID_ARGUMENTS = "invalid_arguments"
@@ -31,30 +42,42 @@ _ERROR_MESSAGE: dict[str, str] = {
 }
 
 
-def error_result(code: str) -> CallToolResult:
+def _ref(entry_id: LedgerEntryId) -> str:
+    return str(entry_id.value)
+
+
+def error_result(
+    code: str,
+    *,
+    ledger_entry_id: LedgerEntryId | None = None,
+    original_entry_id: LedgerEntryId | None = None,
+) -> CallToolResult:
     """isError result for a rejection code (unknown codes become `internal`)."""
     normalized = code if code in _ERROR_MESSAGE else INTERNAL
+    meta: dict[str, Any] = {}
+    if ledger_entry_id is not None:
+        meta["ledger_entry_id"] = _ref(ledger_entry_id)
+    if original_entry_id is not None and normalized == REPLAY:
+        meta["original_entry_id"] = _ref(original_entry_id)
     return CallToolResult(
-        isError=True,
+        is_error=True,
         content=[
             TextContent(
                 type="text",
                 text=json.dumps({"code": normalized, "message": _ERROR_MESSAGE[normalized]}),
             )
         ],
+        meta=meta or None,
     )
 
 
-def ok_result(model: BaseModel) -> CallToolResult:
-    """Success result carrying the result-model JSON as text."""
+def ok_result(model: BaseModel, *, ledger_entry_id: LedgerEntryId) -> CallToolResult:
+    """Success result: result-model JSON as text, ledger reference in `_meta`."""
     return CallToolResult(
-        isError=False,
+        is_error=False,
         content=[TextContent(type="text", text=model.model_dump_json())],
+        meta={"ledger_entry_id": _ref(ledger_entry_id)},
     )
-
-
-def rejection_from_ctx(rejection: CtxRejection) -> CallToolResult:
-    return error_result(rejection.code)
 
 
 class InvalidArguments(Exception):
