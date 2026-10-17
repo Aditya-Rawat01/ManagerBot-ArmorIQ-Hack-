@@ -32,10 +32,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SlackRuntime:
-    """A running Socket Mode handler plus the thread that connected it."""
+    """A running Socket Mode handler plus the thread that connected it.
+
+    ``sender`` is the :class:`SlackSender` over the running Bolt app's Web API
+    client (the same client that answered ``auth.test``). ``apps/api/main.py``
+    hands it to the orchestrator's delivery (P3-04/P3-06).
+    """
 
     handler: Any
     thread: threading.Thread
+    sender: SlackSender | None = None
 
     def stop(self) -> None:
         try:
@@ -178,8 +184,11 @@ def start_slack_socket(
     if loop is None:
         logger.warning("slack socket mode disabled: no API event loop to dispatch on")
         return None
+    from slack_bolt import App
     from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+    bolt = App(token=bot_token)
+    sender = SlackSender(bolt.client)
     app = build_app(
         bot_token=bot_token,
         members=members,
@@ -189,6 +198,8 @@ def start_slack_socket(
         db=db,
         handle=handle,
         loop=loop,
+        app=bolt,
+        sender=sender,
     )
     handler = SocketModeHandler(app, app_token)
     thread = threading.Thread(
@@ -196,7 +207,7 @@ def start_slack_socket(
     )
     thread.start()
     logger.info("slack socket mode started")
-    return SlackRuntime(handler=handler, thread=thread)
+    return SlackRuntime(handler=handler, thread=thread, sender=sender)
 
 
 def _connect_quietly(handler: Any) -> None:

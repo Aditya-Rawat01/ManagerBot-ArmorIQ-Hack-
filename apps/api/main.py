@@ -33,40 +33,101 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hooks: the Slack Socket Mode client (P3-05).
+    """Startup/shutdown hooks: the orchestrator (P3-04), then Slack (P3-05).
 
-    D-27 (RESOLVED by VTCodeCraft, 17 Oct 2026, issue #26): the client runs
-    inside this API process, one uvicorn worker (never ``--workers N``: one
-    websocket per worker). The adapter starts only with tokens configured
-    AND an orchestrator handle (P3-04, not merged; it sets
-    ``app.state.orchestrator_handle``): otherwise the API serves HTTP only
-    and `/health` stays green. Starting Slack can
-    never fail API startup: any exception (an invalid or revoked token makes
-    Bolt's constructor ``auth.test`` raise; Slack may be unreachable) is
-    logged by exception class and the API continues without Slack.
+    The orchestrator singletons (real ``ArmorIQGateway``, Anthropic planner
+    and responder clients, backend audit database, D-14 confirmation store)
+    are built only when every required setting exists (names in
+    ``apps.api.orchestrator.REQUIRED_SETTINGS``); they then set
+    ``app.state.orchestrator`` (``confirm`` and ``handle`` for P4-01) and
+    ``app.state.orchestrator_handle`` (the Slack ``OrchestratorHandle``).
+    Missing settings are logged by NAME only and the API serves HTTP only.
+    Construction makes no network call (clients and the pool are lazy).
+
+    D-27 (RESOLVED by VTCodeCraft, 17 Oct 2026, issue #26): the Slack client
+    runs inside this API process, one uvicorn worker (never ``--workers N``:
+    one websocket per worker, and the D-14 confirmation store is in-process).
+    The adapter starts only with tokens configured AND an orchestrator
+    handle: otherwise the API serves HTTP only and `/health` stays green.
+    Its sender is handed to the orchestrator's delivery through a
+    :class:`SlackSenderSlot`. Neither can fail API startup: any exception
+    (an invalid or revoked token makes Bolt's constructor ``auth.test``
+    raise; Slack may be unreachable) is logged by exception class and the
+    API continues.
     """
     from services.slack_socket.app import stop_slack_socket
 
-    runtime, db = await _start_slack(app)
+    orchestrator, orchestrator_db, sender_slot = _start_orchestrator(app)
+    runtime, slack_db = await _start_slack(app, shared_db=orchestrator_db)
+    if sender_slot is not None and runtime is not None:
+        sender_slot.set(getattr(runtime, "sender", None))
     try:
         yield
     finally:
         stop_slack_socket(runtime)
-        if db is not None:
-            db.close()
+        if orchestrator is not None:
+            try:
+                await orchestrator.aclose()
+            except Exception as exc:
+                logger.warning("orchestrator shutdown error=%s", type(exc).__name__)
+        if sender_slot is not None:
+            sender_slot.clear()
+        for db in (slack_db, orchestrator_db):
+            if db is not None:
+                db.close()
 
 
-async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
+def _start_orchestrator(app: FastAPI) -> tuple[Any, Any, Any]:
+    """Build the orchestrator if configured. Never raises; no network call.
+
+    Returns ``(orchestrator, db, sender_slot)``, all None when disabled. A
+    handle already present on ``app.state`` (tests) is left alone when the
+    orchestrator is not configured.
+    """
+    settings: Settings = app.state.settings
+    try:
+        from apps.api.orchestrator import (
+            SlackSenderSlot,
+            build_orchestrator,
+            missing_orchestrator_settings,
+        )
+
+        missing = missing_orchestrator_settings(settings)
+        if missing:
+            logger.info(
+                "orchestrator disabled (API serves HTTP only): missing settings %s",
+                ", ".join(missing),
+            )
+            return None, None, None
+        slot = SlackSenderSlot()
+        orchestrator, db = build_orchestrator(settings, sender_provider=slot)
+    except Exception as exc:
+        logger.error(
+            "orchestrator failed to start; API serves HTTP only error=%s", type(exc).__name__
+        )
+        return None, None, None
+    if settings.min_score is None:
+        logger.info("MIN_SCORE unset: answers abstain (threshold_unset) until E17 calibrates it")
+    app.state.orchestrator = orchestrator
+    app.state.orchestrator_handle = orchestrator.handle
+    logger.info("orchestrator ready")
+    return orchestrator, db, slot
+
+
+async def _start_slack(app: FastAPI, shared_db: Any = None) -> tuple[Any, Any]:
     """Start the Socket Mode adapter if configured. Never raises.
 
-    Returns ``(runtime, db)``; both are None when Slack is disabled or failed
-    to start. The backend database is opened, and the single workspace ID
-    resolved (``resolve_workspace_id``), only when Slack will actually start
-    (tokens AND handle). The blocking parts (the workspace query, Bolt's
-    ``auth.test``) run in a worker thread so the event loop is never stalled.
+    Returns ``(runtime, owned_db)``; both are None when Slack is disabled or
+    failed to start. ``shared_db`` (the orchestrator's backend database) is
+    reused when given and never closed here; otherwise a backend database is
+    opened, and the single workspace ID resolved (``resolve_workspace_id``),
+    only when Slack will actually start (tokens AND handle). The blocking
+    parts (the workspace query, Bolt's ``auth.test``) run in a worker thread
+    so the event loop is never stalled.
     """
     settings: Settings = app.state.settings
     db = None
+    owned = None
     try:
         from apps.api.core.db import BackendDatabase, BackendDbNotConfiguredError
         from apps.api.identity import build_member_table
@@ -78,9 +139,11 @@ async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
         handle = getattr(app.state, "orchestrator_handle", None)  # P3-04 sets it
         workspace_id = None
         if bot_token and app_token and handle is not None:
-            if settings.database_url_backend is not None:
+            if shared_db is not None:
+                db = shared_db
+            elif settings.database_url_backend is not None:
                 try:
-                    db = BackendDatabase(settings.database_url_backend.get_secret_value())
+                    db = owned = BackendDatabase(settings.database_url_backend.get_secret_value())
                 except BackendDbNotConfiguredError:
                     db = None
             if db is not None:
@@ -108,10 +171,10 @@ async def _start_slack(app: FastAPI) -> tuple[Any, Any]:
             type(exc).__name__,
         )
         runtime = None
-    if runtime is None and db is not None:
-        db.close()
-        db = None
-    return runtime, db
+    if runtime is None and owned is not None:
+        owned.close()
+        owned = None
+    return runtime, owned
 
 
 def _secret(value: object) -> str | None:
