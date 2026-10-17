@@ -140,13 +140,19 @@ class BackendDatabase:
                 "DATABASE_URL_BACKEND is not set; refusing to guess a database"
             )
         self._dsn = dsn
+        # ``check``: Neon closes idle connections (and suspends idle compute), so
+        # a pooled connection can be dead by the time a Slack event arrives
+        # minutes later. Each checkout runs a cheap liveness query and swaps a
+        # dead connection for a new one instead of failing the request
+        # (``db_unavailable``). Same setting as the tool-server pool.
         self._pool = ConnectionPool(
             dsn,
             min_size=_POOL_MIN_SIZE,
             max_size=_POOL_MAX_SIZE,
             open=False,
             configure=_configure,
-            kwargs={"prepare_threshold": None},
+            check=ConnectionPool.check_connection,
+            kwargs={"prepare_threshold": None, "connect_timeout": CONNECT_TIMEOUT_S},
         )
         self._opened = False
         self._open_lock = threading.Lock()
