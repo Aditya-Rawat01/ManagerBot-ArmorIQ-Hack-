@@ -268,6 +268,28 @@ merges `superseded_by` (the replacement's `note-<id>` when it has an active
 source, else `null`), so it leaves search and `get_source`. Drafts are never
 chunked.
 
+> **OPEN FOLLOW-UP — P4-04 ICR required (P2-09 review I4; not implemented).**
+> Maya cannot yet see what she confirms or supersedes:
+> - **Draft content is unreadable.** `draft_review_queue` (ADR-023) is
+>   metadata only (no title, no content), and `knowledge_get_source_*`
+>   returns only `active` + `authoritative` sources, so a draft answers
+>   `not_found`; ADR-023's "open the content through
+>   `knowledge_get_source_team`" path does not work for drafts.
+> - **No listing of current authoritative notes** exists for choosing a
+>   supersede target or replacement (`record_id` + `version`).
+>
+> Since confirmation now publishes the note as team-tier evidence that every
+> member can retrieve (D-09 rule 2), confirming blind could publish text
+> Maya never read (for example a note saved in a DM about a confidential
+> topic: D-10 rule 4 is not implemented yet). The console must not ship the
+> confirm/supersede actions until an ICR (P4-04 with the P2-09 owner and the
+> DB steward) defines, for example: (a) a manager-only draft preview,
+> labelled draft and never evidence (never cited, never search-visible,
+> outside the responder's evidence path), and (b) a metadata-only view of
+> current authoritative notes (record ID, version, author member ID,
+> approval time, content kind; no content), granted to the backend like
+> `draft_review_queue`.
+
 Search ordering and score (P2-05, `services/knowledge/retrieval.py`,
 **PROPOSED**; the threshold value stays D-23/E17's): `knowledge_search_*`
 runs a lexical leg (`websearch_to_tsquery`, rows with `ts_rank_cd` = 0
