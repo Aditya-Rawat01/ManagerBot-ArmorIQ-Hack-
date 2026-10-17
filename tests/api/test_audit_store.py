@@ -593,7 +593,7 @@ def test_recent_requests_timeline_holds_unanswered() -> None:
     db2 = FakeDatabase(
         fetchall=[
             [(NOW, "request_received", None, None, None, {}, None)],
-            [(NOW, "authorization_decided", "plan-1", 0, "application_rule", {}, None)],
+            [(NOW, "authorization_decided", "plan-1", 0, None, "application_rule", {}, None)],
             [(NOW, "slack_dm", "m-sam", "delivered", "plan-1")],
         ]
     )
@@ -618,10 +618,11 @@ def test_recent_requests_timeline_holds_unanswered() -> None:
     holds = pending_holds(db3, maya)
     assert holds[0].delegation_id == "dlg-1"
     db4 = FakeDatabase(
-        fetchall=[[(9, "req-1", "why?", "open", NOW)], [("req-1", "9", "no_evidence")]]
+        fetchall=[[(9, "req-1", "m-sam", "why?", "open", NOW)], [("req-1", "9", "no_evidence")]]
     )
     items = unanswered(db4, maya)
     assert items[0].reason == "no_evidence"
+    assert items[0].requester_member_id == "m-sam"
 
 
 # --- transaction, safety, UTC, DSN ------------------------------------------

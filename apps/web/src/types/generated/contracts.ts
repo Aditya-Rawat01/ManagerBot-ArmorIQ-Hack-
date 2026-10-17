@@ -191,6 +191,57 @@ export type Hits = KnowledgeSearchHit[];
  */
 export type MinScore = number | null;
 export type Query = string;
+export type Label = string;
+export type Name = string;
+export type Status1 = "connected" | "unavailable" | "planned";
+export type CheckedAt = string;
+export type Connectors = ManagerConnectorStatus[];
+export type Environment1 = string;
+export type Service1 = string;
+export type Version2 = string;
+export type ArmoriqConsoleUrl = string | null;
+export type DelegationId2 = string | null;
+export type Note = string;
+export type PlanId2 = string;
+export type RequestId4 = string;
+export type RequestedAt1 = string;
+export type StepIndex2 = number;
+export type LastEventAt = string;
+export type RequestId5 = string;
+export type DelegationId3 = string | null;
+export type DeliveryStatus = string | null;
+export type EnforcementLayer = string | null;
+export type ErrorClass = string | null;
+export type EventType = string;
+/**
+ * What actually happened at the tool server, as evidenced by its ledger.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ToolExecutionStatus".
+ */
+export type ToolExecutionStatus = "executed" | "rejected_by_tool_server" | "not_reached" | "error" | "unknown";
+export type IsArmoriqPolicy = boolean;
+export type Jti1 = string | null;
+export type Kind = "request" | "decision" | "delivery";
+export type LedgerEntryId = string | null;
+export type OccurredAt1 = string;
+export type PlanId3 = string | null;
+export type Reason1 = string | null;
+export type Simulated = boolean;
+export type StepIndex3 = number | null;
+export type ToolServerReached = boolean | null;
+export type ValidationOutcome = string | null;
+export type Topic = string;
+export type RuleId = string;
+export type Topic1 = string;
+export type Note1 = string;
+export type Rules = ManagerTopicRuleView[];
+export type CreatedAt1 = string;
+export type Question = string;
+export type QuestionId = string;
+export type Reason2 = string | null;
+export type RequestId6 = string;
+export type Status2 = string;
 /**
  * Registered MCP endpoint names (PRD v2 §2). Must match the ArmorIQ console exactly.
  *
@@ -198,19 +249,19 @@ export type Query = string;
  * via the `definition` "McpEndpoint".
  */
 export type McpEndpoint = "memory-mcp" | "workspace-mcp";
-export type EnforcementLayer = string;
+export type EnforcementLayer1 = string;
 export type Executed = false;
-export type IsArmoriqPolicy = boolean;
+export type IsArmoriqPolicy1 = boolean;
 export type Rejection = string | null;
-export type Simulated = boolean;
+export type Simulated1 = boolean;
 export type EscalationUserConfirmed = boolean;
 export type MatchedTopicRuleId = string | null;
 export type Purpose = string;
-export type StepIndex2 = number;
+export type StepIndex4 = number;
 export type Steps = PlannedToolCall[];
 export type Summary = string;
 export type ReceivedAt = string;
-export type RequestId4 = string;
+export type RequestId7 = string;
 export type SlackChannelId = string | null;
 /**
  * Used for event deduplication
@@ -224,27 +275,20 @@ export type AbstainReason = string | null;
 export type Abstained = boolean;
 export type AnswerText = string | null;
 export type Citations = CitationView[];
-export type DeliveryStatus = string | null;
+export type DeliveryStatus1 = string | null;
 /**
  * Executed send_external_message steps of this request, counted from the persisted ledger-backed execution references (the only way the honeypot writes its synthetic sink). Guarded mode: always 0. The backend cannot read the sink table itself (grant PROPOSED, SHARED_INTERFACES §7).
  */
 export type EgressSinkExecutions = number;
-export type LastEventAt = string | null;
-export type Note = string | null;
+export type LastEventAt1 = string | null;
+export type Note2 = string | null;
 export type OffPlanAttempts = OffPlanAttemptView[];
 export type Outcome = ("allow" | "block" | "hold" | "abstain" | "error" | "unverified" | "clarification") | null;
-export type RequestId5 = string;
+export type RequestId8 = string;
 export type SimulationActive = boolean;
 export type State = "processing" | "pending_approval" | "awaiting_confirmation" | "completed";
-/**
- * What actually happened at the tool server, as evidenced by its ledger.
- *
- * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
- * via the `definition` "ToolExecutionStatus".
- */
-export type ToolExecutionStatus = "executed" | "rejected_by_tool_server" | "not_reached" | "error" | "unknown";
-export type IsArmoriqPolicy1 = boolean;
-export type StepIndex3 = number;
+export type IsArmoriqPolicy2 = boolean;
+export type StepIndex5 = number;
 export type Steps1 = StepStatusView[];
 export type Passcode = string;
 export type DisplayName1 = string;
@@ -254,15 +298,15 @@ export type ErrorMessage = string | null;
 /**
  * Application-generated invocation ID (not an ArmorIQ claim)
  */
-export type Jti1 = string;
-export type LedgerEntryId = string | null;
-export type PlanId2 = string;
-export type RequestId6 = string;
-export type StepIndex4 = number;
+export type Jti2 = string;
+export type LedgerEntryId1 = string | null;
+export type PlanId4 = string;
+export type RequestId9 = string;
+export type StepIndex6 = number;
 /**
  * None when it cannot be determined
  */
-export type ToolServerReached = boolean | null;
+export type ToolServerReached1 = boolean | null;
 
 /**
  * Generated from services.contracts. Do not edit by hand.
@@ -467,6 +511,171 @@ export interface KnowledgeSearchResult {
   tool: ToolName;
 }
 /**
+ * One connector tile of ``GET /api/v1/manager/health``.
+ *
+ * ``status`` is the machine value; ``label`` is the exact wording the
+ * console shows (P4-04 §9.6). ``planned`` is never a fake health result:
+ * it marks a connector that does not exist yet (Gmail, Drive, Meet).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerConnectorStatus".
+ */
+export interface ManagerConnectorStatus {
+  label: Label;
+  name: Name;
+  status: Status1;
+}
+/**
+ * ``GET /api/v1/manager/health``: real checks, one row per connector.
+ *
+ * Every ``connected`` / ``unavailable`` verdict comes from a live probe
+ * (tool-server ``/health``, a backend ``SELECT 1``, the Slack socket
+ * thread); an unconfigured or failed probe reports ``unavailable``, never
+ * a fake ``connected``.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerHealthView".
+ */
+export interface ManagerHealthView {
+  checked_at: CheckedAt;
+  connectors: Connectors;
+  environment: Environment1;
+  service: Service1;
+  version: Version2;
+}
+/**
+ * One unresolved HOLD of ``GET /api/v1/manager/holds``.
+ *
+ * ``armoriq_console_url`` is the D-22 target where Maya resolves it;
+ * ``note`` repeats that approval happens only there. There is no approve
+ * or reject field by design (R-40, Arch §5.6).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerHoldView".
+ */
+export interface ManagerHoldView {
+  approval_state: ApprovalState;
+  armoriq_console_url: ArmoriqConsoleUrl;
+  delegation_id: DelegationId2;
+  note: Note;
+  plan_id: PlanId2;
+  request_id: RequestId4;
+  requested_at: RequestedAt1;
+  requester_persona: PersonaKey | null;
+  step_index: StepIndex2;
+  tool: ToolName | null;
+}
+/**
+ * One row of ``GET /api/v1/manager/requests`` (newest first).
+ *
+ * Mirrors the P3-01 ``RequestSummary``; only IDs that have a
+ * ``request_received`` event are listed. Identity fields are empty when
+ * the stored origin payload is unreadable.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerRequestSummary".
+ */
+export interface ManagerRequestSummary {
+  entry_point: EntryPoint | null;
+  last_event_at: LastEventAt;
+  request_id: RequestId5;
+  requester_persona: PersonaKey | null;
+}
+/**
+ * One event of ``GET /api/v1/manager/requests/{request_id}/timeline``.
+ *
+ * Merged request / decision / delivery events, oldest first, with the
+ * console's correlation fields: ``jti`` and ``ledger_entry_id`` line up
+ * with the execution ledger (SHARED_INTERFACES §13). Every optional field
+ * is a whitelisted extraction from the reader's redacted payload; missing
+ * or unknown values stay ``None`` rather than failing the page.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerTimelineEntry".
+ */
+export interface ManagerTimelineEntry {
+  approval_state: ApprovalState | null;
+  decision_source: DecisionSource | null;
+  delegation_id: DelegationId3;
+  delivered_to_persona: PersonaKey | null;
+  delivery_channel: DeliveryChannel | null;
+  delivery_status: DeliveryStatus;
+  enforcement_layer: EnforcementLayer;
+  error_class: ErrorClass;
+  event_type: EventType;
+  execution_status: ToolExecutionStatus | null;
+  is_armoriq_policy: IsArmoriqPolicy;
+  jti: Jti1;
+  kind: Kind;
+  ledger_entry_id: LedgerEntryId;
+  occurred_at: OccurredAt1;
+  outcome: DecisionOutcome | null;
+  plan_id: PlanId3;
+  reason: Reason1;
+  simulated: Simulated;
+  step_index: StepIndex3;
+  tier_delivered: DataTier | null;
+  tool: ToolName | null;
+  tool_server_reached: ToolServerReached;
+  validation_outcome: ValidationOutcome;
+}
+/**
+ * ``PUT /api/v1/manager/topic-rules`` body: topic + ceiling only.
+ *
+ * A request body, so it can never carry identity or authority: unknown
+ * keys (``member_id``, ``app_role``, ``actor``, ...) are refused with a
+ * ``422`` envelope. ``topic`` validity is enforced by
+ * ``apps.api.topic_map.validate_topic`` (normalization, length,
+ * specificity), mapped to the same ``422``; the stored
+ * ``created_by_member_id`` always comes from the session.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerTopicRuleUpdate".
+ */
+export interface ManagerTopicRuleUpdate {
+  max_tier: DataTier;
+  topic: Topic;
+}
+/**
+ * One topic-map rule (P3-02): retrieval configuration, not authority.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerTopicRuleView".
+ */
+export interface ManagerTopicRuleView {
+  max_tier: DataTier;
+  rule_id: RuleId;
+  topic: Topic1;
+}
+/**
+ * ``GET /api/v1/manager/topic-rules``: the rules plus the access note.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerTopicRulesView".
+ */
+export interface ManagerTopicRulesView {
+  note: Note1;
+  rules: Rules;
+}
+/**
+ * One queue row of ``GET /api/v1/manager/unanswered``.
+ *
+ * The question is stored redacted at write time and passed through
+ * unchanged; no protected snippet is ever part of this view.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ManagerUnansweredView".
+ */
+export interface ManagerUnansweredView {
+  created_at: CreatedAt1;
+  question: Question;
+  question_id: QuestionId;
+  reason: Reason2;
+  request_id: RequestId6;
+  requester_persona: PersonaKey | null;
+  status: Status2;
+}
+/**
  * A model-requested tool call routed off-plan (P3-03/P3-07). Never executed.
  *
  * ``enforcement_layer`` is the server's wording for ``decision_source``;
@@ -478,12 +687,12 @@ export interface KnowledgeSearchResult {
  */
 export interface OffPlanAttemptView {
   decision_source: DecisionSource;
-  enforcement_layer: EnforcementLayer;
+  enforcement_layer: EnforcementLayer1;
   executed: Executed;
-  is_armoriq_policy: IsArmoriqPolicy;
+  is_armoriq_policy: IsArmoriqPolicy1;
   outcome: DecisionOutcome;
   rejection: Rejection;
-  simulated: Simulated;
+  simulated: Simulated1;
   tool: ToolName | null;
 }
 /**
@@ -514,7 +723,7 @@ export interface PlannedToolCall {
   arguments: Arguments;
   mcp: McpEndpoint;
   purpose: Purpose;
-  step_index: StepIndex2;
+  step_index: StepIndex4;
   tool: ToolName;
 }
 export interface Arguments {
@@ -529,7 +738,7 @@ export interface Arguments {
 export interface RequestContext {
   entry_point: EntryPoint;
   received_at: ReceivedAt;
-  request_id: RequestId4;
+  request_id: RequestId7;
   requester: AuthenticatedUser;
   slack_channel_id: SlackChannelId;
   slack_event_id: SlackEventId;
@@ -551,13 +760,13 @@ export interface RequestStatusView {
   citations: Citations;
   confirmation: ConfirmationOfferView | null;
   delivery_channel: DeliveryChannel | null;
-  delivery_status: DeliveryStatus;
+  delivery_status: DeliveryStatus1;
   egress_sink_executions: EgressSinkExecutions;
-  last_event_at: LastEventAt;
-  note: Note;
+  last_event_at: LastEventAt1;
+  note: Note2;
   off_plan_attempts: OffPlanAttempts;
   outcome: Outcome;
-  request_id: RequestId5;
+  request_id: RequestId8;
   simulation_active: SimulationActive;
   state: State;
   steps: Steps1;
@@ -572,9 +781,9 @@ export interface StepStatusView {
   approval_state: ApprovalState | null;
   decision_source: DecisionSource | null;
   execution_status: ToolExecutionStatus | null;
-  is_armoriq_policy: IsArmoriqPolicy1;
+  is_armoriq_policy: IsArmoriqPolicy2;
   outcome: DecisionOutcome | null;
-  step_index: StepIndex3;
+  step_index: StepIndex5;
   tool: ToolName | null;
 }
 /**
@@ -608,13 +817,13 @@ export interface SessionInfo {
 export interface ToolInvocationResult {
   error_code: ErrorCode;
   error_message: ErrorMessage;
-  jti: Jti1;
-  ledger_entry_id: LedgerEntryId;
-  plan_id: PlanId2;
-  request_id: RequestId6;
+  jti: Jti2;
+  ledger_entry_id: LedgerEntryId1;
+  plan_id: PlanId4;
+  request_id: RequestId9;
   result: unknown;
   status: ToolExecutionStatus;
-  step_index: StepIndex4;
+  step_index: StepIndex6;
   tool: ToolName;
-  tool_server_reached: ToolServerReached;
+  tool_server_reached: ToolServerReached1;
 }

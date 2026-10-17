@@ -43,6 +43,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ``app.state.orchestrator_handle`` (the Slack ``OrchestratorHandle``),
     plus ``app.state.audit_db`` (the owner-only status reads of P4-01) and the
     web confirmation presenter (the owner-scoped web inbox, P4-01).
+    The Slack adapter is stored as ``app.state.slack_runtime`` (None when
+    disabled): P4-04's manager health check reads its thread liveness.
     Missing settings are logged by NAME only and the API serves HTTP only.
     Construction makes no network call (clients and the pool are lazy).
 
@@ -61,12 +63,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     orchestrator, orchestrator_db, sender_slot = _start_orchestrator(app)
     runtime, slack_db = await _start_slack(app, shared_db=orchestrator_db)
+    # P4-04: the manager health check reports the socket thread's liveness.
+    app.state.slack_runtime = runtime
     if sender_slot is not None and runtime is not None:
         sender_slot.set(getattr(runtime, "sender", None))
     try:
         yield
     finally:
         stop_slack_socket(runtime)
+        app.state.slack_runtime = None
         if orchestrator is not None:
             try:
                 await orchestrator.aclose()
@@ -211,7 +216,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_allowed_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["Content-Type", REQUEST_ID_HEADER],
         expose_headers=[REQUEST_ID_HEADER],
     )

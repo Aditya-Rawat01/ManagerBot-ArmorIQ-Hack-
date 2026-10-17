@@ -19,6 +19,17 @@ from typing import Any
 from pydantic.json_schema import models_json_schema
 
 from . import models
+from .api_manager import (
+    ManagerConnectorStatus,
+    ManagerHealthView,
+    ManagerHoldView,
+    ManagerRequestSummary,
+    ManagerTimelineEntry,
+    ManagerTopicRulesView,
+    ManagerTopicRuleUpdate,
+    ManagerTopicRuleView,
+    ManagerUnansweredView,
+)
 from .api_requests import (
     CitationView,
     ConfirmationOfferView,
@@ -54,6 +65,15 @@ EXPORTED_MODELS: tuple[type[models.ContractModel], ...] = (
     CitationView,
     ConfirmationOfferView,
     RequestStatusView,
+    ManagerRequestSummary,
+    ManagerTimelineEntry,
+    ManagerHoldView,
+    ManagerUnansweredView,
+    ManagerTopicRuleView,
+    ManagerTopicRulesView,
+    ManagerTopicRuleUpdate,
+    ManagerConnectorStatus,
+    ManagerHealthView,
 )
 
 CONTRACTS_DIR = Path(__file__).resolve().parent  # services/contracts
