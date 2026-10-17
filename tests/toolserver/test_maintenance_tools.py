@@ -24,8 +24,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from services.contracts import TOOL_CATALOG, ToolKind, ToolName
+from services.contracts.tool_args import KnowledgeMarkSupersededArgs
 from services.toolserver import main, tools_memory
 from services.toolserver.main import create_app
+from services.toolserver.schemas import InvalidArguments
 
 from .conftest import make_settings
 from .test_tool_dispatch import (
@@ -294,13 +296,15 @@ def test_confirm_binds_exact_version() -> None:
 
 
 @NEEDS_DB
-def test_supersede_preserves_history() -> None:
+def test_supersede_preserves_history(real_model: Any) -> None:
     """Both records remain; the old one gains superseded_by plus reason and
-    request provenance; the replacement is untouched."""
+    request provenance; the replacement (the current authoritative record)
+    is untouched."""
     maya_super = make_ctx(tool=SUPERSEDE.value, **MAYA)
     with live_client() as client:
         old = ok_json(save_note(client, f"p209-draft old {uuid.uuid4().hex}", **MAYA))
         new = ok_json(save_note(client, f"p209-draft new {uuid.uuid4().hex}", **MAYA))
+        ok_json(confirm(client, new["record_id"], new["version"]))
         message = call(
             client,
             {
@@ -321,6 +325,80 @@ def test_supersede_preserves_history() -> None:
     assert old_row["provenance"]["superseded_reason"] == "replaced by the current runbook"
     assert old_row["provenance"]["superseded_request_id"] == "req-dispatch"
     assert new_row["superseded_by_id"] is None, "replacement untouched"
+
+
+def saved_authoritative(client, text: str) -> dict:
+    """A note saved by Sam and confirmed by Maya (a valid replacement)."""
+    saved = ok_json(save_note(client, f"{text} {uuid.uuid4().hex}", **SAM))
+    ok_json(confirm(client, saved["record_id"], saved["version"]))
+    return saved
+
+
+@NEEDS_DB
+def test_supersession_cycles_are_refused(real_model: Any) -> None:
+    """Review I2: only the current record can replace another, so a 2-cycle
+    (A->B then B->A) and a 3-cycle (A->B, B->C, then C->A) are refused."""
+    with live_client() as client:
+        a = saved_authoritative(client, "p209 cycle a")
+        b = saved_authoritative(client, "p209 cycle b")
+        c = saved_authoritative(client, "p209 cycle c")
+        ok_json(supersede(client, a["record_id"], 1, b["record_id"]))
+        two_cycle = supersede(client, b["record_id"], 1, a["record_id"])
+        assert result_text(two_cycle)["code"] == "precondition_failed"
+        ok_json(supersede(client, b["record_id"], 1, c["record_id"]))
+        three_cycle = supersede(client, c["record_id"], 1, a["record_id"])
+        assert result_text(three_cycle)["code"] == "precondition_failed"
+    assert note_row(a["record_id"])["superseded_by_id"] == int(b["record_id"])
+    assert note_row(b["record_id"])["superseded_by_id"] == int(c["record_id"])
+    assert note_row(c["record_id"])["superseded_by_id"] is None, "chain head untouched"
+
+
+@NEEDS_DB
+def test_replacement_must_be_current_and_authoritative(real_model: Any) -> None:
+    """Review I2: a draft, or an already-superseded record, cannot replace
+    anything (`precondition_failed`, nothing written)."""
+    with live_client() as client:
+        target = ok_json(save_note(client, f"p209 target {uuid.uuid4().hex}", **SAM))
+        draft = ok_json(save_note(client, f"p209 draft repl {uuid.uuid4().hex}", **SAM))
+        old = saved_authoritative(client, "p209 old repl")
+        head = saved_authoritative(client, "p209 head repl")
+        ok_json(supersede(client, old["record_id"], 1, head["record_id"]))
+        for replacement in (draft, old):
+            refused = supersede(client, target["record_id"], 1, replacement["record_id"])
+            assert result_text(refused)["code"] == "precondition_failed", replacement
+    assert note_row(target["record_id"])["superseded_by_id"] is None
+
+
+@NEEDS_DB
+def test_alternate_spelling_cannot_self_supersede() -> None:
+    """Review I2 (observed: row 92 superseded by "092"): every non-canonical
+    spelling of the row's own id is `invalid_arguments`; the row is
+    unchanged."""
+    with live_client() as client:
+        saved = ok_json(save_note(client, f"p209 self {uuid.uuid4().hex}", **SAM))
+        record_id = saved["record_id"]
+        for spelling in (f"0{record_id}", f" {record_id}", f"+{record_id}", f"{record_id}\n"):
+            message = supersede(client, record_id, 1, spelling)
+            assert result_text(message)["code"] == "invalid_arguments", repr(spelling)
+    assert note_row(record_id)["superseded_by_id"] is None
+
+
+@NEEDS_DB
+def test_database_refuses_self_supersession() -> None:
+    """Review I2 (0013 CHECK): even a direct toolserver-role UPDATE cannot
+    make a note its own successor."""
+    with live_client() as client:
+        saved = ok_json(save_note(client, f"p209 check {uuid.uuid4().hex}", **SAM))
+    with (
+        psycopg.connect(LIVE_DSN) as conn,
+        conn.cursor() as cur,
+        pytest.raises(psycopg.errors.CheckViolation),
+    ):
+        cur.execute(
+            "UPDATE public.team_notes SET superseded_by_id = id WHERE id = %s",
+            (int(saved["record_id"]),),
+        )
+    assert note_row(saved["record_id"])["superseded_by_id"] is None
 
 
 @NEEDS_DB
@@ -572,6 +650,53 @@ def test_self_supersede_is_invalid_arguments() -> None:
             tool=SUPERSEDE.value,
         )
     assert result_text(message)["code"] == "invalid_arguments"
+
+
+# Spellings `int()` accepts (or that name no BIGINT row) but that are not the
+# canonical record reference (review I2: "092" self-superseded row 92).
+NON_CANONICAL_IDS = [
+    "092",  # leading zero
+    " 92",  # leading whitespace
+    "92 ",  # trailing whitespace
+    "92\n",  # trailing newline (`$` would accept it)
+    "+92",  # sign
+    "9_2",  # digit separator
+    chr(0x0669) + chr(0x0662),  # Arabic-Indic digits nine, two (int() reads 92)
+    chr(0xFF19) + chr(0xFF12),  # fullwidth digits nine, two (int() reads 92)
+    "0",
+    "-1",
+    "1e3",
+    "9223372036854775808",  # BIGINT max + 1
+    "12345678901234567890",  # 20 digits
+]
+
+
+@pytest.mark.parametrize("spelling", NON_CANONICAL_IDS)
+def test_non_canonical_record_ids_are_invalid_arguments(spelling: str) -> None:
+    """Review I2: confirm and supersede accept only `^[1-9][0-9]{0,18}$`
+    (and <= BIGINT max), in every id field; anything else is a recorded
+    `invalid_arguments` at dispatch step 1.2, before any lookup."""
+    with dev_client() as client:
+        confirmed = confirm(client, spelling, 1)
+        as_target = supersede(client, spelling, 1, "92")
+        as_replacement = supersede(client, "92", 1, spelling)
+    for message in (confirmed, as_target, as_replacement):
+        assert result_text(message)["code"] == "invalid_arguments", repr(spelling)
+
+
+@pytest.mark.parametrize(
+    "spelling", ["092", " 92", "+92", "9_2", chr(0x0669) + chr(0x0662), chr(0xFF19) + chr(0xFF12)]
+)
+def test_self_supersede_cannot_hide_behind_another_spelling(spelling: str) -> None:
+    """Review I2: the PARSED ids are compared — `int("092") == 92` — so a
+    different spelling of the same row is refused, never executed."""
+    with pytest.raises(InvalidArguments):
+        tools_memory.check_supersede_arguments(
+            KnowledgeMarkSupersededArgs(
+                record_id="92", version=1, superseded_by_record_id=spelling, reason="loop"
+            )
+        )
+    assert tools_memory.parse_record_id("9223372036854775807") == 2**63 - 1
 
 
 @pytest.mark.parametrize("tool", [SAVE, CONFIRM, SUPERSEDE])

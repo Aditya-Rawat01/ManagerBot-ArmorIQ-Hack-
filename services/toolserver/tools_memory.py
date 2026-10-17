@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -424,15 +425,36 @@ def _require_manager(verified: VerifiedCall, tool: ToolName) -> None:
         raise OutOfScope(tool.value)
 
 
-def _note_pk(record_id: str) -> int:
-    """`record_id` is the string form of the `team_notes` primary key."""
-    try:
-        pk = int(record_id)
-    except ValueError:
-        raise PreconditionFailed(f"no record {record_id!r}") from None
-    if pk < 1:
-        raise PreconditionFailed(f"no record {record_id!r}")
+#: `record_id` grammar (review I2): the canonical decimal form of a positive
+#: BIGINT `team_notes` primary key — ASCII digits only, no sign, no leading
+#: zero, no whitespace, no `_` separators. Python's `int()` accepts all of
+#: those (and non-ASCII digits), which let `"092"` slip past a raw-string
+#: self-supersede comparison while naming row 92.
+_RECORD_ID_RE = re.compile(r"[1-9][0-9]{0,18}")
+_BIGINT_MAX = 2**63 - 1
+
+
+def parse_record_id(record_id: Any) -> int:
+    """The `team_notes` primary key named by `record_id`, or InvalidArguments.
+
+    `fullmatch` (never `match`/`$`, which accept a trailing newline) against
+    an ASCII-only class (`[0-9]`, never `\\d`, which matches any Unicode
+    digit). The format alone is checked: no lookup, so nothing about any
+    record is disclosed.
+    """
+    if not isinstance(record_id, str) or _RECORD_ID_RE.fullmatch(record_id) is None:
+        raise InvalidArguments("record_id is not a record reference")
+    pk = int(record_id)
+    if pk > _BIGINT_MAX:
+        raise InvalidArguments("record_id is not a record reference")
     return pk
+
+
+def _note_pk(record_id: str) -> int:
+    """`record_id` is the canonical string form of the `team_notes` primary
+    key. Dispatch already rejected any other form at step 1.2; repeated here
+    so a direct handler call fails closed too."""
+    return parse_record_id(record_id)
 
 
 def _insert_note(
@@ -551,7 +573,13 @@ def _confirm_note(
         updated = cur.fetchone()
     if updated is None:  # unreachable: row locked above
         raise PreconditionFailed(f"no record {pk}")
-    return int(updated[0]), version
+    return pk, int(updated[0])
+
+
+def check_confirm_arguments(args: Any) -> None:
+    """Trusted-code argument policy (dispatch step 1.2): `record_id` must be
+    a canonical record reference (review I2)."""
+    parse_record_id(args.record_id)
 
 
 async def handle_knowledge_confirm_maya_decision(
@@ -569,7 +597,7 @@ async def handle_knowledge_confirm_maya_decision(
     if runtime.pool is None:
         raise _NoDatabase("confirm needs a database pool")
     ctx = verified.ctx
-    version, _ = await anyio.to_thread.run_sync(
+    pk, version = await anyio.to_thread.run_sync(
         partial(
             _confirm_note,
             runtime.pool,
@@ -581,16 +609,17 @@ async def handle_knowledge_confirm_maya_decision(
     )
     return ConfirmMayaDecisionResult(
         tool=ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION,
-        record_id=args.record_id,
+        record_id=str(pk),
         version=version,
         review_status="authoritative",
     )
 
 
 def check_supersede_arguments(args: Any) -> None:
-    """Trusted-code argument policy (dispatch step 1.2): a record cannot
-    supersede itself."""
-    if args.record_id == args.superseded_by_record_id:
+    """Trusted-code argument policy (dispatch step 1.2): both ids must be
+    canonical record references, and a record cannot supersede itself — the
+    PARSED ids are compared, never the raw strings (review I2)."""
+    if parse_record_id(args.record_id) == parse_record_id(args.superseded_by_record_id):
         raise InvalidArguments("a record cannot supersede itself")
 
 
@@ -603,33 +632,46 @@ def _supersede_note(
     superseded_by_record_id: str,
     reason: str,
     provenance: dict[str, Any],
-) -> tuple[int, int, str]:
+) -> tuple[int, int, int, str]:
     """Mark exactly `record_id` + `version` superseded by another record.
     Both rows are kept: only `superseded_by_id` and a provenance merge are
-    written — history is never deleted or overwritten."""
+    written — history is never deleted or overwritten.
+
+    Both rows are locked in one statement, in primary-key order (two
+    concurrent supersessions of the same pair cannot deadlock, and the
+    second one re-reads the first one's committed link). The replacement
+    must be the CURRENT authoritative record: authoritative (a draft is
+    never the replacement of anything) and not itself superseded. Only
+    chain heads can be linked, so no cycle can ever form (review I2): a new
+    link X -> Y needs Y to have no successor, so Y's chain is just Y, and
+    Y != X (argument policy + the 0013 CHECK)."""
     pk = _note_pk(record_id)
     by_pk = _note_pk(superseded_by_record_id)
+    if pk == by_pk:  # unreachable through dispatch (step 1.2)
+        raise InvalidArguments("a record cannot supersede itself")
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT version, review_status, superseded_by_id
+            """SELECT id, version, review_status, superseded_by_id
                FROM public.team_notes
-               WHERE id = %s AND workspace_id = %s
+               WHERE id IN (%s, %s) AND workspace_id = %s
+               ORDER BY id
                FOR UPDATE""",
-            (pk, workspace_id),
+            (pk, by_pk, workspace_id),
         )
-        row = cur.fetchone()
-        if row is None:
+        rows = {int(row[0]): row for row in cur.fetchall()}
+        target, replacement = rows.get(pk), rows.get(by_pk)
+        if target is None:
             raise PreconditionFailed(f"no record {pk}")
-        if int(row[0]) != version:
-            raise PreconditionFailed(f"record {pk} is version {row[0]}, not {version}")
-        if row[2] is not None:
+        if int(target[1]) != version:
+            raise PreconditionFailed(f"record {pk} is version {target[1]}, not {version}")
+        if target[3] is not None:
             raise PreconditionFailed(f"record {pk} is already superseded")
-        cur.execute(
-            """SELECT 1 FROM public.team_notes WHERE id = %s AND workspace_id = %s""",
-            (by_pk, workspace_id),
-        )
-        if cur.fetchone() is None:
+        if replacement is None:
             raise PreconditionFailed(f"no replacement record {by_pk}")
+        if replacement[2] != "authoritative":
+            raise PreconditionFailed(f"replacement {by_pk} is not authoritative")
+        if replacement[3] is not None:
+            raise PreconditionFailed(f"replacement {by_pk} is itself superseded")
         cur.execute(
             """UPDATE public.team_notes
                SET superseded_by_id = %s,
@@ -642,7 +684,7 @@ def _supersede_note(
         updated = cur.fetchone()
     if updated is None:  # unreachable: row locked above
         raise PreconditionFailed(f"no record {pk}")
-    return int(updated[0]), version, str(updated[1])
+    return pk, by_pk, int(updated[0]), str(updated[1])
 
 
 async def handle_knowledge_mark_superseded(
@@ -658,7 +700,7 @@ async def handle_knowledge_mark_superseded(
         raise _NoDatabase("mark superseded needs a database pool")
     check_supersede_arguments(args)
     ctx = verified.ctx
-    _, version, review_status = await anyio.to_thread.run_sync(
+    pk, by_pk, version, review_status = await anyio.to_thread.run_sync(
         partial(
             _supersede_note,
             runtime.pool,
@@ -677,10 +719,10 @@ async def handle_knowledge_mark_superseded(
     )
     return MarkSupersededResult(
         tool=ToolName.KNOWLEDGE_MARK_SUPERSEDED,
-        record_id=args.record_id,
+        record_id=str(pk),
         version=version,
         review_status=ReviewStatus(review_status),
-        superseded_by_record_id=args.superseded_by_record_id,
+        superseded_by_record_id=str(by_pk),
     )
 
 
@@ -774,12 +816,13 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
             "authoritative decision (R-46, R-56)."
         ),
         handler=handle_knowledge_confirm_maya_decision,
+        check_arguments=check_confirm_arguments,
     ),
     ToolName.KNOWLEDGE_MARK_SUPERSEDED: ProductTool(
         name=ToolName.KNOWLEDGE_MARK_SUPERSEDED,
         description=(
-            "Manager only: mark the exact record and version superseded by another "
-            "record; both records and their history are preserved (R-56)."
+            "Manager only: mark the exact record and version superseded by the current "
+            "authoritative record; both records and their history are preserved (R-56)."
         ),
         handler=handle_knowledge_mark_superseded,
         check_arguments=check_supersede_arguments,

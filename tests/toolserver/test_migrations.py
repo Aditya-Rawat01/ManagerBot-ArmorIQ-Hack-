@@ -196,6 +196,14 @@ def test_review_queue_hides_superseded_drafts() -> None:
     assert "REVOKE ALL ON public.draft_review_queue FROM PUBLIC;" in tail
 
 
+def test_team_notes_cannot_supersede_themselves() -> None:
+    """Review I2 (0013): a schema-level guard against self-supersession,
+    validated when existing rows allow it (never failing the migration)."""
+    text = _sql_text()
+    assert "CHECK (superseded_by_id IS DISTINCT FROM id) NOT VALID" in text
+    assert "VALIDATE CONSTRAINT team_notes_not_self_superseded" in text
+
+
 def test_backend_can_read_metadata_view() -> None:
     assert "GRANT SELECT ON public.draft_review_queue TO proxylead_backend" in _sql_text()
 

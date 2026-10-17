@@ -34,6 +34,30 @@ ALTER TABLE public.team_notes
         REFERENCES public.members (id) ON DELETE RESTRICT,
     ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ;
 
+-- Review I2: a note can never supersede itself, whatever the code does. Added
+-- NOT VALID (enforced for every new or updated row at once), then validated
+-- only when no existing row violates it, so the migration never fails on a
+-- database that already holds such a row (none exists on a fresh database or
+-- on Neon before 0013: the supersede tool ships with this migration). If the
+-- constraint is left NOT VALID, fix the row and run
+-- `ALTER TABLE public.team_notes VALIDATE CONSTRAINT team_notes_not_self_superseded`.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_catalog.pg_constraint
+        WHERE conrelid = 'public.team_notes'::regclass
+          AND conname = 'team_notes_not_self_superseded'
+    ) THEN
+        ALTER TABLE public.team_notes
+            ADD CONSTRAINT team_notes_not_self_superseded
+            CHECK (superseded_by_id IS DISTINCT FROM id) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM public.team_notes WHERE superseded_by_id = id) THEN
+        ALTER TABLE public.team_notes VALIDATE CONSTRAINT team_notes_not_self_superseded;
+    END IF;
+END
+$$;
+
 -- Review I1: a superseded draft is no longer awaiting review. The tool server
 -- refuses to confirm it (`knowledge_confirm_maya_decision` checks
 -- superseded_by_id), and Maya's metadata-only queue stops listing it. The
