@@ -14,6 +14,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from apps.api.core.config import Settings
@@ -249,12 +250,393 @@ def test_direct_calls_read_sse_frames__offline_mock_transport() -> None:
     with httpx.Client(
         base_url="https://toolserver.offline.invalid", transport=httpx.MockTransport(toolserver)
     ) as client:
-        rows = probe.group_direct(client, FAKE_BEARER)
+        rows = probe.group_direct(
+            client, FAKE_BEARER, ctx_secret=FAKE_CTX_SECRET, request_id="r-e2"
+        )
     by_case = {item["case"]: item for item in rows if "case" in item}
     assert by_case["direct-no-ctx"]["code"] == "invalid_context"
     assert by_case["direct-no-ctx"]["layer"] == "tool_server_rule"
     assert by_case["direct-no-bearer"]["code"] == "unauthorized"
     _assert_no_fake_values(probe.render_table(rows), repr(rows))
+
+
+# --- offline fakes: ArmorIQ SDK client, proxy, and tool server -----------------------
+
+OFFLINE_BASE_URL = "https://toolserver.offline.invalid"
+OFFLINE_PROXY = "https://proxy.offline.invalid"
+
+
+class _OfflineToolServer__offline_fake:
+    """Fake deployed tool server (offline): the REAL `_ctx` verification
+    (`verify_and_record`) and REAL argument models over in-memory rows shaped
+    like `tool_execution_ledger`, `tool_call_attempts` and `egress_sink`."""
+
+    def __init__(self, secret: str = FAKE_CTX_SECRET, bearer: str = FAKE_BEARER) -> None:
+        self.secret = secret
+        self.bearer = bearer
+        self.claimed: set[str] = set()
+        self.ledger_rows: list[dict[str, object]] = []
+        self.attempt_rows: list[dict[str, object]] = []
+        self.egress_rows: list[dict[str, object]] = []
+        self.executions: list[tuple[str, dict[str, object]]] = []
+
+    # AttemptLedger protocol (services/toolserver/ledger.py `verify_and_record`).
+    def seen_jti(self, jti: str) -> bool:
+        if jti in self.claimed:
+            return True
+        self.claimed.add(jti)
+        return False
+
+    def record_attempt(self, attempt: object) -> int:
+        from datetime import UTC, datetime
+
+        from services.toolserver.ledger import validate_attempt
+
+        validate_attempt(attempt)  # type: ignore[arg-type]
+        original = attempt.original_entry_id  # type: ignore[attr-defined]
+        self.attempt_rows.append(
+            {
+                "id": len(self.attempt_rows) + 1,
+                "credential_id": attempt.credential_id,  # type: ignore[attr-defined]
+                "mcp_endpoint": attempt.mcp_endpoint,  # type: ignore[attr-defined]
+                "tool_name": attempt.tool_name,  # type: ignore[attr-defined]
+                "outcome": attempt.outcome,  # type: ignore[attr-defined]
+                "jti": attempt.jti,  # type: ignore[attr-defined]
+                "request_id": attempt.request_id,  # type: ignore[attr-defined]
+                "original_entry_id": original.value if original else None,
+                "created_at": datetime.now(UTC),
+            }
+        )
+        return len(self.attempt_rows)
+
+    def find_entry_id(self, jti: str) -> object:
+        from services.toolserver.ledger import LedgerEntryId
+
+        for row in self.ledger_rows:
+            if row["jti"] == jti:
+                return LedgerEntryId(row["id"])  # type: ignore[arg-type]
+        return None
+
+    def _append(self, verified: object, outcome: str, status: str) -> int:
+        from datetime import UTC, datetime
+
+        from services.toolserver.ledger import arguments_sha256
+
+        ctx = verified.ctx  # type: ignore[attr-defined]
+        row_id = len(self.ledger_rows) + 1
+        self.ledger_rows.append(
+            {
+                "id": row_id,
+                "jti": ctx.jti,
+                "request_id": ctx.request_id,
+                "trace_id": ctx.trace_id,
+                "plan_id": ctx.plan_id,
+                "step_index": ctx.step_index,
+                "tool_name": ctx.tool,
+                "requester_member_id": ctx.requester_member_id,
+                "validation_outcome": outcome,
+                "execution_status": status,
+                "arguments_sha256": arguments_sha256(verified.business_arguments),  # type: ignore[attr-defined]
+                "created_at": datetime.now(UTC),
+            }
+        )
+        return row_id
+
+    @staticmethod
+    def _error(code: str, **meta: object) -> dict[str, object]:
+        import json
+
+        result: dict[str, object] = {
+            "isError": True,
+            "content": [{"type": "text", "text": json.dumps({"code": code, "message": "m"})}],
+        }
+        refs = {key: str(value) for key, value in meta.items() if value is not None}
+        if refs:
+            result["_meta"] = refs
+        return result
+
+    def call(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
+        """The MCP CallToolResult (as JSON) the guarded dispatcher would return."""
+        import json
+        from datetime import UTC, datetime
+
+        from pydantic import ValidationError
+
+        from services.contracts import ToolName, tool_args, tool_spec
+        from services.toolserver.ledger import ReplayRejection, verify_and_record
+        from services.toolserver.security import CtxRejection
+
+        endpoint = tool_spec(ToolName(tool)).endpoint.value
+        try:
+            verified = verify_and_record(
+                self,  # type: ignore[arg-type]
+                endpoint,
+                tool,
+                arguments,
+                credential_id=f"toolserver_bearer_{endpoint.removesuffix('-mcp')}",
+                ctx_secret=self.secret,
+            )
+        except ReplayRejection as replay:
+            original = replay.original_entry_id
+            return self._error("replay", original_entry_id=original.value if original else None)
+        except CtxRejection as rejection:
+            return self._error(rejection.code)
+        try:
+            tool_args.validate_arguments(ToolName(tool), dict(verified.business_arguments))
+        except ValidationError:
+            entry = self._append(verified, "invalid_arguments", "rejected_by_tool_server")
+            return self._error("invalid_arguments", ledger_entry_id=entry)
+        entry = self._append(verified, "accepted", "executed")
+        self.executions.append((tool, dict(verified.business_arguments)))
+        if tool == "send_external_message":
+            self.egress_rows.append(
+                {
+                    "id": len(self.egress_rows) + 1,
+                    "request_id": verified.ctx.request_id,
+                    "tool_name": tool,
+                    "jti": verified.ctx.jti,
+                    "created_at": datetime.now(UTC),
+                }
+            )
+        body = json.dumps({"tool": tool, "hits": [{"snippet": "private snippet text"}]})
+        return {
+            "isError": False,
+            "content": [{"type": "text", "text": body}],
+            "_meta": {"ledger_entry_id": str(entry)},
+        }
+
+    def http(self, request: httpx.Request) -> httpx.Response:
+        """Direct HTTP path (MockTransport handler): bearer guard, then SSE."""
+        import json
+
+        import httpx
+
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.headers.get("authorization") != f"Bearer {self.bearer}":
+            return httpx.Response(401, json={"error": {"code": "unauthorized", "message": "m"}})
+        body = json.loads(request.content)
+        params = body["params"]
+        result = self.call(params["name"], dict(params["arguments"]))
+        message = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result})
+        return httpx.Response(
+            200,
+            text=f"event: message\r\ndata: {message}\r\n\r\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+
+class _OfflineSession__offline_fake:
+    def __init__(self, client: "_OfflineSdkClient__offline_fake") -> None:
+        self.client = client
+
+    def start_plan(self, tool_calls: list[dict[str, object]], goal: object = None) -> object:
+        from datetime import UTC, datetime, timedelta
+
+        self.client.minted.append(list(tool_calls))
+        steps = []
+        for call in tool_calls:
+            mcp, _, action = str(call["name"]).partition("__")
+            steps.append({"mcp": mcp, "action": action})
+        return SimpleNamespace(
+            plan_id=f"ap-{len(self.client.minted)}",
+            expires_at=datetime.now(UTC) + timedelta(seconds=600),
+            is_expired=False,
+            raw_token={"plan": {"steps": steps}},
+        )
+
+    def close(self) -> None:
+        pass
+
+
+class _OfflineSdkClient__offline_fake:
+    """Fake ArmorIQ SDK client mirroring the armoriq-sdk 0.6.10 behaviour the
+    probe relies on: the pre-network plan-name check (client.py:804-819),
+    the `_policy_context` overwrite in `invoke_with_policy` (1671-1673), and
+    a proxy 409 raised as IntentMismatchException(action=...) (976-981).
+    The fake proxy forwards to the fake tool server over a MockTransport, so
+    the probe's wire hooks see every request."""
+
+    def __init__(
+        self,
+        server: _OfflineToolServer__offline_fake,
+        *,
+        proxy_status: dict[str, int] | None = None,
+    ) -> None:
+        import httpx
+
+        self.server = server
+        self.proxy_status = proxy_status or {}
+        self.minted: list[list[dict[str, object]]] = []
+        self.invoked: list[tuple[str, str, list[str]]] = []
+        self.http_client = httpx.Client(transport=httpx.MockTransport(self._proxy))
+
+    def for_user(self, email: str) -> object:
+        client = self
+        return SimpleNamespace(
+            start_session=lambda opts=None: _OfflineSession__offline_fake(client)
+        )
+
+    def invoke(
+        self,
+        mcp: str,
+        action: str,
+        intent_token: object,
+        params: dict[str, object] | None = None,
+        merkle_proof: object = None,
+        user_email: str | None = None,
+    ) -> object:
+        from armoriq_sdk import exceptions as sdk_exceptions
+
+        steps = intent_token.raw_token["plan"]["steps"]  # type: ignore[attr-defined]
+        actions = [step["action"] for step in steps]
+        if action not in actions:
+            raise sdk_exceptions.IntentMismatchException(
+                f"Action '{action}' not found in the original plan. "
+                f"Plan contains actions: {actions}."
+            )
+        self.invoked.append((mcp, action, sorted((params or {}).keys())))
+        response = self.http_client.post(
+            f"{OFFLINE_PROXY}/invoke",
+            json={"mcp": mcp, "action": action, "params": dict(params or {})},
+        )
+        if response.status_code == 409:
+            raise sdk_exceptions.IntentMismatchException(
+                f"Action not in plan: {response.text}", action=action
+            )
+        if response.status_code >= 400:
+            raise sdk_exceptions.MCPInvocationException(
+                f"MCP invocation failed: {response.status_code}",
+                mcp=mcp,
+                action=action,
+                status_code=response.status_code,
+            )
+        result = response.json()["result"]
+        return SimpleNamespace(
+            result=result, status="error" if result.get("isError") else "success", verified=True
+        )
+
+    def invoke_with_policy(
+        self,
+        mcp: str,
+        action: str,
+        intent_token: object,
+        params: dict[str, object] | None = None,
+        options: object = None,
+    ) -> object:
+        enriched = dict(params or {})
+        enriched["_policy_context"] = {"is_financial": False}
+        return self.invoke(
+            mcp,
+            action,
+            intent_token,
+            params=enriched,
+            user_email=getattr(options, "user_email", None),
+        )
+
+    def _proxy(self, request: httpx.Request) -> httpx.Response:
+        import json
+
+        import httpx
+
+        body = json.loads(request.content)
+        action = body["action"]
+        if action in self.proxy_status:
+            return httpx.Response(self.proxy_status[action], json={"error": "fake proxy refusal"})
+        result = self.server.call(action, dict(body["params"]))
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
+
+
+def _offline_settings() -> Settings:
+    return Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        app_env="test",
+        armoriq_api_key=FAKE_API_KEY,
+        persona_maya_email=FAKE_EMAIL,
+        ctx_secret=FAKE_CTX_SECRET,
+    )
+
+
+def _offline_run(
+    *,
+    server: _OfflineToolServer__offline_fake | None = None,
+    proxy_status: dict[str, int] | None = None,
+    ledger_dsn: str | None = FAKE_DSN,
+    **kwargs: object,
+) -> tuple[int, str, _OfflineToolServer__offline_fake, _OfflineSdkClient__offline_fake]:
+    """`probe.run_probe` over the real gateway with the offline fakes."""
+    import httpx
+
+    server = server or _OfflineToolServer__offline_fake()
+    sdk = _OfflineSdkClient__offline_fake(server, proxy_status=proxy_status)
+    direct = probe.DirectConfig(
+        bearer=FAKE_BEARER, base_url=OFFLINE_BASE_URL, base_url_source="offline test"
+    )
+    with httpx.Client(
+        base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(server.http)
+    ) as direct_client:
+        code, record = asyncio.run(
+            probe.run_probe(
+                _offline_settings(),
+                direct=direct,
+                ledger_dsn=ledger_dsn,
+                sdk_client_factory=lambda member_id: sdk,
+                direct_client=direct_client,
+                spacing_s=0.0,
+                **kwargs,
+            )
+        )
+    return code, record, server, sdk
+
+
+def test_replay_reuses_the_gateway_signed_ctx__offline_fake_sdk() -> None:
+    """I1: the planned call's `_ctx` is captured at the gateway's `ctx_signer`
+    seam and POSTed again directly: `replay`, pointing at the first entry."""
+    _, record, server, _ = _offline_run()
+    baseline = server.ledger_rows[0]
+    assert baseline["execution_status"] == "executed"
+    replays = [row for row in server.attempt_rows if row["outcome"] == "replay"]
+    assert len(replays) == 1
+    assert replays[0]["jti"] == baseline["jti"]
+    assert replays[0]["original_entry_id"] == baseline["id"]
+    assert f"original_entry_id={baseline['id']}" in record
+    assert "matches the first call's ledger entry" in record
+    _assert_no_fake_values(record)
+
+
+def test_direct_minted_cases_reach_their_checks__offline_fake_sdk() -> None:
+    _, record, server, _ = _offline_run()
+    outcomes = [(row["tool_name"], row["outcome"]) for row in server.attempt_rows]
+    assert ("knowledge_search_confidential", "invalid_context") in outcomes
+    assert ("knowledge_search_team", "context_expired") in outcomes
+    # no-ctx, forged, wrong-secret: three unverified team attempts (NULL identity).
+    unverified = [
+        row
+        for row in server.attempt_rows
+        if (row["tool_name"], row["outcome"]) == ("knowledge_search_team", "invalid_context")
+    ]
+    assert len(unverified) == 3
+    assert all(row["jti"] is None and row["request_id"] is None for row in unverified)
+    assert "direct call, `_ctx` signed with a wrong secret" in record
+
+
+def test_ctx_capture_never_prints_tokens__offline_fake_sdk() -> None:
+    """The captured `_ctx` and every probe-minted token stay out of the record."""
+    tokens: list[str] = []
+
+    def spy_signer(fields: object, secret: str) -> str:
+        from services.authorization.armoriq_gateway import sign_ctx_fields
+
+        token = sign_ctx_fields(fields, secret)  # type: ignore[arg-type]
+        tokens.append(token)
+        return token
+
+    _, record, _, _ = _offline_run(ctx_signer_inner=spy_signer)
+    assert tokens
+    for token in tokens:
+        assert token not in record
+        assert token.split(".")[0] not in record
+    _assert_no_fake_values(record)
 
 
 def test_row_has_all_evidence_fields() -> None:

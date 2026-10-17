@@ -27,8 +27,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import sys
-from dataclasses import dataclass
+import time
+import uuid
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -403,54 +408,209 @@ def direct_row(case: str, attempt: str, expected: str, reply: McpReply) -> dict[
     )
 
 
-def group_direct(client: Any, bearer: str) -> list[dict[str, Any]]:
+@dataclass(frozen=True)
+class CapturedCtx:
+    """One `_ctx` the gateway signed (captured at its `ctx_signer` seam).
+
+    ``token`` is kept in memory only, for the replay case; it is excluded
+    from `repr` and never printed.
+    """
+
+    token: str = field(repr=False)
+    jti: str
+    tool: str
+    aud: str
+    request_id: str
+    issued_at: float
+    expires_at: float
+
+
+def _epoch(value: Any) -> float:
+    return value.timestamp() if isinstance(value, datetime) else float(value)
+
+
+class CtxCapture:
+    """`ctx_signer` for the gateway: signs with the real signer (P1-04
+    `sign_ctx` via `armoriq_gateway.sign_ctx_fields`) and remembers what it
+    signed, so the probe knows each planned call's jti and can replay one
+    `_ctx` byte for byte. Tests inject a fake inner signer."""
+
+    def __init__(self, inner: Any = None) -> None:
+        self._inner = inner
+        self.captured: list[CapturedCtx] = []
+
+    def __call__(self, fields: Mapping[str, Any], secret: str) -> str:
+        inner = self._inner
+        if inner is None:
+            from services.authorization.armoriq_gateway import sign_ctx_fields
+
+            inner = sign_ctx_fields
+        token = inner(fields, secret)
+        self.captured.append(
+            CapturedCtx(
+                token=token,
+                jti=str(fields["jti"]),
+                tool=str(fields["tool"]),
+                aud=str(fields["aud"]),
+                request_id=str(fields["request_id"]),
+                issued_at=_epoch(fields["iat"]),
+                expires_at=_epoch(fields["exp"]),
+            )
+        )
+        return token
+
+    def since(self, mark: int) -> list[CapturedCtx]:
+        return self.captured[mark:]
+
+
+@dataclass(frozen=True)
+class ReplaySource:
+    """A `_ctx` that already executed once, to POST again within its lifetime."""
+
+    token: str = field(repr=False)
+    jti: str
+    ledger_entry_id: str
+    issued_at: float
+    expires_at: float
+    arguments: Mapping[str, Any]
+
+
+# Maya's identity as the gateway signs it (`_sign_step_ctx`; ADR-020: the
+# env-key reference, never the e-mail). Used only for probe-minted envelopes.
+MAYA_MEMBER_ID = "m-maya"
+MAYA_EMAIL_REF = "PERSONA_MAYA_EMAIL"
+EXPIRED_CTX_AGE_S = 700.0  # iat this far in the past ...
+EXPIRED_CTX_LIFETIME_S = 300.0  # ... with the gateway's lifetime: exp is 400 s ago
+REPLAY_MARGIN_S = 15.0  # never replay a capture this close to its expiry
+
+
+def mint_ctx(
+    secret: str,
+    *,
+    tool: str,
+    request_id: str,
+    iat: float,
+    exp: float,
+    aud: str = "memory-mcp",
+) -> tuple[str, str]:
+    """A well-formed `_ctx` for Maya (fresh jti), signed with ``secret``.
+
+    Returns (token, jti). The token is never printed.
+    """
+    from services.authorization.ctx_envelope import CtxEnvelope, sign_ctx
+    from services.contracts import DEFAULT_WORKSPACE_ID
+
+    jti = uuid.uuid4().hex
+    envelope = CtxEnvelope(
+        request_id=request_id,
+        trace_id=f"{request_id}-trace",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        requester_member_id=MAYA_MEMBER_ID,
+        armoriq_member_email_ref=MAYA_EMAIL_REF,
+        app_role="manager",
+        plan_id=f"{request_id}-direct",
+        step_index=0,
+        tool=tool,
+        aud=aud,
+        iat=iat,
+        exp=exp,
+        jti=jti,
+    )
+    return sign_ctx(envelope, secret), jti
+
+
+def direct_replay_row(client: Any, bearer: str, source: ReplaySource) -> dict[str, Any]:
+    """Replay (§9.4): POST an already-executed, still-valid `_ctx` again.
+
+    Expected `replay` with `_meta.original_entry_id` equal to the first
+    call's `_meta.ledger_entry_id`. A capture at or past its expiry is not
+    sent (it would test expiry, not replay).
+    """
+    attempt = "replayed `_ctx` (same jti, same arguments, within CTX_TTL_S)"
+    expected = "replay with original_entry_id = the first call's ledger entry"
+    age = time.time() - source.issued_at
+    lifetime = source.expires_at - source.issued_at
+    if time.time() >= source.expires_at - REPLAY_MARGIN_S:
+        return row(
+            group="direct",
+            attempt=attempt,
+            expected=expected,
+            observed=(
+                f"not sent: the captured `_ctx` is {age:.0f} s old (lifetime {lifetime:.0f} s)"
+            ),
+            layer="unknown",
+            evidence="none (re-run: replay must follow the planned call within CTX_TTL_S)",
+            case="direct-replay",
+            code=None,
+            jti=source.jti,
+        )
+    reply = post_tool_call(
+        client,
+        bearer,
+        "knowledge_search_team",
+        {**dict(source.arguments), "_ctx": source.token},
+        "direct-replay",
+    )
+    item = direct_row("direct-replay", attempt, expected, reply)
+    same = reply.original_entry_id == source.ledger_entry_id
+    item["observed"] += (
+        f"; replayed {age:.0f} s after signing; original_entry_id "
+        + ("matches the first call's ledger entry" if same else "does NOT match the first call")
+        + f" ({source.ledger_entry_id})"
+    )
+    item["jti"] = source.jti
+    item["matches_original"] = same
+    return item
+
+
+def group_direct(
+    client: Any, bearer: str, *, ctx_secret: str, request_id: str
+) -> list[dict[str, Any]]:
     """Group 4 (§9.4): direct calls to the tool server (no ArmorIQ).
 
     ``client`` is an httpx-style client rooted at the tool-server base URL
-    (`build_direct_client`; tests pass a `TestClient`). The bearer is sent
-    as a header only and never printed.
+    (`build_direct_client`; tests pass a `TestClient`). The bearer, the
+    secrets, and every token are sent only and never printed. The replay
+    case runs separately (`direct_replay_row`), right after the planned
+    call it replays.
     """
     team = "knowledge_search_team"
     args = {"query": "quokka", "limit": 3}
+    now = time.time()
+    wrong_secret, _ = mint_ctx(
+        secrets.token_hex(32), tool=team, request_id=f"{request_id}-ws", iat=now, exp=now + 300
+    )
+    cross_tool, _ = mint_ctx(
+        ctx_secret, tool=team, request_id=f"{request_id}-ct", iat=now, exp=now + 300
+    )
+    expired, _ = mint_ctx(
+        ctx_secret,
+        tool=team,
+        request_id=f"{request_id}-ex",
+        iat=now - EXPIRED_CTX_AGE_S,
+        exp=now - EXPIRED_CTX_AGE_S + EXPIRED_CTX_LIFETIME_S,
+    )
     calls = (
-        (
-            "direct-no-bearer",
-            "direct call, no bearer",
-            "401 unauthorized (bearer guard)",
-            None,
-            dict(args),
-        ),
-        (
-            "direct-no-ctx",
-            "direct call, bearer only, no `_ctx`",
-            "invalid_context",
-            bearer,
-            dict(args),
-        ),
-        (
-            "direct-forged-ctx",
-            "direct call, forged (malformed) `_ctx`",
-            "invalid_context",
-            bearer,
-            {**args, "_ctx": "forged.token"},
-        ),
-    )
-    rows = [
-        direct_row(case, attempt, expected, post_tool_call(client, key, team, arguments, case))
-        for case, attempt, expected, key, arguments in calls
+        ("direct-no-bearer", "direct call, no bearer", "401 unauthorized (bearer guard)", None,
+         team, dict(args)),
+        ("direct-no-ctx", "direct call, bearer only, no `_ctx`", "invalid_context", bearer,
+         team, dict(args)),
+        ("direct-forged-ctx", "direct call, forged (malformed) `_ctx`", "invalid_context", bearer,
+         team, {**args, "_ctx": "forged.token"}),
+        ("direct-wrong-secret", "direct call, `_ctx` signed with a wrong secret",
+         "invalid_context (HMAC mismatch)", bearer, team, {**args, "_ctx": wrong_secret}),
+        ("direct-cross-tool",
+         "direct call, `_ctx` minted for knowledge_search_team used on "
+         "knowledge_search_confidential",
+         "invalid_context (tool mismatch); never executed", bearer,
+         "knowledge_search_confidential", {**args, "_ctx": cross_tool}),
+        ("direct-expired", "direct call, expired `_ctx` (exp 400 s ago, lifetime 300 s)",
+         "context_expired", bearer, team, {**args, "_ctx": expired}),
+    )  # fmt: skip
+    return [
+        direct_row(case, attempt, expected, post_tool_call(client, key, tool, arguments, case))
+        for case, attempt, expected, key, tool, arguments in calls
     ]
-    rows.append(
-        row(
-            group="direct",
-            attempt="replayed jti",
-            expected="replay with original_entry_id",
-            observed="pending: needs a prior live jti (e.g. from E1)",
-            layer="unknown",
-            evidence="operator replays the E1 jti after a live E1",
-            case="direct-replay",
-        )
-    )
-    return rows
 
 
 def render_table(rows: list[dict[str, str]]) -> str:
@@ -469,13 +629,109 @@ def render_table(rows: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
+async def run_baseline(
+    gateway: Any, settings: Any, capture: CtxCapture
+) -> tuple[dict[str, Any], ReplaySource | None]:
+    """The planned call (ALLOW expected): its signed `_ctx` is the replay source."""
+    ctx, plan = e1.build_maya_request(settings)
+    handle = await gateway.start_plan(ctx, plan)
+    attempt = "planned knowledge_search_team for Maya (replay source)"
+    expected = "ALLOW; EXECUTED with a ledger row (E1 path)"
+    if handle.decision is not None:
+        decision = handle.decision
+        return row(
+            group="baseline",
+            attempt=attempt,
+            expected=expected,
+            observed=f"plan/mint {decision.outcome.value} ({decision.source.value})",
+            layer=decision.source.value,
+            evidence="gateway log",
+            case="planned-baseline",
+        ), None
+    mark = len(capture.captured)
+    outcome = await gateway.invoke_step(handle, 0, ctx, plan)
+    described = e1.describe_outcome(outcome)
+    signed = [item for item in capture.since(mark) if item.jti == described["jti"]]
+    source = None
+    if described["invocation_status"] == "executed" and described["ledger_entry_id"] and signed:
+        source = ReplaySource(
+            token=signed[-1].token,
+            jti=signed[-1].jti,
+            ledger_entry_id=str(described["ledger_entry_id"]),
+            issued_at=signed[-1].issued_at,
+            expires_at=signed[-1].expires_at,
+            arguments=dict(plan.steps[0].arguments),
+        )
+    item = row(
+        group="baseline",
+        attempt=attempt,
+        expected=expected,
+        observed=(
+            f"{described['decision_outcome']} ({described['decision_source']}); "
+            f"status={described['invocation_status']} "
+            f"ledger_entry_id={described['ledger_entry_id']} jti={described['jti']}"
+        ),
+        layer=described["decision_source"],
+        evidence="gateway log + `_meta.ledger_entry_id`",
+        case="planned-baseline",
+        jti=described["jti"],
+        request_id=ctx.request_id,
+    )
+    return item, source
+
+
 async def run_probe(
-    settings: Any, *, direct: DirectConfig, ledger_dsn: str | None
+    settings: Any,
+    *,
+    direct: DirectConfig,
+    ledger_dsn: str | None,
+    sdk_client_factory: Callable[[str], Any] | None = None,
+    direct_client: Any = None,
+    ctx_signer_inner: Any = None,
+    spacing_s: float = 1.0,
 ) -> tuple[int, str]:
-    """Execute all attempt groups; return (exit_code, report_text)."""
+    """Execute all attempt groups; return (exit_code, report_text).
+
+    ``sdk_client_factory``, ``direct_client`` and ``ctx_signer_inner`` are
+    seams for offline tests only; the operator path builds the gateway's own
+    SDK client, a real HTTP client for the base URL, and the real signer.
+    """
     from services.authorization import armoriq_gateway
 
-    gateway = armoriq_gateway.ArmorIQGateway(settings)
+    capture = CtxCapture(ctx_signer_inner)
+    gateway = armoriq_gateway.ArmorIQGateway(
+        settings, client_factory=sdk_client_factory, ctx_signer=capture
+    )
+    client = direct_client if direct_client is not None else build_direct_client(direct.base_url)
+    try:
+        baseline, replay_source = await run_baseline(gateway, settings, capture)
+        rows: list[dict[str, Any]] = [baseline]
+        if replay_source is not None:
+            rows.append(direct_replay_row(client, direct.bearer or "", replay_source))
+        else:
+            rows.append(
+                row(
+                    group="direct",
+                    attempt="replayed `_ctx` (same jti, same arguments, within CTX_TTL_S)",
+                    expected="replay with original_entry_id = the first call's ledger entry",
+                    observed="not run: the planned call did not execute with a ledger entry",
+                    layer="unknown",
+                    evidence="none",
+                    case="direct-replay",
+                )
+            )
+        await asyncio.sleep(spacing_s)
+        rows.extend(
+            group_direct(
+                client,
+                direct.bearer or "",
+                ctx_secret=e1.secret_text(settings.ctx_secret),
+                request_id=str(baseline.get("request_id") or "e2-direct"),
+            )
+        )
+    finally:
+        if direct_client is None:
+            client.close()
     ctx, plan = e1.build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
     if handle.decision is not None:
@@ -494,12 +750,9 @@ async def run_probe(
                 "- Outcome: operator-assigned in docs/EXPERIMENTS.md.",
             ]
         )
-    rows: list[dict[str, str]] = []
     rows.extend(await group_off_plan(gateway, handle, ctx))
     rows.extend(await group_tamper(gateway, handle, ctx))
     rows.extend(group_proxy_shape())
-    with build_direct_client(direct.base_url) as client:
-        rows.extend(group_direct(client, direct.bearer or ""))
     report = [
         "### E2 — off-plan and tampered-call enforcement",
         f"- Request: {ctx.request_id} (Maya, team-only plan)",
