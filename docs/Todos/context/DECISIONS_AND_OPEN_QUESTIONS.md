@@ -136,8 +136,13 @@ begin, cannot be accepted), or `defer` (can be decided later).
   that discuss confidential topics?
 - Decider: `Aditya-Rawat01` with `samarth-chawla`. Needed before **P2-09**. Blocking: **finish**.
 
-**RESOLVED 16 Oct 2026 by `Aditya-Rawat01` with `samarth-chawla` (relayed; D-10
-+ D-09 rule 2, no ADR). Implemented in P2-09 (PR #79).**
+**PROPOSED 16 Oct 2026 by `Aditya-Rawat01` — PENDING `samarth-chawla`'s
+confirmation (co-decider).** The earlier "relayed" confirmation is not
+visible anywhere, so D-10 is **not resolved** until `samarth-chawla` confirms
+on [issue #24](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/24)
+(requested there by `VTCodeCraft`, 17 Oct 2026). P2-09 (PR #79) implements
+rules 1–3 and 5 as the working default; no ADR yet. (D-09 rule 2 is
+co-decided by `VTCodeCraft` and is unaffected.)
 
 1. A saved note is **always `team`-tier and always a draft** — including notes
    saved from a DM that discuss confidential topics (the requester's own
@@ -152,12 +157,20 @@ begin, cannot be accepted), or `defer` (can be decided later).
 4. The backend **refuses** a `store this` (`knowledge_save_team_note`)
    `application_rule` in a thread where above-team-tier evidence was
    delivered — a tier-purity rule at the planner, not in the tool server.
+   **UNOWNED FOLLOW-UP: not implemented by any task yet.** P3-04 (the
+   orchestrator knows which tiers a thread has delivered) and P3-05 (the
+   `store this` entry point) must pick it up. Until then a note saved in a
+   thread that delivered confidential content is stored team-tier, and
+   once Maya confirms it, it is team-tier evidence (D-09 rule 2).
 5. Migration **0013** (claimed on issue #24 before coding as 0012; renumbered
    when main's P2-10 follow-up took 0012 — re-claim on #24) encodes (1) as a
    schema invariant: `team_notes.tier TEXT NOT NULL DEFAULT 'team' CHECK
    (tier IN ('team'))`, plus `provenance` and `approved_by_member_id` /
    `approved_at` columns (PRD §8.1). `team_notes` is toolserver-exclusive, so
-   no ICR and no shared-interface change; `draft_review_queue` untouched.
+   no ICR and no shared-interface change. The PR #79 review fixes also make
+   `draft_review_queue` list current drafts only (same columns), add a
+   no-self-supersede CHECK, and restrict the toolserver to INSERT/SELECT plus
+   UPDATE of the lifecycle columns (no DELETE).
 
 ### D-11 — Elevated source tools versus the one-elevated-call rule (= U-9)
 
@@ -205,6 +218,7 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
 ### D-12 — Manager console access to protected content (= U-8)
 
 **RESOLVED 14 Oct 2026 → ADR-023:** option (b), a metadata-only view (no title or content); content through `knowledge_get_source_team` via ArmorIQ; no new tool.
+**Open follow-up (P2-09 review I4, 17 Oct 2026):** the content path does not work for drafts (`get_source` answers `not_found` for non-authoritative records) and there is no listing of current authoritative notes for supersede, so Maya confirms blind. A P4-04 ICR is required before the console ships confirm/supersede (SHARED_INTERFACES §7 "OPEN FOLLOW-UP").
 
 - PRD §10.2 / Arch §9 require a draft review queue and authoritative decisions
   with provenance.
