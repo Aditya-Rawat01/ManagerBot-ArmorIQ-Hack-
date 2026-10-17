@@ -18,9 +18,18 @@ role). The bearer and the DSN are also read from `services/toolserver/.env`.
 Optional: TOOLSERVER_BASE_URL (default DEFAULT_TOOLSERVER_BASE_URL),
 ARMORIQ_AGENT_ID (default `proxylead`). Values are never printed.
 
-Exit codes: 0 the probe ran to completion (any observed outcome); 1 an
-unexpected error stopped it; 2 prerequisites missing or unusable (names
-only, never values).
+Exit codes (as E1):
+    0  every attempt has an evidenced layer (wire, exception form, DB rows;
+       the proxy-shape row is "not tested" by design) and zero unintended
+       executions are confirmed: a candidate for the operator's verdict
+    1  an unexpected error stopped the probe (exception type only)
+    2  prerequisites missing or unusable: arguments given, settings
+       unreadable or unset, a bad base URL, the tool server not answering
+       `/health` 200, or the evidence database unusable (names only, never
+       values). Checked BEFORE any ArmorIQ call.
+    3  the probe ran, but some attempt lacks evidence, a label is
+       contradicted (flag), or zero executions is not confirmed; read the
+       record
 """
 
 from __future__ import annotations
@@ -1462,6 +1471,92 @@ def apply_db_evidence(rows: list[dict[str, Any]], db: Mapping[str, Any]) -> dict
     return summary
 
 
+# --- verdict and exit code (I4) ------------------------------------------------------
+
+
+class PrerequisiteError(Exception):
+    """A prerequisite is unusable (exit 2). The message names it, never a value."""
+
+
+def preflight(client: Any, ledger_dsn: str | None, lookup_factory: Any = None) -> None:
+    """Before any ArmorIQ call: the tool server answers `/health` 200 (Render
+    awake, embedding model ready) and the evidence database is usable, so a
+    run never creates live rows it cannot then prove."""
+    try:
+        response = client.get("/health")
+    except Exception as exc:
+        raise PrerequisiteError(f"tool server /health unreachable ({type(exc).__name__})") from None
+    if response.status_code != 200:
+        raise PrerequisiteError(
+            f"tool server /health returned HTTP {response.status_code} "
+            "(wake the Render service, wait for 200, and retry)"
+        )
+    if not ledger_dsn:
+        return
+    with e1.quiet_db_logs():
+        try:
+            lookup = (lookup_factory or E2EvidenceLookup)(ledger_dsn)
+            try:
+                lookup.ping()
+            finally:
+                with contextlib.suppress(Exception):
+                    lookup.close()
+        except Exception as exc:
+            raise PrerequisiteError(
+                f"DATABASE_URL_TOOLSERVER unusable ({type(exc).__name__})"
+            ) from None
+
+
+NOT_TESTED_BY_DESIGN = frozenset({"proxy-shape"})
+
+
+def evidence_verdict(item: dict[str, Any]) -> bool | None:
+    """Whether this attempt's layer is evidenced independently of the gateway
+    label (None: not tested by design). Rewrites the evidence cell to say so."""
+    case = str(item.get("case"))
+    if case in NOT_TESTED_BY_DESIGN:
+        item["evidence"] = f"not tested by design: {item['evidence']}"
+        return None
+    group, layer = item.get("group"), str(item.get("layer"))
+    missing: list[str] = []
+    if group == "tamper" and case.startswith("validator-"):
+        basis = "validator exception, 0 SDK requests"
+        if layer != "application_rule" or not item.get("local_ok"):
+            missing.append("validator did not reject locally")
+    elif group == "direct":
+        basis = "tool-server reply code + attributed attempt row"
+        if layer != "tool_server_rule":
+            missing.append("no tool-server code in the reply")
+        if case == "direct-replay" and not item.get("matches_original"):
+            missing.append("original_entry_id does not match the first call")
+        if not item.get("db_ok"):
+            missing.append("no DB corroboration")
+    elif group == "off-plan":
+        basis = "0 proxy requests + pre-network IntentMismatchException + no DB rows"
+        if not item.get("wire_ok"):
+            missing.append("no wire/exception evidence")
+        if not item.get("db_ok"):
+            missing.append("no DB corroboration")
+    else:
+        basis = "proxy request on the wire + attributed ledger/attempt rows"
+        if item.get("hash_match") is not None:
+            basis += " + business-argument hash"
+        if layer.startswith("unknown") or layer == "None":
+            missing.append("no layer")
+        if not item.get("wire_ok"):
+            missing.append("no wire evidence")
+        if not item.get("db_ok"):
+            missing.append("no DB corroboration")
+    if item.get("flags"):
+        missing.append("flagged")
+    ok = not missing
+    item["evidenced"] = ok
+    item["evidence"] = (
+        f"evidenced: {basis}" if ok else f"NOT evidenced ({'; '.join(missing)}); {item['evidence']}"
+    )
+    return ok
+
+
 def _cell(value: Any) -> str:
     return str(value).replace("|", "/").replace("\n", " ")
 
@@ -1659,7 +1754,6 @@ async def run_probe(
     """
     from services.authorization import armoriq_gateway
 
-    run_started = utc_now()
     capture = CtxCapture(ctx_signer_inner)
     recorder = SdkRecorder()
     observer = Observer(recorder, capture)
@@ -1675,6 +1769,8 @@ async def run_probe(
     holder["gateway"] = gateway
     client = direct_client if direct_client is not None else build_direct_client(direct.base_url)
     try:
+        await asyncio.to_thread(preflight, client, ledger_dsn, lookup_factory)
+        run_started = utc_now()
         baseline, replay_source = await run_baseline(gateway, settings, capture, observer)
         rows: list[dict[str, Any]] = [baseline]
         if replay_source is not None:
@@ -1715,6 +1811,14 @@ async def run_probe(
     summary = apply_db_evidence(rows, db)
     flagged = [item for item in rows if item.get("flags")]
     unintended = summary["unintended"]
+    unevidenced = [
+        f"#{number} {item['case']}"
+        for number, item in enumerate(rows, start=1)
+        if evidence_verdict(item) is False
+    ]
+    # E1 rule: 0 only when every attempt has an evidenced layer and zero
+    # unintended executions are confirmed; everything else that completed is 3.
+    code = EXIT_COMPLETE if not (flagged or unintended or unevidenced) else EXIT_NOT_COMPLETE
     report = [
         "### E2 — off-plan and tampered-call enforcement",
         f"- Run window (UTC): {run_started} → {run_ended}",
@@ -1732,13 +1836,15 @@ async def run_probe(
         f"- {GATEWAY_ICR_NOTE}",
         "- Flags: "
         + (", ".join(f"#{rows.index(item) + 1} {item['case']}" for item in flagged) or "none"),
+        "- Attempts without an evidenced layer: " + (", ".join(unevidenced) or "none"),
+        f"- Probe exit code: {code} (0 = every attempt has an evidenced layer and zero "
+        "unintended executions are confirmed; 3 = completed otherwise)",
         "",
         render_table(rows),
         "",
         render_details(rows),
     ]
-    complete = not flagged and not unintended
-    return (EXIT_COMPLETE if complete else EXIT_NOT_COMPLETE), "\n".join(report)
+    return code, "\n".join(report)
 
 
 def _fail(message: str) -> int:
@@ -1768,6 +1874,8 @@ def main(argv: list[str] | None = None) -> int:
         # reference, exception class) go to stderr, as in E1.
         with e1.gateway_logs_to_stderr():
             code, report = asyncio.run(run_probe(settings, direct=direct, ledger_dsn=ledger_dsn))
+    except PrerequisiteError as exc:
+        return _fail(str(exc))
     except Exception as exc:
         print(f"probe_v2_e2_offplan: probe error ({type(exc).__name__})", file=sys.stderr)
         return EXIT_ERROR

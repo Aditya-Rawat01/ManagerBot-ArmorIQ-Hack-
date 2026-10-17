@@ -633,6 +633,8 @@ def _offline_run(
     policy_block: Callable[[dict], str | None] | None = None,
     expose_http_client: bool = True,
     ledger_dsn: str | None = FAKE_DSN,
+    direct_handler: Callable[[httpx.Request], httpx.Response] | None = None,
+    sdk_client_factory: Callable[[str], object] | None = None,
     **kwargs: object,
 ) -> tuple[int, str, _OfflineToolServer__offline_fake, _OfflineSdkClient__offline_fake]:
     """`probe.run_probe` over the real gateway with the offline fakes."""
@@ -648,14 +650,14 @@ def _offline_run(
         bearer=FAKE_BEARER, base_url=OFFLINE_BASE_URL, base_url_source="offline test"
     )
     with httpx.Client(
-        base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(server.http)
+        base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(direct_handler or server.http)
     ) as direct_client:
         code, record = asyncio.run(
             probe.run_probe(
                 _offline_settings(),
                 direct=direct,
                 ledger_dsn=ledger_dsn,
-                sdk_client_factory=lambda member_id: sdk,
+                sdk_client_factory=sdk_client_factory or (lambda member_id: sdk),
                 direct_client=direct_client,
                 spacing_s=0.0,
                 **kwargs,
@@ -1049,10 +1051,17 @@ def test_foreign_rows_in_the_window_block_confirmation__offline_fake_ledger() ->
 
 
 def test_db_lookup_error_reports_the_class_only__offline_fake_ledger() -> None:
-    def boom(dsn: str) -> object:
+    """The database passes the preflight, then fails for the evidence queries."""
+    server = _OfflineToolServer__offline_fake()
+    opened: list[str] = []
+
+    def flaky(dsn: str) -> object:
+        opened.append(dsn)
+        if len(opened) == 1:
+            return _OfflineEvidenceLookup__offline_fake(server)
         raise ConnectionError(f"db down at {dsn}")
 
-    code, record, _, _ = _offline_run(lookup_factory=boom)
+    code, record, _, _ = _offline_run(server=server, lookup_factory=flaky)
     assert "- DB evidence (read-only, toolserver role): lookup error (ConnectionError)" in record
     assert "Zero unintended executions: NOT CONFIRMED" in record
     assert code == 3
@@ -1095,3 +1104,122 @@ def test_evidence_queries_select_no_content_columns() -> None:
         assert sql.lstrip().upper().startswith("SELECT ")
         for column in ("message", "arguments,", "prev_hash", "entry_hash", "destination"):
             assert column not in sql
+
+
+# --- I4: exit codes like E1 ---------------------------------------------------------
+
+
+def test_exit_0_only_when_every_attempt_is_evidenced__offline_fake_sdk() -> None:
+    code, record, _, _ = _offline_run()
+    assert code == probe.EXIT_COMPLETE == 0
+    assert "- Attempts without an evidenced layer: none" in record
+    assert "- Probe exit code: 0" in record
+    rows = _rows_by_case(record)
+    assert "not tested by design" in rows["proxy-shape"]
+    for case, line in rows.items():
+        if case != "proxy-shape":
+            assert "| evidenced:" in line, case
+
+
+def test_an_attempt_without_evidence_exits_3__offline_fake_sdk() -> None:
+    """A direct reply the probe cannot attribute to the tool server (e.g. an
+    edge 502 page) leaves that attempt unevidenced: exit 3, never 0."""
+    server = _OfflineToolServer__offline_fake()
+
+    def edge_502_for_no_ctx(request: httpx.Request) -> httpx.Response:
+        if b'"direct-no-ctx"' in request.content:
+            return httpx.Response(502, text="<html>bad gateway</html>")
+        return server.http(request)
+
+    code, record, _, _ = _offline_run(server=server, direct_handler=edge_502_for_no_ctx)
+    assert code == probe.EXIT_NOT_COMPLETE == 3
+    assert "Attempts without an evidenced layer: #4 direct-no-ctx" in record
+    assert "NOT evidenced" in _rows_by_case(record)["direct-no-ctx"]
+    # The other direct attempts keep their (correctly attributed) evidence.
+    assert "| evidenced:" in _rows_by_case(record)["direct-forged-ctx"]
+
+
+def test_plan_mint_failure_exits_3__offline_fake_sdk() -> None:
+    def no_client(member_id: str) -> object:
+        raise RuntimeError("client construction failed")
+
+    code, record, _, _ = _offline_run(sdk_client_factory=no_client)
+    assert code == 3
+    assert "not run: plan/mint unverified (unknown)" in _rows_by_case(record)["planned-baseline"]
+    assert "not run: the planned call did not execute" in _rows_by_case(record)["direct-replay"]
+
+
+def test_preflight_unusable_database_exits_2_before_any_live_call__offline_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def stale(dsn: str) -> object:
+        raise TimeoutError(f"pool timeout for {dsn}")
+
+    with pytest.raises(probe.PrerequisiteError, match=r"DATABASE_URL_TOOLSERVER unusable"):
+        _offline_run(lookup_factory=stale)
+    server = _OfflineToolServer__offline_fake()
+    sdk = _OfflineSdkClient__offline_fake(server)
+    _write_all_settings(monkeypatch, tmp_path)
+    real_run_probe = probe.run_probe
+
+    async def offline(settings: object, **kwargs: object) -> tuple[int, str]:
+        with httpx.Client(
+            base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(server.http)
+        ) as client:
+            return await real_run_probe(
+                _offline_settings(),
+                direct=kwargs["direct"],  # type: ignore[arg-type]
+                ledger_dsn=FAKE_DSN,
+                sdk_client_factory=lambda member_id: sdk,
+                direct_client=client,
+                lookup_factory=stale,
+                spacing_s=0.0,
+            )
+
+    monkeypatch.setattr(probe, "run_probe", offline)
+    assert probe.main([]) == 2
+    err = capsys.readouterr().err
+    assert "DATABASE_URL_TOOLSERVER unusable (TimeoutError)" in err
+    assert not sdk.minted and not server.attempt_rows
+    _assert_no_fake_values(err)
+
+
+def test_preflight_toolserver_not_ready_exits_2__offline_fake_sdk() -> None:
+    server = _OfflineToolServer__offline_fake()
+
+    def cold(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(503, json={"error": {"code": "not_ready", "message": "m"}})
+        return server.http(request)
+
+    with pytest.raises(probe.PrerequisiteError, match=r"/health returned HTTP 503"):
+        _offline_run(server=server, direct_handler=cold)
+    assert not server.attempt_rows
+
+
+def test_unexpected_error_exits_1_with_the_class_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_all_settings(monkeypatch, tmp_path)
+
+    async def boom(settings: object, **kwargs: object) -> tuple[int, str]:
+        raise RuntimeError(f"exploded with {FAKE_API_KEY}")
+
+    monkeypatch.setattr(probe, "run_probe", boom)
+    assert probe.main([]) == 1
+    captured = capsys.readouterr()
+    assert "probe error (RuntimeError)" in captured.err
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def test_main_returns_the_probe_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_all_settings(monkeypatch, tmp_path)
+
+    async def incomplete(settings: object, **kwargs: object) -> tuple[int, str]:
+        return 3, "record"
+
+    monkeypatch.setattr(probe, "run_probe", incomplete)
+    assert probe.main([]) == 3
+    assert capsys.readouterr().out.strip() == "record"
