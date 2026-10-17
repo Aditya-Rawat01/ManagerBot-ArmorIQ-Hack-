@@ -1444,3 +1444,33 @@ def test_live_unanswered_questions_keep_their_own_reasons() -> None:
             )
     finally:
         db.close()
+
+
+def test_pool_checks_each_connection_before_use() -> None:
+    """Neon closes idle connections: every checkout must be liveness-checked
+    (a dead connection is replaced, not handed to the Slack dedupe claim)."""
+    from apps.api.core import db as db_module
+
+    db = BackendDatabase("postgresql://backend-login@db.invalid/proxylead")
+    assert db._pool._check is psycopg_pool.ConnectionPool.check_connection
+    assert db._pool.kwargs.get("connect_timeout") == db_module.CONNECT_TIMEOUT_S
+
+
+@needs_live_write
+def test_live_dead_pooled_connection_is_replaced() -> None:
+    """A pooled connection killed server-side (as Neon does to idle ones) must
+    not fail the next transaction."""
+    import psycopg
+
+    db = BackendDatabase(LIVE_DSN)
+    try:
+        with db.tx() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            pid = cursor.fetchone()[0]
+        with psycopg.connect(LIVE_DSN, autocommit=True) as killer:
+            killer.execute("SELECT pg_terminate_backend(%s)", (pid,))
+        with db.tx() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            assert cursor.fetchone()[0] != pid
+    finally:
+        db.close()
