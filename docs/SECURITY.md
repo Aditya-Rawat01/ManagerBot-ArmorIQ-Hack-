@@ -11,6 +11,7 @@ order; later PRs append after earlier ones and never rewrite another task's sect
 - "Tool-server request verification" — P1-04.
 - "ArmorIQ SDK surface" — P1-02 (appends).
 - Policy facts — P1-08 (appends).
+- "ArmorIQ SDK telemetry" — security follow-up to the PR #72 review (appends).
 
 ## Tool-server request verification (P1-04)
 
@@ -104,8 +105,8 @@ source, not live**: live behavior is confirmed or corrected only by E1–E4
 
 | Symbol | Location | Verified behavior |
 |---|---|---|
-| `build_plan_from_tool_calls(tool_calls, goal, tool_name_parser, default_mcp_name)` | `plan_builder.py:57` | Builds `{goal, steps: [{action, tool, mcp, params, description}]}`. Step identity is `(mcp, action)`; the gateway feeds one `ToolCall` per planned step in order. |
-| `default_tool_name_parser(default_mcp_name)` | `plan_builder.py:22` | Splits `mcp__action` / bare action names. Gateway passes bare tool names with an explicit per-step MCP. |
+| `build_plan_from_tool_calls(tool_calls, goal, tool_name_parser, default_mcp_name)` | `plan_builder.py:57` | Builds `{goal, steps: [{action, tool, mcp, params, description}]}`. Each step records `(mcp, action)`; the gateway feeds one `ToolCall` per planned step in order. At invoke time `client.invoke` finds the step by `action` alone (first match, `client.py:806`) and raises `IntentMismatchException` when none matches. |
+| `default_tool_name_parser(default_mcp_name)` | `plan_builder.py:22` | Splits `<mcp>__<action>` at the first `__`. A bare name is accepted only when the session has a `default_mcp_name`; otherwise it raises `ValueError` (`plan_builder.py:37`). The gateway sets no default (one plan can span `memory-mcp` and `workspace-mcp`), so it names every call `f"{step.mcp.value}__{step.tool.value}"`. The parser splits that back into the same `(mcp, action)` pair that `invoke_with_policy` sends. Corrected after an offline check: bare names made every real mint fail closed (`test_mint_plan_names_each_steps_mcp__offline_fake_sdk`). |
 | `hash_tool_calls(tool_calls)` | `plan_builder.py:81` | Canonical plan hash used for the session's same-plan cache. |
 | `ToolCall{name, args}` | `models.py:235` | The plan input shape. |
 
@@ -173,3 +174,91 @@ this table via ICR where the evidence differs.
   code: its decisions carry ArmorIQ source labels for offline tests and are never
   evidence. `tests/api/test_guardrails.py` fails if `apps/`, `services/` or
   `scripts/` import `tests` or name the fake.
+
+## ArmorIQ SDK telemetry (observability shipper)
+
+Raised by the PR #72 (E1 probe) security review. Read from the installed
+`armoriq-sdk==0.6.10` source in a throwaway venv, then checked with an offline
+probe: sockets blocked, every HTTP call answered by an in-memory transport,
+fake `ak_test_` key, `example.test` email. **ArmorIQ was never called.** This is
+source evidence, not live evidence.
+
+**What the SDK does by default.** Each `ArmorIQSession` builds an
+`ObservabilityRecorder` (`session.py:221` `_init_observability`). Unless it is
+disabled, that recorder starts a daemon thread named
+`armoriq-observability-shipper` and registers an `atexit` drain
+(`observability/shipper.py:83`). Ended traces are POSTed to
+`{backend_endpoint}/observability/spans` (`shipper.py:198`; production backend
+`https://api.armoriq.ai`, `_build_env.py:36`) with the service API key in
+`X-API-Key`. A send happens on the 5 s flush loop, on `session.close()`, and at
+interpreter exit. Failures are retried 3 times with 0.5/1/2 s backoff and a
+10 s timeout per attempt (`shipper.py:39-41`), then dropped. Failures are never
+raised to the caller.
+
+**What the gateway's path sends.** The gateway uses one session per mint
+(`_mint_token`: `start_plan`, then `close`). The probe captured exactly one POST
+for one mint:
+
+- `product: "armoriq-sdk"`, a random `sessionId`, and one `iap.plan` trace with
+  one `iap.plan.start` span;
+- `agentId: "proxylead"`, `mode: "proxy"`, `toolCount`;
+- the plan **goal** twice (`attributes.input` and span `goal`). The goal is
+  `PlanProposal.summary`, which embeds up to 80 characters of each search
+  query (`apps/api/planner.py` `_step_purpose`). That is request content.
+- `userId: null`. The SDK forwards `userId` only when it is a UUID
+  (`session.py:108` `_valid_user_id`), so the member email used by
+  `for_user(email)` is **not** sent as the user id. The review's "email as user
+  id" claim does not hold for 0.6.10 on this path. No email and no tool
+  arguments appeared in the captured body.
+
+Other session paths the gateway does **not** use today do put more on the
+trace: `check` and `enforce_sdk` add the raw `userEmail` (`session.py:758`,
+`:1012`), and the enforce/dispatch spans add tool arguments (truncated to 4 KB).
+So the exposure would grow without any setting change if a later edit used
+those paths.
+
+**Cost on the request path.** `close()` stops the shipper and flushes
+synchronously. `_mint_token` runs it in the worker thread while the per-member
+lock is held. With the telemetry endpoint failing instantly, the probe measured
+`close()` blocking for 3.5 s (backoff only). With real timeouts it can block for
+about 43.5 s (4 × 10 s plus backoff).
+
+**How to disable it (both verified offline).**
+
+- Env `ARMORIQ_OBSERVABILITY` set to `false`, `0`, `no` or `off` (trimmed,
+  case-insensitive; `session.py:254`). The SDK reads **only the process
+  environment**. pydantic-settings reads `.env` without exporting it, and
+  compose maps variables one by one (`docs/DOCKER.md` §5). So a value placed
+  only in `.env` never reaches the SDK.
+- `SessionOptions(observability=ObservabilityConfig(enabled=False))`. No
+  recorder or thread is created, and this wins over the env var.
+
+**Decision: off by default in ProxyLead.** Telemetry is a second, optional
+copy of request-derived text at ArmorIQ. No ProxyLead feature reads it. The
+authorization calls (`capture_plan`, `get_intent_token`, `invoke_with_policy`)
+are the deliberate ArmorIQ egress, and the audit trail is ProxyLead's own.
+Turning telemetry off follows the PRD privacy rules: data minimisation, emails
+masked in UI and logs (PRD §4.1), and no egress beyond what authorization needs
+(PRD §0.9; ADR-020 and ADR-021 keep raw emails out of `_ctx` and the
+database). It also keeps a vendor endpoint's latency out of the mint path.
+
+- `Settings.armoriq_observability` (env `ARMORIQ_OBSERVABILITY`) defaults to
+  `False`. A blank value also counts as `False`.
+- `ArmorIQGateway._session_options()` passes
+  `ObservabilityConfig(enabled=False)` unless that setting is `True`. When it is
+  `True`, it passes `None` and the SDK default (on) applies. A settings object
+  without the field stays off. The other session options (`mode="proxy"`,
+  `validity_seconds=TOKEN_VALIDITY_S`, `llm="proxylead"`) are unchanged. The
+  gateway's authorization behavior is not otherwise changed.
+- Compose passes `ARMORIQ_OBSERVABILITY` to `api` only, defaulting to `false`.
+- Tests: `test_sdk_telemetry_off_by_default__offline_fake_sdk` and
+  `test_sdk_telemetry_opt_in_defers_to_sdk__offline_fake_sdk`
+  (`tests/api/test_armoriq_gateway.py`), and
+  `test_armoriq_observability_is_off_unless_opted_in` (`tests/api/test_config.py`).
+  The first test builds a real `ArmorIQSession` offline with the gateway's
+  options and `ARMORIQ_OBSERVABILITY=true` in the environment. It asserts that
+  no recorder and no shipper thread exist.
+
+Opting in (`ARMORIQ_OBSERVABILITY=true`) is a privacy decision for the steward.
+If it is ever turned on, re-check the payload against the pinned SDK version
+first. On any SDK bump, re-verify these line references and the disable switch.

@@ -40,6 +40,7 @@ from services.toolserver.ledger import (
     validate_entry,
 )
 from services.toolserver.main import create_app
+from services.toolserver.schemas import NotFound
 from services.toolserver.tools_memory import PRODUCT_TOOLS, ProductTool
 
 from .conftest import MEMORY_TOKEN, WORKSPACE_TOKEN, auth, make_settings
@@ -250,7 +251,17 @@ def list_tools(client: TestClient, path: str, token: str) -> list[dict]:
 
 
 def test_all_product_tools_registered_via_guard() -> None:
-    assert set(PRODUCT_TOOLS) == {ToolName.KNOWLEDGE_SEARCH_TEAM}
+    assert set(PRODUCT_TOOLS) == {
+        ToolName.KNOWLEDGE_SEARCH_TEAM,
+        ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_SEARCH_RESTRICTED,
+        ToolName.KNOWLEDGE_GET_SOURCE_TEAM,
+        ToolName.KNOWLEDGE_GET_SOURCE_CONFIDENTIAL,
+        ToolName.KNOWLEDGE_GET_SOURCE_RESTRICTED,
+        ToolName.READ_SOURCE_TEAM,
+        ToolName.READ_SOURCE_CONFIDENTIAL,
+        ToolName.READ_SOURCE_RESTRICTED,
+    }
     with dev_client() as client:
         # No _ctx: rejected by the dispatcher before any handler runs.
         message = call(client, {"query": "quokka", "limit": 5})
@@ -267,15 +278,33 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
         ("/workspace/mcp", WORKSPACE_TOKEN, McpEndpoint.WORKSPACE),
     ):
         implemented = tool in PRODUCT_TOOLS and endpoint is served_by
-        ctx = make_ctx(tool=tool.value, aud=served_by.value)
+        # Manager clears every ceiling: implemented tools reach the
+        # no-ledger refusal, unimplemented ones are refused earlier.
+        ctx = make_ctx(
+            tool=tool.value,
+            aud=served_by.value,
+            app_role="manager",
+            requester_member_id="m-maya",
+            armoriq_member_email_ref="PERSONA_MAYA_EMAIL",
+        )
+        if "read_source" in tool.value:
+            view = f"approved_company_data_{tool.value.rsplit('_', 1)[-1]}"
+            arguments = {"view": view, "limit": 1}
+        elif "get_source" in tool.value:
+            arguments = {"source_ref": "team-friday-deploy-freeze"}
+        elif tool.value == "send_external_message":
+            arguments = {"destination": "synthetic_sink", "message": "x"}
+        elif tool.value == "create_followup_task":
+            arguments = {
+                "title": "T",
+                "owner": "sam",
+                "priority": "low",
+                "idempotency_key": "k",
+            }
+        else:
+            arguments = {"query": "q", "limit": 1}
         with dev_client() as client:
-            message = call(
-                client,
-                {"query": "q", "limit": 1, "_ctx": ctx},
-                token,
-                tool=tool.value,
-                path=path,
-            )
+            message = call(client, {**arguments, "_ctx": ctx}, token, tool=tool.value, path=path)
         # Implemented here: verified, then refused for lack of a ledger.
         # Not implemented here: refused before verification. Both `internal`.
         assert result_text(message)["code"] == "internal", (tool.value, path, implemented)
@@ -285,7 +314,13 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ToolName registered on the server outside PRODUCT_TOOLS (e.g. a
-    future `server.tool(...)` line) must never run unguarded."""
+    future `server.tool(...)` line) must never run unguarded.
+
+    NOTE for P2-09: `knowledge_save_team_note` stands in for a fake
+    UNREGISTERED tool here only because it has no guarded handler yet. When
+    P2-09 adds it to PRODUCT_TOOLS, switch this test to a ToolName that is
+    still unimplemented (e.g. a workspace tool before P2-10), or it stops
+    testing the unregistered path."""
     ran: list[str] = []
     real_build = main.build_server
 
@@ -296,7 +331,8 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
             ran.append(endpoint.value)
             return "leaked"
 
-        server.add_tool(rogue, name=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value)
+        # A memory tool with no guarded handler (P2-09 owns it later).
+        server.add_tool(rogue, name=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value)
         return server
 
     monkeypatch.setattr(main, "build_server", build_with_rogue_tool)
@@ -306,9 +342,9 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
             client,
             {
                 "query": "q",
-                "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value),
+                "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value),
             },
-            tool=ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL.value,
+            tool=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value,
         )
     assert result_text(message)["code"] == "internal"
     assert ran == []
@@ -389,14 +425,14 @@ REJECTIONS: dict[str, tuple[Callable[[], dict], str, str]] = {
         TOOL,
         "invalid_arguments",
     ),
-    "unknown_tool": (
+    "over_ceiling": (
         lambda: {
             "query": "q",
             "limit": 5,
             "_ctx": make_ctx(tool=ToolName.KNOWLEDGE_SEARCH_RESTRICTED.value),
         },
         ToolName.KNOWLEDGE_SEARCH_RESTRICTED.value,
-        "internal",
+        "out_of_scope",
     ),
     "no_ledger": (lambda: {"query": "q", "limit": 5, "_ctx": make_ctx()}, TOOL, "internal"),
 }
@@ -491,10 +527,10 @@ def test_invalid_arguments_are_recorded_as_rejections(monkeypatch: pytest.Monkey
 
 
 def test_tier_ceiling_denies_before_the_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Spec step 1.3: an elevated-tier tool is refused (`out_of_scope`) and
-    recorded as a rejection before any handler logic (P2-08 adds the
-    per-role ceiling; until then elevated tiers fail closed)."""
-    tool = ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL
+    """Spec step 1.3: an over-ceiling tool is refused (`out_of_scope`) and
+    recorded as a rejection before any handler logic (P2-08 per-role ceiling:
+    senior clears confidential but not restricted)."""
+    tool = ToolName.KNOWLEDGE_SEARCH_RESTRICTED
     spy = Spy()
     install_handler(monkeypatch, spy, tool)
     ledger = FakeLedger()
@@ -511,6 +547,51 @@ def test_tier_ceiling_denies_before_the_handler(monkeypatch: pytest.MonkeyPatch)
     assert result_meta(message) == {"ledger_entry_id": str(entry_id)}
     assert entry.validation_outcome == "out_of_scope"
     assert entry.execution_status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
+
+
+async def _nothing_visible(verified: Any, args: Any, runtime: Any) -> Any:
+    raise NotFound("no visible source: secret-detail-zzz")
+
+
+def test_not_found_is_an_executed_lookup_with_its_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-11 `not_found`: the authorized lookup ran (accepted/executed row,
+    referenced in `_meta`) and found nothing; fixed body, no exception text."""
+    tool = ToolName.KNOWLEDGE_GET_SOURCE_TEAM
+    install_handler(monkeypatch, _nothing_visible, tool)
+    ledger = FakeLedger()
+    jti = f"jti-nf-{uuid.uuid4().hex}"
+    with fake_ledger_client(monkeypatch, ledger) as client:
+        message = call(
+            client,
+            {"source_ref": "no-such-source", "_ctx": make_ctx(jti=jti, tool=tool.value)},
+            tool=tool.value,
+        )
+    assert result_text(message) == {"code": "not_found", "message": "No matching source found."}
+    assert "secret-detail-zzz" not in json.dumps(message)
+    [(entry_id, entry)] = ledger.rows(jti)
+    assert result_meta(message) == {"ledger_entry_id": str(entry_id)}
+    assert entry.validation_outcome == "accepted"
+    assert entry.execution_status is ToolExecutionStatus.EXECUTED
+    assert entry.error_class is None
+
+
+def test_unstored_not_found_is_internal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A not_found whose ledger row could not be stored is never reported as
+    an executed lookup: `internal`, no `_meta`."""
+    tool = ToolName.KNOWLEDGE_GET_SOURCE_TEAM
+    install_handler(monkeypatch, _nothing_visible, tool)
+    ledger = FakeLedger(fail={"append": ValueError("entry rejected")})
+    with caplog.at_level(logging.ERROR), fake_ledger_client(monkeypatch, ledger) as client:
+        message = call(
+            client,
+            {"source_ref": "no-such-source", "_ctx": make_ctx(tool=tool.value)},
+            tool=tool.value,
+        )
+    assert result_text(message)["code"] == "internal"
+    assert result_meta(message) == {}
+    assert any(r.levelno >= logging.ERROR and "ledger" in r.getMessage() for r in caplog.records)
 
 
 def test_unstored_execution_is_never_reported_as_success(
@@ -591,12 +672,6 @@ def test_errors_do_not_leak_details() -> None:
             body = call(client, arguments)
             assert result_text(body)["code"] == code
             assert secret_value not in json.dumps(body)
-
-
-def test_workspace_endpoint_has_no_product_tools() -> None:
-    with dev_client() as client:
-        names = [t["name"] for t in list_tools(client, "/workspace/mcp", WORKSPACE_TOKEN)]
-    assert not set(names) & {name.value for name in ToolName}
 
 
 @pytest.mark.parametrize(

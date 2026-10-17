@@ -85,6 +85,37 @@ def test_backend_has_no_ledger_or_egress_access() -> None:
     assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
 
 
+def test_egress_sink_correlation_columns() -> None:
+    """0012 (P2-10 §9.1): sink rows carry the verified jti and requester; one
+    row per jti; the sink stays append-only and invisible to the backend."""
+    path = MIGRATIONS_DIR / "0012_egress_sink_correlation.sql"
+    text = path.read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS jti TEXT" in text
+    assert "ADD COLUMN IF NOT EXISTS requester_member_id TEXT" in text
+    assert (
+        "CREATE UNIQUE INDEX IF NOT EXISTS egress_sink_jti_uidx\n"
+        "    ON public.egress_sink (jti) WHERE jti IS NOT NULL" in text
+    )
+    assert "GRANT SELECT, INSERT ON public.egress_sink TO proxylead_toolserver" in text
+    assert "REVOKE UPDATE, DELETE ON public.egress_sink FROM proxylead_toolserver" in text
+    assert "REVOKE ALL ON public.egress_sink FROM proxylead_backend" in text
+
+
+def test_workspace_tables_least_privilege() -> None:
+    """0012: the toolserver never rewrites follow-up tasks or sink rows, and
+    the grant check covers both tables."""
+    text = _sql_text()
+    for table in ("tasks", "egress_sink"):
+        assert f"REVOKE UPDATE, DELETE ON public.{table} FROM proxylead_toolserver" in text
+        assert f"GRANT SELECT, INSERT ON public.{table} TO proxylead_toolserver" in text
+    last_tasks_grant = text.rindex("ON public.tasks TO proxylead_toolserver")
+    assert text[last_tasks_grant - 30 : last_tasks_grant].endswith("GRANT SELECT, INSERT ")
+    assert text.rindex("REVOKE UPDATE, DELETE ON public.tasks FROM proxylead_toolserver") > (
+        text.rindex("GRANT SELECT, INSERT, UPDATE, DELETE ON public.tasks TO proxylead_toolserver")
+    )
+    assert set(verify_script.WORKSPACE_TABLE_INSERTS) == {"tasks", "egress_sink"}
+
+
 def test_ledger_followup_constraints() -> None:
     """0008: no explicit ledger ids; new rows carry a hex digest and no free text."""
     text = _sql_text()
@@ -141,6 +172,31 @@ def test_metadata_view_exposes_no_content() -> None:
 
 def test_backend_can_read_metadata_view() -> None:
     assert "GRANT SELECT ON public.draft_review_queue TO proxylead_backend" in _sql_text()
+
+
+def test_approved_views_migration_is_schema_and_grants_only() -> None:
+    """0011 (P2-08 review B1/M1): no fixture rows (a fresh migrate runs before
+    the seed creates the workspace), no runtime grant on the base table."""
+    [migration] = sorted(MIGRATIONS_DIR.glob("0011_*.sql"))
+    code = "\n".join(
+        line.split("--", 1)[0] for line in migration.read_text(encoding="utf-8").splitlines()
+    )
+    assert "INSERT" not in code.upper(), "fixture rows belong in seed/company_projects.json"
+    assert "UNIQUE (workspace_id, project_key)" in code  # the seed upsert key
+    assert not re.search(r"GRANT[^;]*\bON\s+public\.company_projects\b", code)
+    for role in ("PUBLIC", "proxylead_backend", "proxylead_toolserver"):
+        assert f"REVOKE ALL ON public.company_projects FROM {role};" in code
+    for tier in DataTier:
+        view = f"public.approved_company_data_{tier.value}"
+        assert f"GRANT SELECT ON {view} TO proxylead_toolserver;" in code
+        assert f"REVOKE ALL ON {view} FROM proxylead_backend;" in code
+        assert f"REVOKE ALL ON {view} FROM PUBLIC;" in code
+        assert f"WHERE tier = '{tier.value}';" in code
+    assert verify_script.COMPANY_PROJECTS_TABLE == "company_projects"
+    assert (
+        tuple(f"approved_company_data_{tier.value}" for tier in DataTier)
+        == verify_script.APPROVED_VIEWS
+    )
 
 
 def test_migrate_without_dsn_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:

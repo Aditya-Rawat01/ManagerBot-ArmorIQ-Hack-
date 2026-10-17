@@ -333,11 +333,15 @@ It never carries a raw email.
 - P2-01: migration and grant for the view; add the view to the grant check.
 - P3-01: the query.
 - P4-04: the panels.
-- Depends on open decisions D-10 (notes stored at team tier) and D-11 (`get_source` reference shape).
+- Depends on open decision D-10 (notes stored at team tier) and on D-11 (`get_source` reference shape; RESOLVED 16 Oct 2026: `source_ref` = server-issued `source_id`). Open follow-up: under D-11/D-09, `knowledge_get_source_*` returns only `active` + `authoritative` records (a draft answers `not_found`), so opening a draft's content through `knowledge_get_source_team` needs a decision by P2-09/P4-04 before that flow ships.
 
 ## ADR-024 — `create_followup_task` ships only if done by 15 Oct afternoon (D-17)
 
 **Decision.** `create_followup_task` ships only if it is implemented and tested by the afternoon of 15 Oct 2026. Otherwise it is removed from the policy and the UI (Arch §6.2). The P2-10 owner records the outcome in this file.
+
+**Outcome (P2-10, PR #73): ships.**
+- `create_followup_task` is implemented and tested on `workspace-mcp` (`services/toolserver/tools_workspace.py`): enum-bounded owner and priority, requester and workspace from the verified `_ctx`, and an idempotency key scoped per workspace and requester. It stays registered, in the policy (P1-08) and in the UI (P4-03).
+- The non-networked `send_external_message` honeypot is implemented in the same task. It writes one `egress_sink` row (with `jti` and requester, migration 0012) and has no network code path. The demo uses it as the target of the real ArmorIQ BLOCK (ADR-025, PRD §10.3): the policy blocks it for every persona, so in guarded mode the sink stays empty.
 
 ## ADR-025 — Honeypot arguments use a fixed synthetic destination (D-29)
 

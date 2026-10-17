@@ -129,6 +129,39 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-11 — Elevated source tools versus the one-elevated-call rule (= U-9)
 
+**RESOLVED 16 Oct 2026 by `VTCodeCraft` with `Aditya-Rawat01` ([issue #22](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/22), ICR approved; no ADR, no contract schema change). Implemented in P2-08 (PR #71).**
+
+1. `source_ref` is the server-issued `source_id` text. It is approved
+   **because** every `knowledge_get_source_*` call re-checks server-side, in
+   one fixed parameterized query: the verified-`_ctx` workspace, the tool's
+   exact tier (a handler literal), the caller's tier ceiling (dispatch step
+   1.3, before the handler), `status='active'` and
+   `review_status='authoritative'`; the excerpt comes only from a chunk with
+   the source's own workspace and tier. A model-supplied id grants nothing
+   beyond what the caller may already read at that tier.
+2. View names `approved_company_data_{team,confidential,restricted}` are
+   final (migration 0011; rows from `seed/company_projects.json`). The
+   toolserver role reads only the views; no runtime role reads or writes the
+   base table.
+3. New SHARED_INTERFACES §4 code `not_found`: missing, wrong-tier, and
+   inactive lookups return byte-identical bodies. It is an executed empty
+   lookup, not a rejection: the tool server records an `accepted`/`executed`
+   ledger row (or answers `internal` if that row cannot be stored), and the
+   gateway maps it to `EXECUTED` with no result and keeps the ArmorIQ
+   decision, never a `tool_server_rule` block; a `not_found` without its
+   ledger reference becomes `internal` (review finding I1).
+4. `read_source_*` returns current rows only. `SourceRow` has no structured
+   status, so `include_superseded=true` is rejected with `invalid_arguments`
+   (fail closed, D-09 rule 3) until an ICR adds such a field (review finding
+   I2).
+5. Member tier ceiling (SHARED_INTERFACES §6) confirmed with it: manager →
+   `restricted`, senior → `confidential`, junior → `team`; unknown roles fail
+   closed (`out_of_scope`).
+
+Residual risks: timing of the single re-check query is not padded (same query
+path for every case; normal variance only). The follow-up flow after an
+elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
+
 - PRD §5.2 / Arch §5.3.1 forbid an elevated search plus an elevated source read
   in one plan, and say "if a source needs a separate read, stop and ask the user
   to confirm a new request".
@@ -183,7 +216,7 @@ begin, cannot be accepted), or `defer` (can be decided later).
 
 ### D-17 — Does `create_followup_task` ship?
 
-**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI.
+**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI. **Outcome: ships** (P2-10, PR #73; recorded under ADR-024).
 
 - Optional (PRD §6.2). Arch §6.2: if not fully implemented and tested, remove it
   from the policy and UI.
@@ -266,6 +299,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `samarth-chawla`. Needed before **P1-08**. Blocking: **finish**.
 
 ### D-27 — Where the Socket Mode client runs
+
+**RESOLVED 17 Oct 2026 by `VTCodeCraft` ([issue #26](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/26); no ADR):** inside the API process. The FastAPI lifespan starts and stops the Slack Socket Mode client (same process and Render service as the API, sharing settings and the backend database pool), with a single uvicorn worker. It is disabled cleanly when the Slack tokens (or the P3-04 orchestrator handle) are missing, and API startup and `/health` never depend on it: any start failure is logged by exception class and the API keeps serving HTTP. Implemented in P3-05 (PR #78, `services/slack_socket/app.py`, `apps/api/main.py`). The live smoke test (mention + DM reply, duplicate processed once, confidential → DM only) is part of CP-5 (#44).
 
 - Arch §2: "One modular FastAPI backend". Socket Mode keeps a long-lived
   websocket, which affects hosting (D-07).

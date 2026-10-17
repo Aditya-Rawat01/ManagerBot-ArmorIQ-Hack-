@@ -126,9 +126,10 @@ source (`unknown` if the layer cannot be determined). Never `allow`.
 | `create_followup_task` arguments | **FIXED in part** (Arch §6.2) | Short title, optional description, enum-bounded owner and priority, idempotency key. Enum values PROPOSED by P2-02 |
 | All other argument schemas | **PROPOSED** (P2-02, U-7) | Strict Pydantic models with `extra="forbid"`, length limits, no tier/identity fields |
 | Search result | **FIXED shape, open limits** | `KnowledgeSearchResult` / `KnowledgeSearchHit` / `SourceCitation`. Score scale and snippet limit: **PROPOSED** (P2-05: `score` = cosine similarity, `rank` = RRF order, snippets ≤ 400 chars; see §7). `min_score` value: **UNRESOLVED** (E17, U-10) |
-| `knowledge_get_source_*` / `read_source_*` results | **PROPOSED** (P2-02) | Bounded record with source ID, tier, and provenance; `read_source_*` returns rows only from named approved views (names PROPOSED by P2-01/P2-08) |
+| `knowledge_get_source_*` / `read_source_*` results | **PROPOSED** limits (P2-02); identity and views **FIXED** (D-11, 16 Oct 2026) | Bounded record with source ID, tier, and provenance. `source_ref` = the server-issued `source_id`, re-checked server-side on every call (verified-`_ctx` workspace, exact tier, caller ceiling, `active`, `authoritative`); misses are `not_found`. `read_source_*` returns current rows only from the tier's approved view `approved_company_data_{team,confidential,restricted}` (final names); `include_superseded=true` is rejected (§7) |
 | MCP result framing | **FIXED**: JSON-RPC 2.0, SSE, required text content shape (Arch §5.1). **PROPOSED** (P2-06, shape below): the text content carries the JSON of the P2-02 result model; the ledger reference travels in the result's `_meta` | |
 | Tool-server rejection | **PROPOSED** (P1-04/P2-06, shape below) | MCP error result (`isError: true`) whose text block is `{code, message}` with codes `unauthenticated`, `invalid_context`, `context_expired`, `replay`, `invalid_arguments`, `out_of_scope`, `precondition_failed`, `internal`. Gateway maps it to `ToolInvocationResult(status=rejected_by_tool_server)` + `DecisionSource.TOOL_SERVER_RULE`, never ALLOW. No protected detail in messages |
+| `not_found` | **FIXED** (D-11, approved 16 Oct 2026) | Same `isError` framing, but an executed empty lookup, not a rejection: own `accepted`/`executed` ledger row in `_meta`; gateway maps it to EXECUTED with no result and keeps the ArmorIQ decision (mapping below). Byte-identical body for missing / wrong-tier / inactive sources |
 
 Tool result shape (P2-06 emits it, `services/toolserver/schemas.py`; the
 gateway, P1-02, parses it in `ArmorIQGateway._map_success`). The payload is
@@ -149,19 +150,50 @@ the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`
                                              // failure (code internal, execution_status=error)
 // replay: "_meta": {"original_entry_id": "<id>"} when the original call's row exists
 // no row (invalid_context, context_expired, unknown tool, no ledger, ...): no "_meta"
+
+// not_found (D-11): an executed empty lookup, NOT a rejection. Its own row is
+// validation_outcome=accepted, execution_status=executed, and is always present
+// (if that row cannot be stored the tool server answers `internal` instead).
+{"content": [{"type": "text", "text": "{\"code\": \"not_found\", \"message\": \"No matching source found.\"}"}],
+ "isError": true,
+ "_meta": {"ledger_entry_id": "<id>"}}
 ```
+
+`not_found` mapping (**FIXED**, D-11, approved 16 Oct 2026). Emitted only by
+an authorized lookup (`knowledge_get_source_*`) that found nothing visible:
+missing, wrong-tier, and inactive/non-authoritative sources share this exact
+body (byte-identical; only the `_meta` row id differs per call, by design for
+auditability). The gateway (`ArmorIQGateway._map_not_found`) maps it to:
+
+| Field | Value |
+|---|---|
+| `ToolInvocationResult.status` | `executed` (`tool_server_reached=True`, `ledger_entry_id` from `_meta`) |
+| `ToolInvocationResult.result` / `error_code` | `None` (no evidence can be built from it) / `"not_found"` |
+| `StepOutcome.decision` | the ArmorIQ decision stands (`allow`, `armoriq_policy_decision`); never converted into a `tool_server_rule` block |
+| `not_found` without `_meta.ledger_entry_id` | unprovable: mapped to `internal` (`rejected_by_tool_server`, `tool_server_rule`, BLOCK) |
+
+Every other `isError` code stays a rejection (BLOCK). P3-04 treats a
+`not_found` step as an empty lookup: no evidence, no citation, no disclosure of
+why nothing was found.
 
 - `_meta` is the only place for correlation data: the text block of a success
   is the bare result model (consumers parse it with the P2-02 models), and
   `mcp==2.3.0`'s wire `CallToolResult` model ignores unknown top-level keys.
 - Gateway rules: `isError` (or the SDK's `status == "error"`) is always a
-  rejection; the code comes from the text block and anything outside the §4
-  set becomes `internal`; EXECUTED requires `_meta.ledger_entry_id`, otherwise
-  the status stays `unknown`. A rejection's `ledger_entry_id` is its own row,
-  or on replay the original entry. Top-level `ledger_entry_id`/`error_code`
-  keys (the earlier provisional reading) are still accepted.
+  rejection, except `not_found` (above); the code comes from the text block
+  and anything outside the §4 set becomes `internal`; EXECUTED requires
+  `_meta.ledger_entry_id`, otherwise the status stays `unknown` (a row-less
+  `not_found` becomes `internal`). A rejection's `ledger_entry_id` is its own
+  row, or on replay only the original entry. Top-level
+  `ledger_entry_id`/`error_code` keys (the earlier provisional reading) are
+  still accepted.
 - Whether `_meta` survives the ArmorIQ proxy is unverified until E1 (P1-06);
   without it a success degrades to `unknown`, never to a false EXECUTED.
+- Beyond the P2-02 model, the tool server rejects as `invalid_arguments` (a
+  recorded rejection, dispatch step 1.2): a NUL character in any string
+  argument (PostgreSQL text cannot hold it; never a driver `internal`), and
+  each tool's own argument policy (`read_source_*`: a foreign `view`,
+  `include_superseded=true`; §7).
 - `tools/list` advertises the enforced argument model (`model_json_schema()`:
   limits, `additionalProperties: false`) plus `patternProperties: {"^_": {}}`,
   so `_ctx` and the SDK's `_policy_context` are admitted but never declared (D-05).
@@ -184,7 +216,7 @@ the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`
 | Tier per tool | `TOOL_CATALOG` | **FIXED** |
 | Tier filter in SQL | `services/knowledge/retrieval.py`, handlers; tier constant chosen by handler, never by arguments | **FIXED** rule; implementation P2-04/P2-08 |
 | Source lookup re-check (tier + current status) | `knowledge_get_source_*` handlers | **FIXED** rule (Arch §6.1), P2-08 |
-| Tool-server member tier ceiling (independent of ArmorIQ, Arch §5.5, §6.1, §13) | `services/toolserver` handlers, using the role from the verified `_ctx` | **PROPOSED** (P2-08), derived from the PRD §5.1 matrix cells that are not BLOCK: Maya → up to `restricted`; Sam → up to `confidential` (ArmorIQ HOLD gates it); Priya → `team` only. Maya-only maintenance tools check the manager role server-side (P2-09) |
+| Tool-server member tier ceiling (independent of ArmorIQ, Arch §5.5, §6.1, §13) | `services/toolserver/servers.py` `check_tier_ceiling` (dispatch step 1.3, before any handler), using the backend-signed `app_role` from the verified `_ctx` | **FIXED** (P2-08, confirmed with D-11 on 16 Oct 2026), derived from the PRD §5.1 matrix cells that are not BLOCK: `manager` (Maya) → up to `restricted`; `senior` (Sam) → up to `confidential` (ArmorIQ HOLD gates it); `junior` (Priya) → `team` only; unknown roles fail closed. Denial → `out_of_scope` (recorded rejection), `tool_server_rule`. ArmorIQ policy decides first; the ceiling holds even if the policy is too permissive. Maya-only maintenance tools check the manager role server-side (P2-09). Follow-up (P2-08 review M3, not implemented): cross-check the signed role against `members.app_role` / `members.active` (needs a toolserver `SELECT` on `members`) so a demoted or deactivated member's unexpired `_ctx` (≤ 900 s) cannot clear a ceiling |
 | Highest tier returned to the model | Orchestrator tracks the max tier over all `StepOutcome`s with returned data | **FIXED** rule (PRD §7.12), P3-04 |
 | Delivery channel by tier | `apps/api/delivery.py` | **FIXED** rule, P3-06 |
 | `DataTier` values | `team`, `confidential`, `restricted` | **FIXED** |
@@ -199,11 +231,11 @@ Migration tooling and driver: **PROPOSED** (D-08). Roles are **FIXED** (PRD §8.
 | `workspaces`, `members` | P2-01 | Seed job (migration role) | backend, toolserver | Bootstrap PROPOSED (D-20) |
 | `slack_events` | P2-01 | backend (P3-05) | backend | FIXED purpose (dedupe) |
 | `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | P2-01 | toolserver (P2-09), seed job (P2-03) | **toolserver only** | FIXED (backend has no `SELECT`) |
-| Approved company-data views (per tier) | P2-01/P2-08 migration | — | toolserver only | Names PROPOSED (P2-08) |
+| Approved company-data views `approved_company_data_{team,confidential,restricted}` over `company_projects` | P2-08 (migration 0011: objects and grants only) | Seed job (migration role) upserts `seed/company_projects.json`; no runtime writer | toolserver only (`SELECT` on the views; nothing on the base table); backend denied | Names **FIXED** (D-11, 16 Oct 2026) |
 | `topic_access_rules` | P2-01 | backend (P4-04 via P3-02 module) | backend | PROPOSED access |
 | `plans`, `plan_steps`, `approval_requests`, `request_events`, `decision_events`, `delivery_events`, `unanswered_questions` | P2-01 | backend (P3-01 API) | backend | FIXED purpose; columns per Arch §7.2 |
 | `tool_execution_ledger` | P2-01 (P2-07 may add constraints) | toolserver (`INSERT` only) | toolserver; backend `SELECT` of non-content columns **PROPOSED** for SC-06 correlation | PROPOSED grants |
-| `tasks`, `egress_sink` | P2-01 | toolserver (P2-10) | toolserver; backend `SELECT` on `egress_sink` count **PROPOSED** for the demo | Ship decision D-17 |
+| `tasks`, `egress_sink` | P2-01 (0012: sink `jti` + requester) | toolserver (P2-10; `SELECT` + `INSERT` only since 0012) | toolserver; backend `SELECT` on `egress_sink` count **PROPOSED** for the demo (not granted: the backend is denied both tables) | Both tools ship (D-17 outcome, ADR-024) |
 
 Knowledge record layout written by the seed (P2-03, **PROPOSED**; read by
 P2-04/P2-05/P2-08; full detail in `seed/README.md`):
@@ -232,6 +264,19 @@ and tier. Snippets are ≤ 400 characters: the whole chunk, else `ts_headline`
 fragments around the matched terms, else the leading text. `decisions`,
 `manager_guidance`, `team_notes` carry a nullable `seed_key` (0010): set on
 seed rows, NULL on runtime rows. Eval case labels are never stored.
+
+Approved-view rows (`read_source_*`, P2-08, `services/toolserver/tools_memory.py`):
+one fixed query per tier. The view and the tier filter come from the handler's
+tier literal (`_VIEW_BY_TIER[tier]` plus `AND tier = %s`), never from the
+arguments; a `view` naming another tier is `invalid_arguments`. The workspace
+comes from the verified `_ctx`; `author` is a literal (LIKE-escaped)
+substring match; rows are capped at `limit` and snippets at 2000 characters.
+Current rows only (`status = 'active'`). `SourceRow` has no structured status
+or supersession field, so a superseded row would reach the responder as
+current evidence (D-09 rule 3). Until an ICR adds such a field,
+`include_superseded=true` is rejected with `invalid_arguments` (fail closed, at
+dispatch step 1.2, recorded as a rejection row); the argument stays in the
+P2-02 schema with default `false`, so no contract changes.
 
 No runtime role gets `UPDATE`/`DELETE` on ledger or audit tables (append-only, PROPOSED).
 
@@ -294,9 +339,9 @@ P2-06 wiring notes (`services/toolserver/ledger.py`; no handler calls
 | Item | Status | Definition |
 |---|---|---|
 | `AuditEvent` model | **FIXED shape** | `event_id`, `occurred_at`, `event_type`, `request_id`, `trace_id`, `plan_id?`, `step_index?`, `jti?`, `decision_source?`, `payload` (redacted) |
-| Event types | **PROPOSED** (scaffold, extendable by P3-01 via ICR) | `request_received`, `plan_proposed`, `plan_rejected`, `plan_minted`, `authorization_decided`, `hold_created`, `approval_resolved`, `tool_executed`, `tool_rejected`, `answer_generated`, `answer_abstained`, `delivery_attempted`, `delivery_succeeded`, `delivery_failed` |
+| Event types | **PROPOSED** (scaffold, extendable by P3-01 via ICR) | `request_received`, `plan_proposed`, `plan_rejected`, `plan_minted`, `authorization_decided`, `hold_created`, `approval_resolved`, `tool_executed`, `tool_rejected`, `answer_generated`, `answer_abstained`, `delivery_attempted`, `delivery_succeeded`, `delivery_failed`, `slack_event_rejected` (P3-05 ICR, PR #78: a Slack event dropped before it became a request; metadata only, not a request) |
 | Required fields across events | **FIXED** (PRD §10.1) | Requester/member, workspace, entry point, Slack event/message ref; plan steps, tool names, redacted arguments; decision status + source; delegation ID, approval status, token-expiry/retry status; tool server reached, validation outcome, execution result/ID/error; source IDs, citation IDs, highest tier returned, tier delivered; destination/recipient, delivery status, timestamps; topic rule ID, matched topic, chosen tier, escalation confirmed (PRD §5.2) |
-| Audit store API | **FIXED** (P3-01; ICR approved on [#16](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/16) as merged in PR #60; the P3-01 follow-up only adds optional parameters and stricter validation) | `services/audit` — write `store.py`, read `queries.py`, DB protocols `protocols.py` (`db` = `apps.api.core.db.BackendDatabase.from_settings()`: `DATABASE_URL_BACKEND` only, session role checked). Every call raises an `AuditError` subclass on failure (driver/pool errors → `AuditStoreError`); callers fail closed. Write: `create_request(db, ctx) -> request_id` (retry-safe; a replay must name the same requester); `record_plan(db, *, request_id, trace_id, plan, armoriq_plan_id=None, plan_hash=None, matched_topic_rule_id=None, chosen_tier=None, escalation_confirmed=None, plan_id=None, token_expires_at=None) -> plan_id` (pass the gateway `PlanHandle.plan_id` / `.token_expires_at`; topic rule and escalation default to the `PlanProposal`'s); `record_step_decision(db, *, request_id, trace_id, plan_id, step_index, outcome: StepOutcome)`; `record_approval(db, *, request_id, trace_id, approval: ApprovalStatus, requested_by_member_id=None) -> approval_id`; `record_execution_ref(db, *, request_id, trace_id, jti, ledger_entry_id, status, plan_id=None, step_index=None, error_class=None, tool_server_reached=None, validation_outcome=None, result_id=None)`; `record_answer(db, *, request_id, trace_id, citations, highest_tier, abstained, reason, plan_id=None)`; `record_delivery(db, *, request_id, trace_id, channel, recipient_member_id, tier_delivered, status, error_class=None, plan_id=None) -> delivery_id`; `add_unanswered(db, *, request_id, trace_id, workspace_id, requester_member_id, question, reason, safe_refs=()) -> question_id`; `append_event(db, *, event: AuditEvent)` (typed-writer evidence rules apply; `request_received` only via `create_request`). Read: `request_status(db, request_id, member_id)` (owner-only, P4-01); `recent_requests(db, actor, limit=50)`, `timeline(db, request_id, actor)` (`TimelineEntry.tool_name`, `.is_armoriq_policy`), `pending_holds(db, actor)`, `unanswered(db, actor, only_open=True)` (Maya-only, P4-04) |
+| Audit store API | **FIXED** (P3-01; ICR approved on [#16](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/16) as merged in PR #60; the P3-01 follow-up only adds optional parameters and stricter validation) | `services/audit` — write `store.py`, read `queries.py`, DB protocols `protocols.py` (`db` = `apps.api.core.db.BackendDatabase.from_settings()`: `DATABASE_URL_BACKEND` only, session role checked). Every call raises an `AuditError` subclass on failure (driver/pool errors → `AuditStoreError`); callers fail closed. Write: `create_request(db, ctx) -> request_id` (retry-safe; a replay must name the same requester); `record_plan(db, *, request_id, trace_id, plan, armoriq_plan_id=None, plan_hash=None, matched_topic_rule_id=None, chosen_tier=None, escalation_confirmed=None, plan_id=None, token_expires_at=None) -> plan_id` (pass the gateway `PlanHandle.plan_id` / `.token_expires_at`; topic rule and escalation default to the `PlanProposal`'s); `record_step_decision(db, *, request_id, trace_id, plan_id, step_index, outcome: StepOutcome)`; `record_approval(db, *, request_id, trace_id, approval: ApprovalStatus, requested_by_member_id=None) -> approval_id`; `record_execution_ref(db, *, request_id, trace_id, jti, ledger_entry_id, status, plan_id=None, step_index=None, error_class=None, tool_server_reached=None, validation_outcome=None, result_id=None)`; `record_answer(db, *, request_id, trace_id, citations, highest_tier, abstained, reason, plan_id=None)`; `record_delivery(db, *, request_id, trace_id, channel, recipient_member_id, tier_delivered, status, error_class=None, plan_id=None) -> delivery_id`; `add_unanswered(db, *, request_id, trace_id, workspace_id, requester_member_id, question, reason, safe_refs=()) -> question_id`; `append_event(db, *, event: AuditEvent)` (typed-writer evidence rules apply; `request_received` only via `create_request`, `slack_event_rejected` only via `record_slack_event_rejected`); `record_slack_event_rejected(db, *, slack_event_id, reason: SlackRejectionReason, team_id, channel_id) -> key` (P3-05 ICR, PR #78; no migration: `request_events.event_type` has no CHECK): appends one `request_events` row keyed `rej-<slack_event_id>` whose payload is only `reason` / `slack_event_id` / `team_id` / `channel_id` (never text or a Slack user ID); `reason` ∈ `invalid_envelope`, `wrong_team`, `channel_not_allowed`, `unmapped_user`, `db_unavailable`, `duplicate`; IDs must match `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. Read: `request_status(db, request_id, member_id)` (owner-only, P4-01); `recent_requests(db, actor, limit=50)` (lists only IDs that have a `request_received` event, so rejection-only keys never appear or consume the limit), `timeline(db, request_id, actor)` (`TimelineEntry.tool_name`, `.is_armoriq_policy`), `pending_holds(db, actor)`, `unanswered(db, actor, only_open=True)` (Maya-only, P4-04) |
 
 ## 11. Slack delivery and recipients
 
@@ -306,7 +351,8 @@ P2-06 wiring notes (`services/toolserver/ledger.py`; no handler calls
 | Rules | **FIXED** (R-62..R-65) | Team tier may reply in the originating thread or web session. Confidential/restricted: DM to the requester (Slack) or `web_private` (web) only. Channel request → generic notice in thread + DM. Failed DM → no fallback; record `delivery_failed` |
 | Recipient selection | **FIXED** | The requester's own mapped Slack user ID or web session. Maya receives HOLD notifications only. The model never chooses |
 | Delivery interface | **PROPOSED** (P3-06) | `deliver(ctx: RequestContext, answer: ResponderOutput, highest_tier: DataTier) -> DeliveryRecord`; `notify_hold(ctx, approval: ApprovalStatus) -> DeliveryRecord` |
-| Slack sender interface | **PROPOSED** (P3-05) | `SlackSender.post_in_thread(channel_id, thread_ts, text)`, `SlackSender.send_dm(slack_user_id, text)`; raises on failure (no retries to another destination) |
+| Slack sender interface | **PROPOSED** (P3-05) | `SlackSender.post_in_thread(channel_id, thread_ts, text)`, `SlackSender.send_dm(slack_user_id, text)`; raises `SlackError` carrying Slack's error code (`not_in_channel`, `missing_scope`, ...; never text) on failure (no retries to another destination); every post sets `unfurl_links=False`, `unfurl_media=False` |
+| Socket Mode placement | **FIXED** (D-27 RESOLVED by `VTCodeCraft`, 17 Oct 2026, [#26](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/26)) | Inside the API process: the FastAPI lifespan (`apps/api/main.py`) starts/stops `services/slack_socket` with a single uvicorn worker. Disabled cleanly without the Slack tokens or the orchestrator handle (`app.state.orchestrator_handle`, set by P3-04); API startup and `/health` never depend on it. Bolt listeners run on Bolt threads and hand accepted events to `handle(ctx, message)` on the API event loop (`run_coroutine_threadsafe`). Slack never sets `RequestOptions`: once P3-04 adds them, Slack passes a fixed default (`simulate_hijacked_model=False`, no `confirmation_token`) |
 
 ## 12. Agent pipeline interfaces (backend-internal)
 

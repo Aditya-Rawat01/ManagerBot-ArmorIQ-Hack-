@@ -35,6 +35,7 @@ from services.audit.queries import (
 from services.audit.redaction import REDACTED, redact_payload, redact_question
 from services.audit.store import (
     DeliveryStatus,
+    SlackRejectionReason,
     StepOutcomeLike,
     UnansweredReason,
     add_unanswered,
@@ -45,6 +46,7 @@ from services.audit.store import (
     record_delivery,
     record_execution_ref,
     record_plan,
+    record_slack_event_rejected,
     record_step_decision,
 )
 
@@ -61,6 +63,7 @@ __all__ = [
     "PendingHold",
     "RequestStatusView",
     "RequestSummary",
+    "SlackRejectionReason",
     "StepOutcomeLike",
     "TimelineEntry",
     "UnansweredItem",
@@ -75,6 +78,7 @@ __all__ = [
     "record_delivery",
     "record_execution_ref",
     "record_plan",
+    "record_slack_event_rejected",
     "record_step_decision",
     "redact_payload",
     "redact_question",

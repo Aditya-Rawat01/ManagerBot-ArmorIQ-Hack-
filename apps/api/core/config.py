@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     armoriq_mcp_workspace_name: str = "workspace-mcp"
     token_validity_s: int = Field(default=1200, gt=0)
     approval_timeout_ms: int = Field(default=900_000, gt=0)
+    # SDK observability shipper (span upload to ArmorIQ). Off unless opted in;
+    # the gateway disables it per session (docs/SECURITY.md).
+    armoriq_observability: bool = False
 
     # --- demo members (trusted identity mapping) ------------------------------
     persona_maya_email: SecretStr | None = None
@@ -84,6 +87,14 @@ class Settings(BaseSettings):
 
     # --- MCP tool server -----------------------------------------------------
     toolserver_base_url: str | None = None
+
+    @field_validator("armoriq_observability", mode="before")
+    @classmethod
+    def _blank_observability(cls, value: object) -> object:
+        # An empty `ARMORIQ_OBSERVABILITY=` means unset: keep telemetry off.
+        if isinstance(value, str) and not value.strip():
+            return False
+        return value
 
     @field_validator("min_score", mode="before")
     @classmethod
