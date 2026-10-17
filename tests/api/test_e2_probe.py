@@ -267,7 +267,7 @@ OFFLINE_BASE_URL = "https://toolserver.offline.invalid"
 OFFLINE_PROXY = "https://proxy.offline.invalid"
 
 
-class _OfflineToolServer__offline_fake:
+class _FakeToolServer__offline_fake:
     """Fake deployed tool server (offline): the REAL `_ctx` verification
     (`verify_and_record`) and REAL argument models over in-memory rows shaped
     like `tool_execution_ledger`, `tool_call_attempts` and `egress_sink`."""
@@ -436,13 +436,20 @@ class _OfflineToolServer__offline_fake:
         )
 
 
-class _OfflineSession__offline_fake:
-    def __init__(self, client: "_OfflineSdkClient__offline_fake") -> None:
+class _FakeSession__offline_fake_sdk:
+    def __init__(self, client: "_FakeSdkClient__offline_fake_sdk") -> None:
         self.client = client
 
     def start_plan(self, tool_calls: list[dict[str, object]], goal: object = None) -> object:
         from datetime import UTC, datetime, timedelta
 
+        from armoriq_sdk import exceptions as sdk_exceptions
+
+        self.client.goals.append(str(goal))
+        if self.client.mint_block:
+            raise sdk_exceptions.PolicyBlockedException(
+                "blocked", enforcement_action="block", reason=self.client.mint_block
+            )
         self.client.minted.append(list(tool_calls))
         steps = []
         for call in tool_calls:
@@ -459,7 +466,7 @@ class _OfflineSession__offline_fake:
         pass
 
 
-class _OfflineSdkClient__offline_fake:
+class _FakeSdkClient__offline_fake_sdk:
     """Fake ArmorIQ SDK client mirroring the armoriq-sdk 0.6.10 behaviour the
     probe relies on: the pre-network plan-name check (client.py:804-819),
     the `_policy_context` overwrite in `invoke_with_policy` (1671-1673), and
@@ -472,15 +479,18 @@ class _OfflineSdkClient__offline_fake:
 
     def __init__(
         self,
-        server: _OfflineToolServer__offline_fake,
+        server: _FakeToolServer__offline_fake,
         *,
         proxy_refuse: Callable[[dict], int | None] | None = None,
         policy_block: Callable[[dict], str | None] | None = None,
         expose_http_client: bool = True,
+        mint_block: str | None = None,
     ) -> None:
         self.server = server
         self.proxy_refuse = proxy_refuse
         self.policy_block = policy_block
+        self.mint_block = mint_block
+        self.goals: list[str] = []
         self.minted: list[list[dict[str, object]]] = []
         self.invoked: list[tuple[str, str, list[str]]] = []
         self._wire = httpx.Client(transport=httpx.MockTransport(self._proxy))
@@ -490,7 +500,7 @@ class _OfflineSdkClient__offline_fake:
     def for_user(self, email: str) -> object:
         client = self
         return SimpleNamespace(
-            start_session=lambda opts=None: _OfflineSession__offline_fake(client)
+            start_session=lambda opts=None: _FakeSession__offline_fake_sdk(client)
         )
 
     def invoke(
@@ -584,11 +594,11 @@ def _offline_settings() -> Settings:
     )
 
 
-class _OfflineEvidenceLookup__offline_fake:
+class _FakeEvidenceLookup__offline_fake_ledger:
     """Fake read-only evidence lookup over the fake tool server's rows (the
     window queries of `E2EvidenceLookup`, no Neon)."""
 
-    def __init__(self, server: _OfflineToolServer__offline_fake) -> None:
+    def __init__(self, server: _FakeToolServer__offline_fake) -> None:
         self.server = server
         self.calls: list[str] = []
         self.closed = False
@@ -628,24 +638,28 @@ class _OfflineEvidenceLookup__offline_fake:
 
 def _offline_run(
     *,
-    server: _OfflineToolServer__offline_fake | None = None,
+    server: _FakeToolServer__offline_fake | None = None,
     proxy_refuse: Callable[[dict], int | None] | None = None,
     policy_block: Callable[[dict], str | None] | None = None,
     expose_http_client: bool = True,
     ledger_dsn: str | None = FAKE_DSN,
     direct_handler: Callable[[httpx.Request], httpx.Response] | None = None,
     sdk_client_factory: Callable[[str], object] | None = None,
+    mint_block: str | None = None,
     **kwargs: object,
-) -> tuple[int, str, _OfflineToolServer__offline_fake, _OfflineSdkClient__offline_fake]:
+) -> tuple[int, str, _FakeToolServer__offline_fake, _FakeSdkClient__offline_fake_sdk]:
     """`probe.run_probe` over the real gateway with the offline fakes."""
-    server = server or _OfflineToolServer__offline_fake()
-    sdk = _OfflineSdkClient__offline_fake(
+    server = server or _FakeToolServer__offline_fake()
+    sdk = _FakeSdkClient__offline_fake_sdk(
         server,
         proxy_refuse=proxy_refuse,
         policy_block=policy_block,
         expose_http_client=expose_http_client,
+        mint_block=mint_block,
     )
-    kwargs.setdefault("lookup_factory", lambda dsn: _OfflineEvidenceLookup__offline_fake(server))
+    kwargs.setdefault(
+        "lookup_factory", lambda dsn: _FakeEvidenceLookup__offline_fake_ledger(server)
+    )
     direct = probe.DirectConfig(
         bearer=FAKE_BEARER, base_url=OFFLINE_BASE_URL, base_url_source="offline test"
     )
@@ -928,8 +942,8 @@ def test_main_shows_gateway_log_lines_on_stderr__offline_fake_sdk(
     real_run_probe = probe.run_probe
 
     async def offline_run_probe(settings: object, **kwargs: object) -> tuple[int, str]:
-        server = _OfflineToolServer__offline_fake()
-        sdk = _OfflineSdkClient__offline_fake(server)
+        server = _FakeToolServer__offline_fake()
+        sdk = _FakeSdkClient__offline_fake_sdk(server)
         with httpx.Client(
             base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(server.http)
         ) as client:
@@ -954,7 +968,7 @@ def test_main_shows_gateway_log_lines_on_stderr__offline_fake_sdk(
 # --- I3: zero-execution evidence from the ledger, attempts and egress sink ----------
 
 
-def test_zero_executions_are_confirmed_from_window_queries__offline_fake_ledger() -> None:
+def test_zero_executions_are_confirmed_from_window_queries__offline_fake_sdk_and_ledger() -> None:
     """I3: read-only window queries (ledger + attempts by time window and
     tool_name, egress_sink by window and by request_id/jti) attribute every
     row to an attempt; nothing unattributed executed."""
@@ -969,7 +983,7 @@ def test_zero_executions_are_confirmed_from_window_queries__offline_fake_ledger(
     assert "DB: no ledger, attempt, or egress_sink row for send_external_message" in block
 
 
-def test_rejected_attempts_are_attributed_without_jti__offline_fake_ledger() -> None:
+def test_rejected_attempts_are_attributed_without_jti__offline_fake_sdk_and_ledger() -> None:
     """Rejected `tool_call_attempts` rows carry NULL jti/request_id; they are
     attributed by (tool, outcome) in run order, never by jti."""
     _, record, server, _ = _offline_run()
@@ -992,7 +1006,7 @@ def test_rejected_attempts_are_attributed_without_jti__offline_fake_ledger() -> 
     )
 
 
-def test_strip_and_tamper_evidence_from_the_business_argument_hash__offline_fake_ledger() -> None:
+def test_strip_and_tamper_evidence_from_argument_hashes__offline_fake_sdk_and_ledger() -> None:
     """The ledger's `arguments_sha256` (never printed) is compared with the
     hash of the expected business arguments: the forged `_` keys were
     stripped, and the changed query is what executed."""
@@ -1007,21 +1021,19 @@ def test_strip_and_tamper_evidence_from_the_business_argument_hash__offline_fake
     assert not re.search(r"\b[0-9a-f]{64}\b", record)
 
 
-def test_unintended_execution_is_not_confirmed__offline_fake_ledger() -> None:
+def test_unintended_execution_is_not_confirmed__offline_fake_sdk_and_ledger() -> None:
     """A deployment without the strict schema executes the injected `tier`:
     the ledger shows it, zero executions is NOT confirmed, exit 3."""
-    code, record, _, _ = _offline_run(
-        server=_OfflineToolServer__offline_fake(strict_arguments=False)
-    )
+    code, record, _, _ = _offline_run(server=_FakeToolServer__offline_fake(strict_arguments=False))
     assert "Zero unintended executions: NOT CONFIRMED" in record
     assert "#14 inject-tier executed" in record
     assert code == 3
 
 
-def test_foreign_rows_in_the_window_block_confirmation__offline_fake_ledger() -> None:
+def test_foreign_rows_in_the_window_block_confirmation__offline_fake_sdk_and_ledger() -> None:
     from datetime import UTC, datetime
 
-    server = _OfflineToolServer__offline_fake()
+    server = _FakeToolServer__offline_fake()
     server.ledger_rows.append(
         {
             "id": 900,
@@ -1050,15 +1062,15 @@ def test_foreign_rows_in_the_window_block_confirmation__offline_fake_ledger() ->
     assert code == 3
 
 
-def test_db_lookup_error_reports_the_class_only__offline_fake_ledger() -> None:
+def test_db_lookup_error_reports_the_class_only__offline_fake_sdk_and_ledger() -> None:
     """The database passes the preflight, then fails for the evidence queries."""
-    server = _OfflineToolServer__offline_fake()
+    server = _FakeToolServer__offline_fake()
     opened: list[str] = []
 
     def flaky(dsn: str) -> object:
         opened.append(dsn)
         if len(opened) == 1:
-            return _OfflineEvidenceLookup__offline_fake(server)
+            return _FakeEvidenceLookup__offline_fake_ledger(server)
         raise ConnectionError(f"db down at {dsn}")
 
     code, record, _, _ = _offline_run(server=server, lookup_factory=flaky)
@@ -1075,7 +1087,7 @@ def test_without_a_dsn_zero_executions_is_never_confirmed__offline_fake_sdk() ->
     assert code == 3
 
 
-def test_db_lookup_mutes_driver_logs__offline_fake_ledger(
+def test_db_lookup_mutes_driver_logs__offline_fake_sdk_and_ledger(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Pool/driver warnings (they quote the Neon host and role) never print."""
@@ -1083,12 +1095,12 @@ def test_db_lookup_mutes_driver_logs__offline_fake_ledger(
 
     leak = "connection to server at fake-host.invalid failed for user fake_role"
 
-    class Noisy(_OfflineEvidenceLookup__offline_fake):
+    class Noisy(_FakeEvidenceLookup__offline_fake_ledger):
         def ledger_window(self, *args: object) -> list[dict]:
             logging.getLogger("psycopg.pool").warning("error connecting: %s", leak)
             return super().ledger_window(*args)  # type: ignore[arg-type]
 
-    server = _OfflineToolServer__offline_fake()
+    server = _FakeToolServer__offline_fake()
     with caplog.at_level(logging.DEBUG):
         _offline_run(server=server, lookup_factory=lambda dsn: Noisy(server))
     assert leak not in caplog.text
@@ -1124,7 +1136,7 @@ def test_exit_0_only_when_every_attempt_is_evidenced__offline_fake_sdk() -> None
 def test_an_attempt_without_evidence_exits_3__offline_fake_sdk() -> None:
     """A direct reply the probe cannot attribute to the tool server (e.g. an
     edge 502 page) leaves that attempt unevidenced: exit 3, never 0."""
-    server = _OfflineToolServer__offline_fake()
+    server = _FakeToolServer__offline_fake()
 
     def edge_502_for_no_ctx(request: httpx.Request) -> httpx.Response:
         if b'"direct-no-ctx"' in request.content:
@@ -1157,8 +1169,8 @@ def test_preflight_unusable_database_exits_2_before_any_live_call__offline_fake_
 
     with pytest.raises(probe.PrerequisiteError, match=r"DATABASE_URL_TOOLSERVER unusable"):
         _offline_run(lookup_factory=stale)
-    server = _OfflineToolServer__offline_fake()
-    sdk = _OfflineSdkClient__offline_fake(server)
+    server = _FakeToolServer__offline_fake()
+    sdk = _FakeSdkClient__offline_fake_sdk(server)
     _write_all_settings(monkeypatch, tmp_path)
     real_run_probe = probe.run_probe
 
@@ -1185,7 +1197,7 @@ def test_preflight_unusable_database_exits_2_before_any_live_call__offline_fake_
 
 
 def test_preflight_toolserver_not_ready_exits_2__offline_fake_sdk() -> None:
-    server = _OfflineToolServer__offline_fake()
+    server = _FakeToolServer__offline_fake()
 
     def cold(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -1223,3 +1235,58 @@ def test_main_returns_the_probe_exit_code(
     monkeypatch.setattr(probe, "run_probe", incomplete)
     assert probe.main([]) == 3
     assert capsys.readouterr().out.strip() == "record"
+
+
+# --- minor review items -------------------------------------------------------------
+
+
+def test_request_ids_and_plan_summaries_are_e2__offline_fake_sdk() -> None:
+    _, record, server, sdk = _offline_run()
+    assert sdk.goals and all(goal.startswith("E2: ") for goal in sdk.goals)
+    assert all(str(row["request_id"]).startswith("e2-") for row in server.ledger_rows)
+    assert "request_id=e1-" not in record
+
+
+def test_build_maya_request_takes_prefix_and_summary() -> None:
+    settings = _offline_settings()
+    ctx, plan = probe.build_maya_request(settings)
+    assert ctx.request_id.startswith(f"{probe.REQUEST_ID_PREFIX}-") and ctx.request_id[:3] == "e2-"
+    assert plan.summary == probe.PLAN_SUMMARY and plan.summary.startswith("E2: ")
+    assert dict(plan.steps[0].arguments) == probe.planned_arguments()
+    other, other_plan = probe.build_maya_request(settings, prefix="zz", summary="ZZ: s", query="q")
+    assert other.request_id.startswith("zz-") and other_plan.summary == "ZZ: s"
+    assert other_plan.steps[0].arguments["query"] == "q"
+    assert ctx.request_id != probe.build_maya_request(settings)[0].request_id
+    assert ctx.requester.masked_email == "m***@e***.com"
+    _assert_no_fake_values(ctx.model_dump_json(), plan.model_dump_json())
+
+
+def test_record_header_carries_the_run_metadata__offline_fake_sdk() -> None:
+    _, record, _, _ = _offline_run()
+    for field in (
+        "- Run at (UTC): ",
+        "- Operator: (fill in)",
+        "- Deployed tool-server SHA (Render → Events): (fill in",
+        "- SDK version: armoriq-sdk 0.6.10",
+        "- Agent / MCP names used by the probe: proxylead / memory-mcp",
+        "workspace-mcp is not needed",
+        f"- Tool-server base URL (no secrets): {OFFLINE_BASE_URL} (offline test)",
+        "- Requester: Maya (m***@e***.com), member m-maya",
+        "- D-05 (`_ctx` forwarded by the proxy): yes per the E1 live run (2026-10-17); "
+        "this run: yes",
+        "- Outcome: operator-assigned in docs/EXPERIMENTS.md",
+    ):
+        assert field in record, field
+    _assert_no_fake_values(record)
+
+
+def test_plan_failure_rows_use_step_outcome_with_a_masked_reason__offline_fake_sdk() -> None:
+    """A mint blocked by policy is rendered through `StepOutcome(decision=...)`
+    and `e1.describe_outcome`: source and masked reason, nothing executed."""
+    code, record, server, _ = _offline_run(mint_block=f"denied for {FAKE_EMAIL}")
+    block = _details(record, "planned-baseline")
+    assert "gateway: block (armoriq_policy_decision); reason: denied for m***@e***.com" in block
+    assert "not run: plan/mint block (armoriq_policy_decision)" in record
+    assert not server.ledger_rows
+    assert code == 3
+    _assert_no_fake_values(record)

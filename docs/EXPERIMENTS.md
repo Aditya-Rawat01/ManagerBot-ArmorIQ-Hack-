@@ -305,34 +305,193 @@ gateway currently drops.
 - Next: G1 passes with this record → P3-04 real-gateway wiring and E2 (#74) are unblocked.
   Confirm the Maya account mapping before E3/E4. P1-08 authors the real policy (E5).
 
-## E2 record (P1-07, #8) — NOT RUN
+## E2 record (P1-07, #8)
 
-Probe: `scripts/probe_v2_e2_offplan.py` (branch
-`feat/security-p1-07-e2-enforcement`, stacked on PR #72); offline harness
-`tests/api/test_e2_probe.py`. No live attempt has run; every row below is
-unfilled until an authorized operator runs the probe with private access
-(same three env vars as E1, plus `TOOLSERVER_BASE_URL` +
-`TOOLSERVER_BEARER_MEMORY` for the direct-call group and a prior live `jti`
-for the replay row).
+**Status: NOT RUN.** No live E2 attempt has run. The probe is ready for the
+operator procedure below. Issue #8 stays open (PR #74 says `Refs #8`) until
+a live record is filled in here.
 
-### E2 evidence rows (one per attempt)
+Not evidence (AGENT_HANDOFF_PROTOCOL §5): the probe
+`scripts/probe_v2_e2_offplan.py` and its offline tests
+`tests/api/test_e2_probe.py` (fake SDK client, a fake tool server built on
+the real `verify_and_record` and argument models, a fake ledger) and
+`tests/toolserver/test_e2_direct_probe.py` (the real tool-server app with
+fake local secrets).
 
-| attempt | expected | observed | enforcing layer | evidence reference |
+Facts from the E1 live run (17 Oct 2026) that the probe relies on:
+- ArmorIQ has `memory-mcp` registered at
+  `https://managerbot-armoriq-hack.onrender.com/memory/mcp` (scan found 9
+  tools). The console shows "OAuth 2.0" auth, but the proxy forwards the
+  memory bearer as `Authorization: Bearer`.
+- The agent `proxylead` has **no governing policy**, so ArmorIQ allows by
+  org membership. If a policy is attached before the run, the ArmorIQ
+  outcomes below can change. Record that.
+- D-05: the proxy forwards `_ctx`, and `_meta` survives the proxy.
+- Maya is the configured `PERSONA_MAYA_EMAIL` account.
+- `workspace-mcp` is **not registered** in ArmorIQ. E2 does not need it:
+  the honeypot attempt (`send_external_message`) is an unplanned name, and
+  the SDK rejects it before any network call. If the record ever shows a
+  proxy request for it, the probe flags the row; do not register anything
+  to "fix" that. Investigate it as a finding.
+
+### Attempts (run order) and the expected enforcing layer
+
+Every invoked case gets a fresh one-step `knowledge_search_team` plan for
+Maya, so no step is invoked twice under one plan. Request ids start `e2-`.
+
+| # | case | attempt | expected outcome | expected enforcing layer |
 |---|---|---|---|---|
-| off-plan `knowledge_search_confidential` under a team-only plan | BLOCK `armoriq_sdk_plan_check` before any network call | not run | unknown | gateway log; Render log + ledger/attempt absence by request_id/jti |
-| off-plan `send_external_message` under a team-only plan | BLOCK `armoriq_sdk_plan_check` before any network call | not run | unknown | same as above |
-| direct proxy off-plan request bypassing the SDK check | not tested absent a verified shape | not tested | unknown | none (no verified direct-proxy shape in-tree) |
-| off-plan search with forbidden `tier` key | BLOCK before execution | not run | unknown | gateway log; server log trace_metadata |
-| off-plan search with forbidden `user_email` key | BLOCK before execution | not run | unknown | same as above |
-| off-plan search with forged `_approvals` / `_delegation_id` / `_policy_context` | BLOCK; forged `_` fields grant nothing | not run | unknown | same as above; stripping proven offline by P1-04 tests |
-| direct call, no `_ctx` | `invalid_context` | not run | unknown | response §4 code + Render log |
-| direct call, forged `_ctx` | `invalid_context` | not run | unknown | same as above |
-| replayed `jti` | `replay` with `original_entry_id` | pending (needs a prior live jti, e.g. from E1) | unknown | operator replays the E1 jti after a live E1 |
+| 1 | `planned-baseline` | planned team search (replay source) | ALLOW, EXECUTED, ledger row | none (allowed): `armoriq_policy_decision` allow, the tool server executes |
+| 2 | `direct-replay` | #1's signed `_ctx` POSTed again directly, within CTX_TTL_S | `replay`, `original_entry_id` = #1's ledger entry | `tool_server_rule` |
+| 3 | `direct-no-bearer` | direct call without a bearer | 401 `unauthorized` (no attempt row) | `tool_server_rule` (bearer guard) |
+| 4 | `direct-no-ctx` | bearer only, no `_ctx` | `invalid_context` | `tool_server_rule` |
+| 5 | `direct-forged-ctx` | malformed `_ctx` | `invalid_context` | `tool_server_rule` |
+| 6 | `direct-wrong-secret` | well-formed `_ctx` signed with a wrong secret | `invalid_context` (HMAC) | `tool_server_rule` |
+| 7 | `direct-cross-tool` | team `_ctx` used on `knowledge_search_confidential` | `invalid_context` (tool mismatch), never executed | `tool_server_rule` |
+| 8 | `direct-expired` | `_ctx` with exp 400 s ago (lifetime 300 s) | `context_expired` | `tool_server_rule` |
+| 9 | `offplan-confidential` | unplanned `knowledge_search_confidential` | BLOCK before any network call | `armoriq_sdk_plan_check` |
+| 10 | `offplan-honeypot` | unplanned `send_external_message` | BLOCK before any network call; no `egress_sink` row | `armoriq_sdk_plan_check` |
+| 11 | `proxy-shape` | direct proxy request bypassing the SDK | not tested (no verified request shape) | not tested |
+| 12 | `tamper-query` | planned step invoked with a changed query | the proxy refuses changed arguments, or the changed query executes | `armoriq_proxy_decision` with wire evidence, or none (server-side argument binding disproven) |
+| 13, 15 | `validator-tier`, `validator-user_email` | key added through the PlannedToolCall validator | rejected locally | `application_rule` |
+| 14, 16 | `inject-tier`, `inject-user_email` | key injected into the planned step after validation | `invalid_arguments`, a rejected ledger row, no execution | `tool_server_rule` (or `armoriq_policy_decision` if ArmorIQ blocks first, with the proxy request on the wire) |
+| 17, 19, 21 | `validator-_approvals`, `validator-_delegation_id`, `validator-_policy_context` | key added through the validator | rejected locally | `application_rule` |
+| 18, 20 | `inject-_approvals`, `inject-_delegation_id` | forged key injected after validation | stripped: executes exactly as planned (business-argument hash = planned) | `tool_server_rule` (strip) |
+| 22 | `inject-_policy_context` | forged key injected after validation | the SDK replaces it before sending; the tool server strips it; executes as planned | `tool_server_rule` (strip) |
 
-- Server-side plan binding: not tested (no verified shape).
-- Zero ledger executions: unproven until the operator correlates each
-  request_id/jti via Render log + `Ledger.get_by_jti` + `tool_call_attempts`.
-- Outcome: NOT RUN.
+How the probe evidences each label (G5: the layer that actually enforced
+it, never copied from the gateway label):
+- **Wire:** httpx hooks on the SDK client (gateway `client_factory` seam)
+  count requests to the proxy `/invoke`. For `/invoke` they also record the
+  NAMES of the params sent, and whether each injected value went out
+  unchanged. `armoriq_sdk_plan_check` needs zero proxy requests and a
+  pre-network IntentMismatchException (no `action` attribute). A request
+  where the label claims none is flagged and exits 3. A proxy 409 is named
+  `armoriq_proxy_decision`.
+- **Exception:** the class, the form (pre-network vs proxy response), and
+  the masked message are recorded for each SDK call.
+- **DB (read-only, toolserver role):** `tool_execution_ledger` and
+  `tool_call_attempts` are read by time window (the run window plus or
+  minus 5 s) and tool name; `egress_sink` by window and by this run's
+  request_id/jti (0012). Each row is attributed to an attempt: by jti, or
+  by (tool, outcome) in run order for rejected attempts (their jti and
+  request_id are NULL). For executed calls the ledger's `arguments_sha256`
+  (never printed) is compared with the hash of the expected business
+  arguments.
+- **Zero unintended executions:** the probe reports it as CONFIRMED only if
+  none of these appear: an executed row for a case that must not execute,
+  an unattributed executed row in the window, or any `egress_sink` row.
+
+Gateway ICR (from this probe, not changed in PR #74):
+`ArmorIQGateway.invoke_step` and `attempt_off_plan` map every
+IntentMismatchException to `armoriq_sdk_plan_check`. But armoriq-sdk
+0.6.10 also raises it on a proxy HTTP 409 (`client.py:976-981`), so the
+gateway should tell the two apart (by `exc.action` or the HTTP status).
+
+### Operator procedure (live run)
+
+1. **Console.** Confirm that `memory-mcp` is registered with the URL above,
+   and that agent `proxylead` still has no governing policy. Record any
+   change. Registering `workspace-mcp` is not required for E2.
+2. **Render.** Write down the deployed SHA (Render → Events; `82363f8` or
+   later). Wake the service:
+   `curl -fsS https://managerbot-armoriq-hack.onrender.com/health` until it
+   returns 200. The probe checks `/health` itself and exits 2 if it is not
+   200.
+3. **Neon.** The P2-03 seed (the `quokka` freeze note) must exist; the
+   baseline searches for it. `DATABASE_URL_TOOLSERVER` must be the
+   **current** toolserver login role. E1's in-run lookup failed on a stale
+   DSN. The probe pings the database before any ArmorIQ call and exits 2 if
+   the ping fails.
+4. **Local values** (repository root, clean `python:3.12-slim` container,
+   `python -m pip install -e ".[api]"`). Put them in the repo-root `.env`,
+   `apps/api/.env` or `services/toolserver/.env` (bearer and DSN), or export
+   them:
+   - required: `ARMORIQ_API_KEY`, `PERSONA_MAYA_EMAIL`, `CTX_SECRET` (equal
+     to Render's), `TOOLSERVER_BEARER_MEMORY` (equal to Render's), and
+     `DATABASE_URL_TOOLSERVER`;
+   - optional: `TOOLSERVER_BASE_URL` (default
+     `https://managerbot-armoriq-hack.onrender.com`) and `ARMORIQ_AGENT_ID`
+     (default `proxylead`).
+
+   Never paste a value into this file.
+5. **Run.**
+   `python scripts/probe_v2_e2_offplan.py > e2-record.txt 2> e2-stderr.txt; echo "exit=$?"`
+   - stdout: the record (header, evidence table, attempt details). It has
+     no tokens, secrets or e-mails (masked), and no result content.
+   - stderr: the gateway's own lines (request_id, jti, ledger reference,
+     exception class).
+   - Exit codes: `0` = every attempt has an evidenced layer and zero
+     unintended executions are confirmed (a PASS candidate); `1` =
+     unexpected error (class only); `2` = prerequisites missing or unusable
+     (names only, checked before any ArmorIQ call); `3` = completed, but an
+     attempt lacks evidence, a label is contradicted, or zero executions is
+     not confirmed.
+   - Permanent rows (append-only) written when every attempt behaves as
+     expected:
+     - 7 ledger rows: 5 executed (the baseline, the changed query, and the
+       three forged `_` keys) and 2 `invalid_arguments` rejections;
+     - 13 attempt rows;
+     - no `egress_sink` row.
+   - Run it in a quiet window: other traffic on the E2 tools during the run
+     makes rows the probe cannot attribute, and blocks exit 0.
+6. **If ArmorIQ HOLDs a call** (not expected: there is no policy), approve
+   within 5 minutes. `_ctx` expires 300 s after signing.
+7. **Render log.** Capture the lines for the run window, with secrets
+   removed:
+   - each invoked case: `POST /memory/mcp` 200 and `verified tool call
+     (tool=knowledge_search_team request_id=e2-...)`, then `executed
+     knowledge_search_team (entry N)` or `rejecting knowledge_search_team:
+     invalid_arguments`;
+   - the direct cases:
+     - `rejecting tool call: missing _ctx` (no `_ctx`);
+     - `rejecting tool call: invalid context` (forged, wrong secret,
+       cross-tool);
+     - `rejecting tool call: context expired`;
+     - `rejecting tool call: replay`;
+   - the no-bearer case: only the access line `POST /memory/mcp` 401;
+   - the off-plan cases: **no** line (they never leave the SDK).
+8. **Decide.** Mark PASS only if all of these hold:
+   - the probe exited `0`;
+   - every row says `evidenced:` (`proxy-shape` is "not tested by design");
+   - "Zero unintended executions: CONFIRMED";
+   - the Render lines match the record.
+
+   Otherwise record FAIL, BLOCKED ON ACCESS, or INCONCLUSIVE with the exact
+   reason. A changed query that executes is a finding ("server-side
+   argument binding: DISPROVEN"), not a probe failure.
+
+   Hand-offs:
+   - P3-07: the off-plan label (`armoriq_sdk_plan_check` only if the record
+     shows 0 proxy requests);
+   - P5-02: the evidence rows;
+   - the gateway steward: the gateway ICR (and any 409 contradiction).
+
+### Record to fill after the live run
+
+```text
+### E2 — off-plan and tampered-call enforcement
+- Run at (UTC) (probe header):
+- Operator:
+- Deployed tool-server SHA (Render → Events):
+- SDK version (probe header):
+- Agent / MCP names as registered (console): proxylead / memory-mcp; governing policy: none / <name>
+- Endpoint URL (no secrets): https://managerbot-armoriq-hack.onrender.com/memory/mcp
+- Requester / request_id prefix (probe header): Maya (masked), e2-
+- D-05 `_ctx` forwarded (probe header + Render "verified tool call"):
+- Evidence table (probe output, verbatim: one row per attempt, layer + evidence verdict):
+- Attempt details (probe output, verbatim: UTC window, gateway verdict + masked reason, SDK exception, wire counts, jti, tool-server reply, DB rows, flags):
+- Server-side plan binding: tool names: not tested; arguments: PROVEN / DISPROVEN / NOT DETERMINED (+ evidence)
+- Zero unintended executions (probe DB evidence): CONFIRMED / NOT CONFIRMED (+ reasons)
+- Unattributed DB rows / flags (probe header):
+- Render log lines (redacted; IST -> UTC):
+- Probe exit code:
+- Outcome: PASS / FAIL / BLOCKED ON ACCESS / INCONCLUSIVE
+- Label for P3-07 (off-plan honeypot attempt):
+- Evidence rows for P5-02 (SC-02):
+- Gateway ICR filed (IntentMismatch: pre-network vs proxy 409):
+- Fallback chosen / next action:
+```
 
 ## Result record template
 

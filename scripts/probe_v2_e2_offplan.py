@@ -1,10 +1,21 @@
 """E2 probe: off-plan and tampered-call enforcement layers (P1-07, #8).
 
-Exercises the real `ArmorIQGateway.attempt_off_plan` path plus direct
-tool-server calls, and emits one evidence row per attempt (attempt /
-expected / observed / enforcing layer / evidence reference). Never claims
-server-side plan binding without evidence; the proxy-shape attempt stays
-`not tested` (no verified direct-proxy request shape exists in-tree).
+Drives the real `ArmorIQGateway` (never the raw SDK, ADR-018) and direct
+tool-server calls, and prints one evidence row per attempt (attempt /
+expected / observed / enforcing layer / evidence) plus per-attempt details,
+in the `docs/EXPERIMENTS.md` E2 format. The verdict is the operator's.
+Attempts (22, see docs/EXPERIMENTS.md "E2 record"): a planned baseline
+whose signed `_ctx` is replayed; direct calls (no bearer, no / forged /
+wrong-secret / cross-tool / expired `_ctx`, replay); unplanned tool names
+under a team-only plan (SDK plan check); tampering with the PLANNED step
+(changed query; `tier`, `user_email`, `_approvals`, `_delegation_id`,
+`_policy_context` first through the validator, then injected after it).
+Every label is checked independently: wire counts and SDK exception form
+(through the gateway's `client_factory` seam), the signed jti (its
+`ctx_signer` seam), and read-only ledger / attempt / egress_sink rows.
+Never claims server-side plan binding without evidence; the proxy-shape
+attempt stays `not tested` (no verified direct-proxy request shape).
+Nothing runs on import or in CI; offline tests use fakes only.
 
 Usage (operator only, repository root):
     python scripts/probe_v2_e2_offplan.py
@@ -587,8 +598,94 @@ _TAMPER_EXPECTED = {
 }
 
 
+REQUEST_ID_PREFIX = "e2"
+PLAN_SUMMARY = "E2: one planned team-tier search (off-plan and tamper probe)"
+
+
 def planned_arguments(query: str = E2_QUERY) -> dict[str, Any]:
     return {"query": query, "limit": E2_LIMIT}
+
+
+def build_maya_request(
+    settings: Any,
+    *,
+    prefix: str = REQUEST_ID_PREFIX,
+    summary: str = PLAN_SUMMARY,
+    query: str = E2_QUERY,
+) -> tuple[Any, Any]:
+    """One-step Maya plan for `knowledge_search_team` (real identity path, as
+    E1's builder), with the request-id prefix and plan summary as parameters.
+    The request id is unique per call (the evidence is correlated by it)."""
+    from apps.api import identity
+    from services.contracts import (
+        DEFAULT_WORKSPACE_ID,
+        AuthenticatedUser,
+        EntryPoint,
+        McpEndpoint,
+        PersonaKey,
+        PlannedToolCall,
+        PlanProposal,
+        RequestContext,
+        ToolName,
+    )
+
+    record = identity.build_member_table(settings).get(PersonaKey.MAYA)
+    if record is None:
+        raise ValueError("Maya has no mapped ArmorIQ email")
+    requester = AuthenticatedUser(
+        member_id=record.member_id,
+        persona=record.persona,
+        display_name=record.display_name,
+        app_role=record.app_role,
+        masked_email=identity.mask_email(record.email),
+        slack_user_id=record.slack_user_id,
+    )
+    now = datetime.now(UTC)
+    request_id = f"{prefix}-{now.strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+    ctx = RequestContext(
+        request_id=request_id,
+        trace_id=f"{request_id}-trace",
+        workspace_id=DEFAULT_WORKSPACE_ID,
+        requester=requester,
+        entry_point=EntryPoint.WEB,
+        received_at=now,
+    )
+    plan = PlanProposal(
+        summary=summary,
+        steps=[
+            PlannedToolCall(
+                step_index=0,
+                mcp=McpEndpoint.MEMORY,
+                tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
+                arguments=planned_arguments(query),
+                purpose="E2 probe: one planned team-tier search",
+            )
+        ],
+    )
+    return ctx, plan
+
+
+def plan_failure_row(
+    handle: Any, ctx: Any, *, group: str, case: str, attempt: str, expected: str
+) -> dict[str, Any]:
+    """A case whose plan/mint failed: rendered through the gateway's own
+    `StepOutcome(decision=...)` and `e1.describe_outcome` (masked reason)."""
+    from services.authorization.armoriq_gateway import StepOutcome
+
+    described = e1.describe_outcome(StepOutcome(decision=handle.decision))
+    return row(
+        group=group,
+        attempt=attempt,
+        expected=expected,
+        observed=(
+            f"not run: plan/mint {described['decision_outcome']} ({described['decision_source']})"
+        ),
+        layer="unknown",
+        evidence="gateway log",
+        case=case,
+        request_id=ctx.request_id,
+        **gateway_facts(handle.decision),
+    )
 
 
 def tampered_plan(plan: Any, arguments: Mapping[str, Any]) -> Any:
@@ -619,26 +716,14 @@ async def start_case_plan(
     """A FRESH one-step team plan for one case (no step is ever invoked twice
     under one plan, so step reuse cannot confound a result). Returns (ctx,
     plan, handle, failure_row)."""
-    ctx, plan = e1.build_maya_request(settings)
+    ctx, plan = build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
     if handle.decision is None:
         return ctx, plan, handle, None
-    decision = handle.decision
-    return (
-        ctx,
-        plan,
-        handle,
-        row(
-            group="setup",
-            attempt=attempt,
-            expected=expected,
-            observed=f"not run: plan/mint {decision.outcome.value} ({decision.source.value})",
-            layer="unknown",
-            evidence="gateway log",
-            case=case,
-            request_id=ctx.request_id,
-        ),
+    failed = plan_failure_row(
+        handle, ctx, group="setup", case=case, attempt=attempt, expected=expected
     )
+    return ctx, plan, handle, failed
 
 
 def gateway_facts(decision: Any) -> dict[str, Any]:
@@ -1668,22 +1753,24 @@ async def run_baseline(
     gateway: Any, settings: Any, capture: CtxCapture, observer: Observer | None = None
 ) -> tuple[dict[str, Any], ReplaySource | None]:
     """The planned call (ALLOW expected): its signed `_ctx` is the replay source."""
-    ctx, plan = e1.build_maya_request(settings)
+    ctx, plan = build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
     attempt = "planned knowledge_search_team for Maya (replay source)"
     expected = "ALLOW; EXECUTED with a ledger row (E1 path)"
+    requester = {
+        "requester_masked": ctx.requester.masked_email,
+        "requester_member_id": ctx.requester.member_id,
+    }
     if handle.decision is not None:
-        decision = handle.decision
-        return row(
+        failed = plan_failure_row(
+            handle,
+            ctx,
             group="baseline",
+            case="planned-baseline",
             attempt=attempt,
             expected=expected,
-            observed=f"not run: plan/mint {decision.outcome.value} ({decision.source.value})",
-            layer="unknown",
-            evidence="gateway log",
-            case="planned-baseline",
-            request_id=ctx.request_id,
-        ), None
+        )
+        return {**failed, **requester}, None
     with (observer or Observer(capture=capture)).window() as window:
         outcome = await gateway.invoke_step(handle, 0, ctx, plan)
     described = e1.describe_outcome(outcome)
@@ -1715,6 +1802,7 @@ async def run_baseline(
         described=described,
         window=window,
         **gateway_facts(outcome.decision),
+        **requester,
     )
     return item, source
 
@@ -1819,10 +1907,27 @@ async def run_probe(
     # E1 rule: 0 only when every attempt has an evidenced layer and zero
     # unintended executions are confirmed; everything else that completed is 3.
     code = EXIT_COMPLETE if not (flagged or unintended or unevidenced) else EXIT_NOT_COMPLETE
+    baseline_described = baseline.get("described")
+    d05_answer, d05_reason = (
+        e1.d05_finding(baseline_described)
+        if baseline_described
+        else ("n.a.", "the planned call did not run")
+    )
     report = [
-        "### E2 — off-plan and tampered-call enforcement",
-        f"- Run window (UTC): {run_started} → {run_ended}",
-        "- Requester: Maya (team-only one-step plans; a fresh plan per invoked case)",
+        "### E2 — off-plan and tampered-call enforcement (probe record)",
+        f"- Run at (UTC): {run_started} → {run_ended}",
+        "- Operator: (fill in)",
+        "- Deployed tool-server SHA (Render → Events): (fill in; must be 82363f8 or later)",
+        f"- SDK version: armoriq-sdk {armoriq_gateway.SDK_VERSION}",
+        f"- Agent / MCP names used by the probe: {settings.armoriq_agent_id} / memory-mcp "
+        "(tool knowledge_search_team); workspace-mcp is not needed: the honeypot attempt is "
+        "stopped by the SDK before any network call (confirm registrations in the console)",
+        f"- Tool-server base URL (no secrets): {direct.base_url} ({direct.base_url_source})",
+        f"- Requester: Maya ({baseline.get('requester_masked')}), member "
+        f"{baseline.get('requester_member_id')}; request_id prefix {REQUEST_ID_PREFIX}- "
+        "(one-step team plans; a fresh plan per invoked case)",
+        "- D-05 (`_ctx` forwarded by the proxy): yes per the E1 live run (2026-10-17); "
+        f"this run: {d05_answer} ({d05_reason})",
         "- Server-side plan binding: tool names: not tested (no verified direct-proxy "
         "shape; the SDK stops unplanned names client-side); " + argument_binding_verdict(rows),
         f"- DB evidence (read-only, toolserver role): {db['status']}; window "
@@ -1839,6 +1944,8 @@ async def run_probe(
         "- Attempts without an evidenced layer: " + (", ".join(unevidenced) or "none"),
         f"- Probe exit code: {code} (0 = every attempt has an evidenced layer and zero "
         "unintended executions are confirmed; 3 = completed otherwise)",
+        "- Outcome: operator-assigned in docs/EXPERIMENTS.md (PASS needs exit 0 and the "
+        "matching Render log lines; #8 stays open until a live record exists)",
         "",
         render_table(rows),
         "",
