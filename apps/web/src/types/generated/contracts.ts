@@ -91,6 +91,8 @@ export type AuditEventType =
   | "authorization_decided"
   | "hold_created"
   | "approval_resolved"
+  | "escalation_created"
+  | "confirmation_resolved"
   | "tool_executed"
   | "tool_rejected"
   | "answer_generated"

@@ -182,6 +182,12 @@ class AuditEventType(StrEnum):
     AUTHORIZATION_DECIDED = "authorization_decided"
     HOLD_CREATED = "hold_created"
     APPROVAL_RESOLVED = "approval_resolved"
+    # User-confirmation lifecycle (P3-04 ICR, issue #25; SHARED_INTERFACES §10):
+    # metadata-only events for minting an escalation's confirmation and for
+    # resolving a presented confirmation. Payloads never carry the raw token
+    # (services.audit.store validates the allowlist).
+    ESCALATION_CREATED = "escalation_created"
+    CONFIRMATION_RESOLVED = "confirmation_resolved"
     TOOL_EXECUTED = "tool_executed"
     TOOL_REJECTED = "tool_rejected"
     ANSWER_GENERATED = "answer_generated"
