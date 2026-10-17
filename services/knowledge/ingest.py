@@ -25,6 +25,10 @@ Idempotent upserts on stable keys — re-running changes nothing:
   place only when a column differs (counted in the `projects` stat).
 * workspace / members: from env (D-20/ADR-021). No raw emails are stored —
   only masked display values plus the env-key reference.
+* runtime note sources (`note-<team_notes.id>`, written by the tool server
+  when Maya confirms a note, D-09 rule 2): never deleted, rewritten or
+  re-chunked. Only the source_ids listed in `seed/sources/` are touched, and
+  the `note-` prefix is reserved (a seed source using it is a CorpusError).
 """
 
 from __future__ import annotations
@@ -162,8 +166,37 @@ def _mask_email(address: str) -> str:
         return "***"
 
 
+#: `source_id` prefix reserved for team notes Maya confirmed at runtime
+#: (`knowledge_confirm_maya_decision`, P2-09, D-09 rule 2): `note-<team_notes.id>`.
+#: The seed corpus may not use it (`validate_source_record`), and the ingest
+#: only ever reads, updates or re-chunks the source_ids its own files list —
+#: it never deletes or rewrites any other source — so a re-seed leaves every
+#: runtime note source and its chunks exactly as the tool server wrote them.
+RUNTIME_NOTE_SOURCE_PREFIX = "note-"
+
+
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def source_chunks(title: str, content: str) -> list[str]:
+    """The chunk texts of one source: the title-prefixed text
+    (`"{title}\\n\\n{content}"`) in `CHUNK_WORDS` windows sharing
+    `CHUNK_OVERLAP_WORDS`. A repeated window (only possible for repetitive
+    text) is kept once: its chunk hash would collide anyway. Shared by the
+    seed ingest and the tool server's confirmed-note ingestion, so both
+    write byte-identical chunk layouts."""
+    return list(dict.fromkeys(chunk_text(f"{title}\n\n{content}")))
+
+
+def chunk_hash(source_id: str, text: str) -> str:
+    """`knowledge_chunks.content_hash` (unique per workspace)."""
+    return content_hash(f"{source_id}:{text}")
+
+
+def vector_literal(vector: Any) -> str:
+    """pgvector text form `[x,y,...]`, bound as a value and cast in SQL."""
+    return "[" + ",".join(repr(float(v)) for v in vector) + "]"
 
 
 def _canonical_json(value: Any) -> str:
@@ -228,6 +261,10 @@ def validate_source_record(data: Mapping[str, Any]) -> list[str]:
     for name in ("source_id", "title", "content", "source_type", "reference"):
         if name in data and not isinstance(data[name], str):
             problems.append(f"{name}(text)")
+    if isinstance(data.get("source_id"), str) and data["source_id"].startswith(
+        RUNTIME_NOTE_SOURCE_PREFIX
+    ):
+        problems.append(f"source_id(reserved prefix {RUNTIME_NOTE_SOURCE_PREFIX!r})")
     if "superseded_by" not in data:
         problems.append("superseded_by")
     else:
@@ -546,8 +583,8 @@ def _upsert_source(cur: Any, data: Mapping[str, Any], version: str, stats: dict[
         source_pk = int(row[0])
     stats["sources"] += 1
 
-    chunks = chunk_text(f"{data['title']}\n\n{content}")
-    expected = sorted(content_hash(f"{source_id}:{text}") for text in chunks)
+    chunks = source_chunks(data["title"], content)
+    expected = sorted(chunk_hash(source_id, text) for text in chunks)
     cur.execute(
         "SELECT content_hash FROM public.knowledge_chunks WHERE source_id = %s", (source_pk,)
     )
@@ -574,8 +611,8 @@ def _upsert_source(cur: Any, data: Mapping[str, Any], version: str, stats: dict[
                 DEFAULT_WORKSPACE_ID,
                 data["tier"],
                 text,
-                "[" + ",".join(repr(float(v)) for v in vector) + "]",
-                content_hash(f"{source_id}:{text}"),
+                vector_literal(vector),
+                chunk_hash(source_id, text),
             ),
         )
         stats["chunks"] += 1

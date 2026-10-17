@@ -11,7 +11,10 @@ through the migration-role ingest into a database.
   rejected; every key below is required except `source_type`, `reference`,
   and `provenance`):
   - `source_id` — stable, used by E1/E17 handoffs; upsert key with the
-    workspace.
+    workspace. The `note-` prefix is reserved for team notes Maya confirmed
+    at runtime (P2-09: source `note-<team_notes.id>`); a seed source using
+    it is rejected, and the ingest never reads, rewrites or deletes those
+    runtime sources.
   - `title`, `content` (plain text), `source_type`, `reference`.
   - `author` — persona label (`maya`/`sam`/`priya`).
   - `tier` — `DataTier` (`team`/`confidential`/`restricted`).

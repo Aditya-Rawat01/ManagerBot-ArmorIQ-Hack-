@@ -109,6 +109,15 @@ begin, cannot be accepted), or `defer` (can be decided later).
 2. P2-09 does not chunk/embed drafts; drafts are visible only in Maya's
    metadata-only `draft_review_queue` until she confirms (then authoritative
    and ingested).
+   **Clarified 17 Oct 2026 by `VTCodeCraft` (co-decider; [issue #24](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/24)):**
+   a confirmed note is authoritative AND searchable evidence. In the confirm
+   transaction the tool server ingests it as the team-tier source
+   `note-<team_notes.id>` (`source_records` provenance `review_status=
+   authoritative`, `version`, `superseded_by=null`, `origin=team_note`) with
+   chunks and embeddings in the P2-03 layout, using the model loaded at
+   startup (no model → `internal`, nothing written). On supersede that
+   source becomes `status='superseded'` (with `superseded_by`) and drops out
+   of search and `get_source`. Implemented in the PR #79 review fixes.
 3. Superseded records are excluded from search; explicit source-read tools
    (P2-08) reach them flagged, never presented as current. The responder
    already never cites drafts (P3-03).
@@ -134,8 +143,10 @@ begin, cannot be accepted), or `defer` (can be decided later).
    saved from a DM that discuss confidential topics (the requester's own
    words, attributed to them, never authoritative until Maya confirms).
 2. Drafts are **never chunked or embedded**, so they are never searchable
-   evidence (D-09 rule 2). The P2-09 ingestion step is deliberately deferred:
-   no `knowledge_chunks` row is written for a draft.
+   evidence (D-09 rule 2). The P2-09 ingestion step is deferred to Maya's
+   confirmation: no `knowledge_chunks` row is written for a draft; a
+   confirmed note is ingested as source `note-<id>` (D-09 rule 2
+   clarification, 17 Oct 2026).
 3. Drafts are visible only in Maya's metadata-only review queue
    (`draft_review_queue`, ADR-023) until she confirms them.
 4. The backend **refuses** a `store this` (`knowledge_save_team_note`)

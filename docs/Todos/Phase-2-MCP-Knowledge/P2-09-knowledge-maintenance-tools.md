@@ -7,7 +7,7 @@
 | Size | M (2–4 h) |
 | Target window | 15 Oct |
 | Gate role | Required for G2 (registry complete) |
-| Status | Implemented (P2-09, PR #79); D-10 and D-09 resolved |
+| Status | Implemented (P2-09, PR #79, plus review fixes); D-09 rule 2 clarified 17 Oct 2026 (VTCodeCraft, #24); D-10 pending samarth-chawla's visible confirmation on #24 |
 
 ## 1. Task ID and title
 
@@ -116,3 +116,23 @@ bash scripts/check.sh
 ## 17. Definition of done
 
 Merged, deployed, tests green; handoff posted to P3-05, P4-04, and P1-08.
+
+## 18. Implementation notes (PR #79 review fixes, 17 Oct 2026)
+
+- **Step 9.1 ingestion: on confirmation, never for a draft.** A saved note
+  stays a draft that is never chunked or searchable. When Maya confirms it,
+  `knowledge_confirm_maya_decision` ingests it in the same transaction as
+  the flip to `authoritative`: team-tier source `note-<id>` plus chunks in
+  the P2-03 seed layout, embedded with the model loaded at startup BEFORE
+  the write transaction opens (no model → `internal`, nothing written). The
+  note is then found by `knowledge_search_team` / `knowledge_get_source_team`
+  like any authoritative seed source (D-09 rule 2, clarified by VTCodeCraft
+  on #24). Layout: SHARED_INTERFACES §7 "Confirmed team notes".
+- **Supersession** links only to the current authoritative record (a draft
+  or an already superseded record cannot replace anything, so cycles are
+  impossible) and marks the old note's source `superseded`, which takes it
+  out of search; both notes and both sources are kept.
+- **Only a current draft can be confirmed** (a superseded draft cannot), and
+  `draft_review_queue` lists only current drafts (0013).
+- **Record ids** are canonical decimal primary keys
+  (`^[1-9][0-9]{0,18}$`); any other spelling is `invalid_arguments`.

@@ -9,7 +9,6 @@ model. P2-10 reuses this pattern for `workspace-mcp` (it owns
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
@@ -41,8 +40,8 @@ from services.contracts import (
     SourceRow,
     ToolName,
 )
-from services.contracts.tool_args import MAX_EXCERPT_CHARS
-from services.knowledge import retrieval
+from services.contracts.tool_args import MAX_EXCERPT_CHARS, MAX_TITLE_CHARS
+from services.knowledge import embeddings, ingest, retrieval
 from services.toolserver import db
 from services.toolserver.schemas import (
     InvalidArguments,
@@ -392,12 +391,21 @@ async def handle_read_source_restricted(verified: VerifiedCall, args: Any, runti
 # ---------------------------------------------------------------------------
 # P2-09 — knowledge maintenance: draft notes, Maya's confirmation, supersession
 #
-# D-10 (resolved 16 Oct 2026): a saved note is ALWAYS team-tier and ALWAYS a
-# draft; it is never chunked or embedded (D-09 rule 2 — drafts are never
-# searchable evidence, so step 9.1's ingestion is deliberately DEFERRED: no
-# `knowledge_chunks` row is ever written for a draft). Drafts are visible only
-# in Maya's metadata-only review queue (`draft_review_queue`, ADR-023) until
-# she confirms them.
+# D-10 (pending samarth-chawla's visible confirmation on #24): a saved note is
+# ALWAYS team-tier and ALWAYS a draft; a draft is never chunked or embedded,
+# so it is never searchable evidence (D-09 rules 1-3). Drafts are visible
+# only in Maya's metadata-only review queue (`draft_review_queue`, ADR-023,
+# current drafts only since 0013) until she confirms them.
+#
+# D-09 rule 2 (clarified by VTCodeCraft on #24, 17 Oct 2026): Maya's
+# confirmation makes the note authoritative AND searchable evidence. In the
+# same transaction as the flip to `authoritative`, the note is ingested as
+# the team-tier source `note-<id>` (`source_records` + `knowledge_chunks`)
+# with exactly the P2-03 seed layout (title-prefixed 120/20-word windows,
+# `ingest.chunk_hash`, the startup-loaded bge-small model), so retrieval
+# treats it like any authoritative seed source. Superseding a note marks its
+# source `status='superseded'` (with `provenance.superseded_by`) in the same
+# transaction, which drops it out of search and `get_source` (D-09 rule 3).
 #
 # Author, workspace and provenance come from the verified `_ctx`
 # (SHARED_INTERFACES §5), never from arguments; no tool here touches policy,
@@ -469,8 +477,9 @@ def _insert_note(
 ) -> tuple[int, int]:
     """One draft row: `review_status='draft'`, `version=1`, `tier='team'`
     (D-10, CHECK-enforced by migration 0013). No chunk/embedding — drafts
-    are never searchable (D-09 rule 2)."""
-    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    are never searchable (D-09 rules 1-2); ingestion happens only when Maya
+    confirms the note (`_confirm_note`)."""
+    digest = ingest.content_hash(content)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO public.team_notes
@@ -531,6 +540,156 @@ async def handle_knowledge_save_team_note(
     )
 
 
+def note_source_id(pk: int) -> str:
+    """`source_records.source_id` of a confirmed note: `note-<team_notes.id>`
+    (prefix reserved by the seed ingest, which never touches these rows)."""
+    return f"{ingest.RUNTIME_NOTE_SOURCE_PREFIX}{pk}"
+
+
+def note_source_title(title: str | None, content_kind: str, pk: int) -> str:
+    """Citation title of a confirmed note: the note's own title with control
+    and format characters (newlines, bidi overrides, zero-width marks) turned
+    into spaces, whitespace runs collapsed, capped at MAX_TITLE_CHARS. A
+    note without a usable title gets a fixed label, never text derived from
+    its content."""
+    printable = "".join(ch if ch.isprintable() else " " for ch in title or "")
+    cleaned = " ".join(printable.split())[:MAX_TITLE_CHARS].strip()
+    if cleaned:
+        return cleaned
+    return f"Team {'summary' if content_kind == 'summary' else 'note'} {pk}"
+
+
+@dataclass(frozen=True)
+class _Note:
+    """The `team_notes` columns confirmation reads (`_NOTE_COLUMNS` order)."""
+
+    title: str | None
+    content: str
+    content_kind: str
+    author_member_id: str | None
+    version: int
+    review_status: str
+    superseded_by_id: int | None
+
+
+def _note_from_row(row: Any) -> _Note | None:
+    if row is None:
+        return None
+    title, content, content_kind, author, version, review_status, superseded_by = row
+    return _Note(
+        title=title,
+        content=content,
+        content_kind=content_kind,
+        author_member_id=author,
+        version=int(version),
+        review_status=review_status,
+        superseded_by_id=superseded_by,
+    )
+
+
+def _require_confirmable(note: _Note | None, pk: int, version: int) -> _Note:
+    """A CURRENT, attributed draft at exactly `version` (review I1: a
+    superseded draft stays superseded), else the uniform
+    `precondition_failed`."""
+    if note is None:
+        raise PreconditionFailed(f"no record {pk}")
+    if note.version != version:
+        raise PreconditionFailed(f"record {pk} is version {note.version}, not {version}")
+    if note.review_status != "draft":
+        raise PreconditionFailed(f"record {pk} is already {note.review_status}")
+    if note.superseded_by_id is not None:
+        raise PreconditionFailed(f"record {pk} is superseded")
+    if not note.author_member_id:
+        # PRD §8.1: evidence carries its author; an unattributed (legacy
+        # seed) note cannot become a source.
+        raise PreconditionFailed(f"record {pk} has no author")
+    return note
+
+
+@dataclass(frozen=True)
+class _NoteSource:
+    """A confirmable note, chunked and embedded (outside any transaction)."""
+
+    source_id: str
+    title: str
+    content_hash: str
+    # (chunk_text, knowledge_chunks.content_hash, pgvector literal)
+    chunks: tuple[tuple[str, str, str], ...]
+    embed_tool: str
+
+
+def _embed_note_source(pk: int, note: _Note) -> _NoteSource:
+    """Chunk and embed a note exactly like a P2-03 seed source.
+
+    Request-path rule (P2-05): `embeddings.embed_loaded` uses the model the
+    tool server warmed at startup and NEVER loads or downloads one; when it
+    is not ready it raises `EmbeddingUnavailable`, the dispatcher answers
+    `internal`, and nothing has been written (fail closed). Runs before the
+    write transaction opens, so a slow embed never holds a pooled
+    connection or the row lock.
+    """
+    source_id = note_source_id(pk)
+    title = note_source_title(note.title, note.content_kind, pk)
+    texts = ingest.source_chunks(title, note.content)
+    vectors = embeddings.embed_loaded(texts)
+    if len(vectors) != len(texts):  # pragma: no cover - embed contract
+        raise ValueError("one vector per chunk expected")
+    return _NoteSource(
+        source_id=source_id,
+        title=title,
+        content_hash=ingest.content_hash(note.content),
+        chunks=tuple(
+            (text, ingest.chunk_hash(source_id, text), ingest.vector_literal(vector))
+            for text, vector in zip(texts, vectors, strict=True)
+        ),
+        embed_tool=embeddings.model_version(),
+    )
+
+
+def _insert_note_source(
+    cur: Any,
+    *,
+    workspace_id: str,
+    note: _Note,
+    source: _NoteSource,
+    provenance: dict[str, Any],
+    created_at: datetime,
+) -> None:
+    """The confirmed note as a team-tier, active, authoritative source plus
+    its chunks (chunk tier = source tier). `(workspace_id, source_id)` is
+    unique: if `note-<id>` somehow exists already, nothing is inserted and
+    the whole confirmation rolls back (`precondition_failed`) — never a
+    duplicate or a half-written source."""
+    cur.execute(
+        """INSERT INTO public.source_records
+           (source_id, workspace_id, source_type, title, author, reference,
+            tier, status, content_hash, provenance, created_at, updated_at)
+           VALUES (%s, %s, 'team_note', %s, %s, '', 'team', 'active', %s, %s::jsonb, %s, %s)
+           ON CONFLICT (workspace_id, source_id) DO NOTHING
+           RETURNING id""",
+        (
+            source.source_id,
+            workspace_id,
+            source.title,
+            note.author_member_id,
+            source.content_hash,
+            json.dumps(provenance, sort_keys=True),
+            created_at,
+            created_at,
+        ),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise PreconditionFailed(f"source {source.source_id} already exists")
+    for text, digest, vector in source.chunks:
+        cur.execute(
+            """INSERT INTO public.knowledge_chunks
+               (source_id, workspace_id, tier, chunk_text, embedding, content_hash)
+               VALUES (%s, %s, 'team', %s, %s::vector, %s)""",
+            (int(row[0]), workspace_id, text, vector, digest),
+        )
+
+
 def _confirm_note(
     pool: Any,
     *,
@@ -538,28 +697,43 @@ def _confirm_note(
     record_id: str,
     version: int,
     approved_by: str,
+    request_id: str,
+    jti: str,
 ) -> tuple[int, int]:
-    """Confirm exactly `record_id` + `version`: lock the row, check the
-    binding, then mark that version authoritative with Maya's provenance.
-    Only a CURRENT draft can be confirmed: a superseded draft stays
-    superseded (review I1)."""
+    """Confirm exactly `record_id` + `version` and ingest it as evidence.
+
+    1. Short read (no lock) of the note, with the uniform precondition
+       check, so a refused call never embeds anything.
+    2. Chunk + embed OUTSIDE any transaction (`_embed_note_source`).
+    3. ONE write transaction: re-lock the row (`FOR UPDATE`), re-check every
+       precondition and that the note is unchanged since step 1 (notes are
+       immutable at runtime; this guards against a concurrent re-seed), flip
+       it to `authoritative` with Maya's `approved_by` / `approved_at`, and
+       insert its source + chunks. Any failure rolls all of it back.
+    """
     pk = _note_pk(record_id)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT version, review_status, superseded_by_id FROM public.team_notes
+            """SELECT title, content, content_kind, author_member_id, version,
+                      review_status, superseded_by_id
+               FROM public.team_notes
+               WHERE id = %s AND workspace_id = %s""",
+            (pk, workspace_id),
+        )
+        note = _require_confirmable(_note_from_row(cur.fetchone()), pk, version)
+    source = _embed_note_source(pk, note)
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT title, content, content_kind, author_member_id, version,
+                      review_status, superseded_by_id
+               FROM public.team_notes
                WHERE id = %s AND workspace_id = %s
                FOR UPDATE""",
             (pk, workspace_id),
         )
-        row = cur.fetchone()
-        if row is None:
-            raise PreconditionFailed(f"no record {pk}")
-        if int(row[0]) != version:
-            raise PreconditionFailed(f"record {pk} is version {row[0]}, not {version}")
-        if row[1] != "draft":
-            raise PreconditionFailed(f"record {pk} is already {row[1]}")
-        if row[2] is not None:
-            raise PreconditionFailed(f"record {pk} is superseded")
+        locked = _require_confirmable(_note_from_row(cur.fetchone()), pk, version)
+        if locked != note:
+            raise PreconditionFailed(f"record {pk} changed while being confirmed")
         cur.execute(
             """UPDATE public.team_notes
                SET review_status = 'authoritative',
@@ -567,13 +741,38 @@ def _confirm_note(
                    approved_at = now(),
                    updated_at = now()
                WHERE id = %s AND workspace_id = %s
-               RETURNING version""",
+               RETURNING version, approved_at""",
             (approved_by, pk, workspace_id),
         )
         updated = cur.fetchone()
-    if updated is None:  # unreachable: row locked above
-        raise PreconditionFailed(f"no record {pk}")
-    return pk, int(updated[0])
+        if updated is None:  # unreachable: row locked above
+            raise PreconditionFailed(f"no record {pk}")
+        confirmed_version, approved_at = int(updated[0]), updated[1]
+        _insert_note_source(
+            cur,
+            workspace_id=workspace_id,
+            note=locked,
+            source=source,
+            provenance={
+                "origin": "team_note",
+                "note_id": str(pk),
+                "content_kind": locked.content_kind,
+                "version": confirmed_version,
+                "review_status": ReviewStatus.AUTHORITATIVE.value,
+                "superseded_by": None,
+                "approved_by_member_id": approved_by,
+                "approved_at": approved_at.isoformat(),
+                "request_id": request_id,
+                "jti": jti,
+                "embed_model": embeddings.MODEL_ID,
+                "embed_tool": source.embed_tool,
+                "embed_dim": embeddings.EMBED_DIMS,
+                "chunk_words": ingest.CHUNK_WORDS,
+                "chunk_overlap": ingest.CHUNK_OVERLAP_WORDS,
+            },
+            created_at=approved_at,
+        )
+    return pk, confirmed_version
 
 
 def check_confirm_arguments(args: Any) -> None:
@@ -591,7 +790,11 @@ async def handle_knowledge_confirm_maya_decision(
     `record_id` + `version` (`precondition_failed` otherwise). `approved_by`
     is Maya's member ID from `_ctx`; an "approved" text is never accepted
     as input (the P2-02 model has only record_id + version). Repeating with
-    the same `jti` is deduplicated by the replay guard.
+    the same `jti` is deduplicated by the replay guard; a new `jti` finds the
+    note authoritative (`precondition_failed`), so the source `note-<id>` is
+    written exactly once. On success the note is searchable team-tier
+    evidence (D-09 rule 2); without the startup-loaded embedding model the
+    call is `internal` and nothing changes.
     """
     _require_manager(verified, ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION)
     if runtime.pool is None:
@@ -605,6 +808,8 @@ async def handle_knowledge_confirm_maya_decision(
             record_id=args.record_id,
             version=args.version,
             approved_by=ctx.requester_member_id,
+            request_id=ctx.request_id,
+            jti=ctx.jti,
         )
     )
     return ConfirmMayaDecisionResult(
@@ -682,18 +887,54 @@ def _supersede_note(
             (by_pk, json.dumps(provenance, sort_keys=True), pk, workspace_id),
         )
         updated = cur.fetchone()
-    if updated is None:  # unreachable: row locked above
-        raise PreconditionFailed(f"no record {pk}")
+        if updated is None:  # unreachable: row locked above
+            raise PreconditionFailed(f"no record {pk}")
+        _supersede_note_source(
+            cur, workspace_id=workspace_id, pk=pk, by_pk=by_pk, provenance=provenance
+        )
     return pk, by_pk, int(updated[0]), str(updated[1])
+
+
+def _supersede_note_source(
+    cur: Any, *, workspace_id: str, pk: int, by_pk: int, provenance: dict[str, Any]
+) -> None:
+    """D-09 rule 3 for confirmed notes: the superseded note's source (if it
+    was ever confirmed and ingested) becomes `status='superseded'`, so it
+    drops out of search and `get_source`; `provenance.superseded_by` names
+    the replacement's active source (`note-<by_pk>`) when it has one, else
+    null (e.g. an authoritative note seeded before D-09 rule 2's ingestion).
+    Same transaction as the `team_notes` link; nothing is deleted."""
+    cur.execute(
+        """SELECT source_id FROM public.source_records
+           WHERE workspace_id = %s AND source_id = %s AND status = 'active'""",
+        (workspace_id, note_source_id(by_pk)),
+    )
+    replacement = cur.fetchone()
+    merge = {
+        "superseded_by": replacement[0] if replacement is not None else None,
+        "superseded_at": provenance["superseded_at"],
+        "superseded_request_id": provenance["superseded_request_id"],
+        "superseded_jti": provenance["superseded_jti"],
+    }
+    cur.execute(
+        """UPDATE public.source_records
+           SET status = 'superseded',
+               provenance = provenance || %s::jsonb,
+               updated_at = now()
+           WHERE workspace_id = %s AND source_id = %s""",
+        (json.dumps(merge, sort_keys=True), workspace_id, note_source_id(pk)),
+    )
 
 
 async def handle_knowledge_mark_superseded(
     verified: VerifiedCall, args: Any, runtime: Any
 ) -> MarkSupersededResult:
-    """Mark the exact record/version superseded by another record (R-56).
+    """Mark the exact record/version superseded by the current authoritative
+    record (R-56).
 
     Manager role only, version-bound, and history-preserving: both records
-    remain; the old one gains `superseded_by` plus reason/request provenance.
+    remain; the old one gains `superseded_by` plus reason/request provenance,
+    and its search source (if confirmed) leaves search (D-09 rule 3).
     """
     _require_manager(verified, ToolName.KNOWLEDGE_MARK_SUPERSEDED)
     if runtime.pool is None:

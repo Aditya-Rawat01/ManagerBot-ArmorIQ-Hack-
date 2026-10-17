@@ -246,6 +246,28 @@ next to `recorded_at`, `embed_model`, `embed_tool` (model version), `embed_dim`,
 and `ingest_digest`; `created_at`/`updated_at` = the record's synthetic date.
 `knowledge_chunks.tier` always equals its source's `tier`.
 
+Confirmed team notes (P2-09, D-09 rule 2 as clarified 17 Oct 2026,
+`services/toolserver/tools_memory.py`): when Maya confirms a draft, the same
+transaction that flips it to `authoritative` writes the source
+`note-<team_notes.id>` (the `note-` prefix is reserved: the seed refuses it
+and never reads, rewrites or deletes such sources). Row: workspace from the
+verified `_ctx`, `tier='team'`, `status='active'`, `source_type='team_note'`,
+`title` = the note's title with control/format characters removed (else
+`Team note <id>` / `Team summary <id>`), `author` = the note's
+`author_member_id`, `content_hash` = sha256 of the content, `created_at` =
+`updated_at` = the approval time. `provenance`: `origin='team_note'`,
+`note_id`, `content_kind`, `version`, `review_status='authoritative'`,
+`superseded_by=null`, `approved_by_member_id`, `approved_at`, `request_id`,
+`jti`, `embed_model`, `embed_tool`, `embed_dim`, `chunk_words`,
+`chunk_overlap` (no `recorded_at`: citations use `created_at`). Chunks use the
+seed layout exactly (title-prefixed text, 120-word windows / 20 overlap,
+`content_hash = sha256("<source_id>:<chunk text>")`, bge-small 384-dim,
+embedded with the model loaded at startup before the write transaction
+opens). Superseding the note sets that source's `status='superseded'` and
+merges `superseded_by` (the replacement's `note-<id>` when it has an active
+source, else `null`), so it leaves search and `get_source`. Drafts are never
+chunked.
+
 Search ordering and score (P2-05, `services/knowledge/retrieval.py`,
 **PROPOSED**; the threshold value stays D-23/E17's): `knowledge_search_*`
 runs a lexical leg (`websearch_to_tsquery`, rows with `ts_rank_cd` = 0
