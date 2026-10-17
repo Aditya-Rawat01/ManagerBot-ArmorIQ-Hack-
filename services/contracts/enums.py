@@ -199,3 +199,7 @@ class AuditEventType(StrEnum):
     # only (event/team/channel IDs + reason code), written by
     # services.audit.store.record_slack_event_rejected, never a request row.
     SLACK_EVENT_REJECTED = "slack_event_rejected"
+    # "Simulate hijacked model" was switched on for a web request (P3-07 ICR):
+    # metadata only (simulation name + injection vector), written with
+    # append_event into request_events before planning.
+    SIMULATION_ACTIVATED = "simulation_activated"

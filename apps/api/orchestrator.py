@@ -114,7 +114,13 @@ STORED proposal (no model call, P3-02) under a new request with a new
 ArmorIQ plan, recorded with ``escalation_confirmed=True``.
 
 ``RequestOptions.simulate_hijacked_model`` (P3-07) is accepted for web
-requests only and is inert here (logged); P3-07 adds the behaviour.
+requests only (a Slack context carrying it is refused). When set, the request
+is audited ``simulation_activated`` before planning and, after the real
+responder ran, the synthetic hijacked-model tool requests of
+:mod:`apps.api.hijack_simulation` go through the SAME off-plan routing as
+real model requests (``attempt_off_plan`` only, never ``invoke_step``), each
+audit record marked ``simulation: "hijacked_model"``. Real steps still take
+their arguments only from the validated stored plan (E2 invariant above).
 """
 
 from __future__ import annotations
@@ -145,6 +151,7 @@ from apps.api.delivery import (
 )
 from apps.api.delivery import deliver as default_deliver
 from apps.api.delivery import notify_hold as default_notify_hold
+from apps.api.hijack_simulation import SIMULATION_NAME, activation_payload, simulated_output
 from apps.api.identity import MemberRecord
 from apps.api.planner import (
     Clarification,
@@ -275,8 +282,8 @@ class RequestOptions:
 
     Slack never sets them (it calls ``handle(ctx, message)``). The web route
     (P4-01) may set ``confirmation_token`` (from the session's stored offer,
-    never from message text) and ``simulate_hijacked_model`` (P3-07 hook,
-    inert here). ``confirmation_token`` is hidden from ``repr``.
+    never from message text) and ``simulate_hijacked_model`` (P3-07, off
+    by default). ``confirmation_token`` is hidden from ``repr``.
     """
 
     confirmation_token: str | None = field(default=None, repr=False)
@@ -720,6 +727,7 @@ class _Run:
     plan_id: str | None = None  # set only once record_plan succeeded (FK-safe)
     highest_tier: DataTier = DataTier.TEAM
     delivery_started: bool = False
+    simulation: bool = False  # P3-07: set only from web RequestOptions
 
 
 @dataclass(frozen=True)
@@ -1030,10 +1038,15 @@ class Orchestrator:
 
     async def _request_flow(self, run: _Run, message: str, options: RequestOptions) -> None:
         if options.simulate_hijacked_model:
-            logger.info(
-                "simulate_hijacked_model requested; inert until P3-07 request_id=%s",
-                run.ctx.request_id,
+            # P3-07: web only (Slack contexts carrying options were refused).
+            run.simulation = True
+            await self._write(
+                "append_event",
+                event=self._event(
+                    run, AuditEventType.SIMULATION_ACTIVATED, payload=activation_payload()
+                ),
             )
+            logger.info("hijacked-model simulation active request_id=%s", run.ctx.request_id)
         run.stage = "plan"
         result = await self._plan_fn(run.ctx, message, model=self._plan_model, db=self._db)
         if isinstance(result, Planned):
@@ -1408,6 +1421,12 @@ class Orchestrator:
 
         run.stage = "off_plan"
         tried = await self._route_off_plan(run, handle, plan, output)
+        if run.simulation:
+            # P3-07: the synthetic hijacked requests take the same path.
+            simulated = await self._route_off_plan(
+                run, handle, plan, simulated_output(output), simulated=True
+            )
+            tried = list(dict.fromkeys([*tried, *simulated]))
 
         run.stage = "record_answer"
         by_id = {item.source_id: item for item in evidence}
@@ -1454,7 +1473,13 @@ class Orchestrator:
         await self._deliver(run, final)
 
     async def _route_off_plan(
-        self, run: _Run, handle: PlanHandle, plan: PlanProposal, output: ResponderOutput
+        self,
+        run: _Run,
+        handle: PlanHandle,
+        plan: PlanProposal,
+        output: ResponderOutput,
+        *,
+        simulated: bool = False,
     ) -> list[str]:
         """Model tool requests: recorded, never executed (PRD §6.2, §7.11)."""
         planned = {step.tool for step in plan.steps}
@@ -1464,7 +1489,7 @@ class Orchestrator:
                 tool = ToolName(request.tool)
             except ValueError:
                 decision = self._app_block("unknown tool requested by the model; never executed")
-                await self._off_plan_event(run, decision, None, "unknown_tool")
+                await self._off_plan_event(run, decision, None, "unknown_tool", simulated)
                 tried.append("an unknown tool")
                 continue
             if tool in planned:
@@ -1492,7 +1517,7 @@ class Orchestrator:
                         reason="off-plan allow is never honored; never executed",
                         decided_at=_utcnow(),
                     )
-            await self._off_plan_event(run, decision, tool, None)
+            await self._off_plan_event(run, decision, tool, None, simulated)
             tried.append(tool.value)
         for rejected in output.rejected_tool_requests:
             try:
@@ -1500,7 +1525,7 @@ class Orchestrator:
             except ValueError:
                 known = None  # model text is never recorded as a tool name
             decision = self._app_block("tool request failed validation; never executed")
-            await self._off_plan_event(run, decision, known, rejected.reason)
+            await self._off_plan_event(run, decision, known, rejected.reason, simulated)
             tried.append(known.value if known else "an unknown tool")
         return list(dict.fromkeys(tried))
 
@@ -1519,6 +1544,7 @@ class Orchestrator:
         decision: ArmorIQDecision,
         tool: ToolName | None,
         rejection: str | None,
+        simulated: bool = False,
     ) -> None:
         payload: dict[str, Any] = {
             "outcome": decision.outcome.value,
@@ -1526,6 +1552,8 @@ class Orchestrator:
             "off_plan": True,
             "executed": False,
         }
+        if simulated:
+            payload["simulation"] = SIMULATION_NAME
         if tool is not None:
             payload["tool_name"] = tool.value
         if rejection is not None:

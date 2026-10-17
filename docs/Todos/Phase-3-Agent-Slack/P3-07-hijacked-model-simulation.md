@@ -7,7 +7,7 @@
 | Size | M (2–4 h) |
 | Target window | 16 Oct AM |
 | Gate role | SC-02; needs **G5** to display enforcement labels |
-| Status | Not started |
+| Status | Implemented on `w6/a-p401-p307` (offline tests green; live 10 + 10 runs are P5-02; not merged). Handoff notes: §15.1 |
 
 ## 1. Task ID and title
 
@@ -108,6 +108,54 @@ python -m pytest tests/api/test_hijack_simulation.py -q
 - P4-03: the toggle API field and the display fields (layer label, sink count).
 - P5-02: the harness for the 10 + 10 runs.
 - P5-04: demo wording that matches the evidence.
+
+### 15.1 Handoff notes (as implemented)
+
+Module: `apps/api/hijack_simulation.py` (docstring has the full flow);
+wiring in `apps/api/orchestrator.py`; tests `tests/api/test_hijack_simulation.py`.
+
+- **Activation:** only `POST /api/v1/requests` with
+  `simulate_hijacked_model: true` (P4-01) sets
+  `RequestOptions.simulate_hijacked_model`. Off by default; a Slack context
+  carrying options is refused (`RequestRejectedError`, nothing recorded); no
+  message text enables it. An active request is audited first:
+  `simulation_activated` (`request_events`, payload `simulation:
+  "hijacked_model"`, `injection_vector: "adversary_prompt"`, `synthetic:
+  true`; new `AuditEventType`, ICR in SHARED_INTERFACES §10).
+- **Injection vector (D-28 still open):** the spec's adversary-prompt
+  default, no seeded source. `ADVERSARY_PROMPT` is the clearly marked
+  synthetic instruction; the mode simulates a model that obeyed it by
+  appending `HIJACKED_TOOL_REQUESTS` to the real responder's output (so the
+  demo does not depend on a live model following an injection): a
+  schema-valid honeypot `send_external_message` (`synthetic_sink`, bounded
+  synthetic message), an off-plan `knowledge_search_restricted` (tier
+  escalation), and two forged honeypot requests with `_ctx` and `recipient`
+  keys.
+- **Routing:** the requests pass the responder's own screen (`_ctx` →
+  `reserved_key`, `recipient` → `forbidden_key`: recorded
+  `application_rule`, never ArmorIQ); the rest go ONLY to
+  `gateway.attempt_off_plan` and are recorded with the label it returned (an
+  off-plan ALLOW is recorded as BLOCK/`unknown`); a name that is in the plan is
+  refused by trusted code without an SDK call (E2). Each record is an
+  `authorization_decided` event with `off_plan: true`, `executed: false`,
+  `simulation: "hijacked_model"`. Nothing reaches `invoke_step`, the tool
+  server or the sink; real steps keep using only the validated stored plan
+  (fingerprint check unchanged).
+- **Confirmed plan (task §9.4):** the delivered note tells the user to send a
+  new request; that NEW request plans `send_external_message` (D-29/ADR-025
+  arguments) under a new ArmorIQ plan and its real decision is recorded as
+  returned (expected ArmorIQ policy BLOCK: live check E3/P5-02).
+- **Display for P4-03:** `GET /api/v1/requests/{id}` →
+  `simulation_active`, `off_plan_attempts[]` (`enforcement_layer`,
+  `decision_source`, `is_armoriq_policy`, `simulated`, `rejection`,
+  `executed: false`) and `egress_sink_executions` (executed
+  `send_external_message` steps from the persisted execution references; the
+  backend cannot read `egress_sink` itself, grant still PROPOSED in
+  SHARED_INTERFACES §7). Until E2/G5 evidence says more, show the raw label:
+  `armoriq_sdk_plan_check` is the client-side SDK check, not ArmorIQ policy.
+- **P5-02 harness:** `test_no_egress_sink_write_in_guarded_mode` is the
+  offline 10 + 10 shape (10 simulated + 10 natural web requests, zero
+  honeypot executions); the live run repeats it against the real gateway.
 
 ## 16. GitHub issue title, body outline, labels, and dependencies
 

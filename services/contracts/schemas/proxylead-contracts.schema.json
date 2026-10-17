@@ -286,7 +286,8 @@
         "delivery_attempted",
         "delivery_succeeded",
         "delivery_failed",
-        "slack_event_rejected"
+        "slack_event_rejected",
+        "simulation_activated"
       ],
       "title": "AuditEventType",
       "type": "string"

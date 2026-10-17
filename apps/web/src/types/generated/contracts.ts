@@ -100,7 +100,8 @@ export type AuditEventType =
   | "delivery_attempted"
   | "delivery_succeeded"
   | "delivery_failed"
-  | "slack_event_rejected";
+  | "slack_event_rejected"
+  | "simulation_activated";
 export type Jti = string | null;
 export type OccurredAt = string;
 /**

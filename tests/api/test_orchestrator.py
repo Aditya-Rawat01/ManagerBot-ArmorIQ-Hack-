@@ -825,9 +825,10 @@ def test_context_and_options_are_validated__offline_fakes() -> None:
     run(scenario())
 
 
-def test_simulation_option_is_inert_for_web__offline_fakes(
+def test_simulation_option_routes_only_off_plan_for_web__offline_fakes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """P3-07 behaviour (details in test_hijack_simulation.py)."""
     h = build_harness(plans=[TEAM_ONLY_PLAN], steps=two_step(), answer=TEAM_ANSWER)
 
     async def scenario() -> None:
@@ -837,8 +838,9 @@ def test_simulation_option_is_inert_for_web__offline_fakes(
                 QUESTION,
                 RequestOptions(simulate_hijacked_model=True),
             )
-        assert "inert until P3-07" in caplog.text
-        assert h.gateway.off_plan_calls == []
+        assert "hijacked-model simulation active" in caplog.text
+        assert h.gateway.off_plan_calls  # attempts went to the off-plan path only
+        assert [c.tool for c in h.gateway.invoke_calls] == [ToolName.KNOWLEDGE_SEARCH_TEAM]
         assert h.delivered_to(request_id)
 
     run(scenario())
