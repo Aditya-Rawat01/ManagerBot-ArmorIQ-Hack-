@@ -9,6 +9,8 @@ model. P2-10 reuses this pattern for `workspace-mcp` (it owns
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,16 +22,20 @@ from psycopg import sql
 from pydantic import BaseModel
 
 from services.contracts import (
+    AppRole,
+    ConfirmMayaDecisionResult,
     DataTier,
     KnowledgeGetSourceConfidentialResult,
     KnowledgeGetSourceRestrictedResult,
     KnowledgeGetSourceTeamResult,
     KnowledgeSearchResult,
     KnowledgeSearchTeamArgs,
+    MarkSupersededResult,
     ReadSourceConfidentialResult,
     ReadSourceRestrictedResult,
     ReadSourceTeamResult,
     ReviewStatus,
+    SaveTeamNoteResult,
     SourceCitation,
     SourceRow,
     ToolName,
@@ -37,7 +43,12 @@ from services.contracts import (
 from services.contracts.tool_args import MAX_EXCERPT_CHARS
 from services.knowledge import retrieval
 from services.toolserver import db
-from services.toolserver.schemas import InvalidArguments, NotFound
+from services.toolserver.schemas import (
+    InvalidArguments,
+    NotFound,
+    OutOfScope,
+    PreconditionFailed,
+)
 from services.toolserver.security import VerifiedCall
 
 
@@ -377,6 +388,298 @@ async def handle_read_source_restricted(verified: VerifiedCall, args: Any, runti
     )
 
 
+# ---------------------------------------------------------------------------
+# P2-09 — knowledge maintenance: draft notes, Maya's confirmation, supersession
+#
+# D-10 (resolved 16 Oct 2026): a saved note is ALWAYS team-tier and ALWAYS a
+# draft; it is never chunked or embedded (D-09 rule 2 — drafts are never
+# searchable evidence, so step 9.1's ingestion is deliberately DEFERRED: no
+# `knowledge_chunks` row is ever written for a draft). Drafts are visible only
+# in Maya's metadata-only review queue (`draft_review_queue`, ADR-023) until
+# she confirms them.
+#
+# Author, workspace and provenance come from the verified `_ctx`
+# (SHARED_INTERFACES §5), never from arguments; no tool here touches policy,
+# permissions or identity (R-57). These tools are tier-less, so the member
+# tier ceiling passes them (step 1.3): the Maya/manager role check therefore
+# lives in the handlers, before any SQL runs.
+#
+# Unmet state (record missing, wrong workspace, stale version, already
+# confirmed/superseded, supersede target missing) is one uniform
+# `precondition_failed` rejection, recorded never executed: a mutation that
+# did nothing must not be reported as an execution, and one code never
+# discloses which condition failed.
+# ---------------------------------------------------------------------------
+
+
+def _require_manager(verified: VerifiedCall, tool: ToolName) -> None:
+    """Maya-only maintenance (task 9.2/9.3; R-46/R-56): `app_role` read from
+    the verified `_ctx`, independent of the ArmorIQ policy. Unknown roles
+    fail closed."""
+    try:
+        role = AppRole(verified.ctx.app_role)
+    except ValueError:
+        role = AppRole.JUNIOR  # anything unparsable: not a manager
+    if role is not AppRole.MANAGER:
+        raise OutOfScope(tool.value)
+
+
+def _note_pk(record_id: str) -> int:
+    """`record_id` is the string form of the `team_notes` primary key."""
+    try:
+        pk = int(record_id)
+    except ValueError:
+        raise PreconditionFailed(f"no record {record_id!r}") from None
+    if pk < 1:
+        raise PreconditionFailed(f"no record {record_id!r}")
+    return pk
+
+
+def _insert_note(
+    pool: Any,
+    *,
+    workspace_id: str,
+    author_member_id: str,
+    content: str,
+    content_kind: str,
+    title: str | None,
+    provenance: dict[str, Any],
+) -> tuple[int, int]:
+    """One draft row: `review_status='draft'`, `version=1`, `tier='team'`
+    (D-10, CHECK-enforced by migration 0012). No chunk/embedding — drafts
+    are never searchable (D-09 rule 2)."""
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO public.team_notes
+               (workspace_id, author_member_id, title, content, content_kind,
+                review_status, version, content_hash, tier, provenance)
+               VALUES (%s, %s, %s, %s, %s, 'draft', 1, %s, 'team', %s)
+               RETURNING id, version""",
+            (
+                workspace_id,
+                author_member_id,
+                title,
+                content,
+                content_kind,
+                digest,
+                json.dumps(provenance, sort_keys=True),
+            ),
+        )
+        row = cur.fetchone()
+    if row is None:  # unreachable: INSERT ... RETURNING yields a row
+        raise PreconditionFailed("note was not stored")
+    return int(row[0]), int(row[1])
+
+
+async def handle_knowledge_save_team_note(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> SaveTeamNoteResult:
+    """Save a note/summary as a draft attributed to the verified requester.
+
+    Always `draft` + `team` tier + `version=1`; author and workspace from
+    `_ctx` (the P2-02 model accepts no author argument — R-57). Idempotency
+    per `jti` is the dispatcher's replay guard: a repeat with the same `jti`
+    is replayed, never re-inserted.
+    """
+    if runtime.pool is None:
+        raise _NoDatabase("save note needs a database pool")
+    ctx = verified.ctx
+    pk, version = await anyio.to_thread.run_sync(
+        partial(
+            _insert_note,
+            runtime.pool,
+            workspace_id=ctx.workspace_id,
+            author_member_id=ctx.requester_member_id,
+            content=args.content,
+            content_kind=args.content_kind,
+            title=args.title,
+            provenance={
+                "request_id": ctx.request_id,
+                "jti": ctx.jti,
+                "recorded_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+        )
+    )
+    return SaveTeamNoteResult(
+        tool=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE,
+        record_id=str(pk),
+        version=version,
+        review_status="draft",
+    )
+
+
+def _confirm_note(
+    pool: Any,
+    *,
+    workspace_id: str,
+    record_id: str,
+    version: int,
+    approved_by: str,
+) -> tuple[int, int]:
+    """Confirm exactly `record_id` + `version`: lock the row, check the
+    binding, then mark that version authoritative with Maya's provenance."""
+    pk = _note_pk(record_id)
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT version, review_status FROM public.team_notes
+               WHERE id = %s AND workspace_id = %s
+               FOR UPDATE""",
+            (pk, workspace_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise PreconditionFailed(f"no record {pk}")
+        if int(row[0]) != version:
+            raise PreconditionFailed(f"record {pk} is version {row[0]}, not {version}")
+        if row[1] != "draft":
+            raise PreconditionFailed(f"record {pk} is already {row[1]}")
+        cur.execute(
+            """UPDATE public.team_notes
+               SET review_status = 'authoritative',
+                   approved_by_member_id = %s,
+                   approved_at = now(),
+                   updated_at = now()
+               WHERE id = %s AND workspace_id = %s
+               RETURNING version""",
+            (approved_by, pk, workspace_id),
+        )
+        updated = cur.fetchone()
+    if updated is None:  # unreachable: row locked above
+        raise PreconditionFailed(f"no record {pk}")
+    return int(updated[0]), version
+
+
+async def handle_knowledge_confirm_maya_decision(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> ConfirmMayaDecisionResult:
+    """Confirm the exact draft record/version as authoritative (R-56).
+
+    Manager role only (`out_of_scope` for Sam/Priya), bound to the exact
+    `record_id` + `version` (`precondition_failed` otherwise). `approved_by`
+    is Maya's member ID from `_ctx`; an "approved" text is never accepted
+    as input (the P2-02 model has only record_id + version). Repeating with
+    the same `jti` is deduplicated by the replay guard.
+    """
+    _require_manager(verified, ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION)
+    if runtime.pool is None:
+        raise _NoDatabase("confirm needs a database pool")
+    ctx = verified.ctx
+    version, _ = await anyio.to_thread.run_sync(
+        partial(
+            _confirm_note,
+            runtime.pool,
+            workspace_id=ctx.workspace_id,
+            record_id=args.record_id,
+            version=args.version,
+            approved_by=ctx.requester_member_id,
+        )
+    )
+    return ConfirmMayaDecisionResult(
+        tool=ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION,
+        record_id=args.record_id,
+        version=version,
+        review_status="authoritative",
+    )
+
+
+def check_supersede_arguments(args: Any) -> None:
+    """Trusted-code argument policy (dispatch step 1.2): a record cannot
+    supersede itself."""
+    if args.record_id == args.superseded_by_record_id:
+        raise InvalidArguments("a record cannot supersede itself")
+
+
+def _supersede_note(
+    pool: Any,
+    *,
+    workspace_id: str,
+    record_id: str,
+    version: int,
+    superseded_by_record_id: str,
+    reason: str,
+    provenance: dict[str, Any],
+) -> tuple[int, int, str]:
+    """Mark exactly `record_id` + `version` superseded by another record.
+    Both rows are kept: only `superseded_by_id` and a provenance merge are
+    written — history is never deleted or overwritten."""
+    pk = _note_pk(record_id)
+    by_pk = _note_pk(superseded_by_record_id)
+    with db.transaction(pool) as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT version, review_status, superseded_by_id
+               FROM public.team_notes
+               WHERE id = %s AND workspace_id = %s
+               FOR UPDATE""",
+            (pk, workspace_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise PreconditionFailed(f"no record {pk}")
+        if int(row[0]) != version:
+            raise PreconditionFailed(f"record {pk} is version {row[0]}, not {version}")
+        if row[2] is not None:
+            raise PreconditionFailed(f"record {pk} is already superseded")
+        cur.execute(
+            """SELECT 1 FROM public.team_notes WHERE id = %s AND workspace_id = %s""",
+            (by_pk, workspace_id),
+        )
+        if cur.fetchone() is None:
+            raise PreconditionFailed(f"no replacement record {by_pk}")
+        cur.execute(
+            """UPDATE public.team_notes
+               SET superseded_by_id = %s,
+                   provenance = provenance || %s::jsonb,
+                   updated_at = now()
+               WHERE id = %s AND workspace_id = %s
+               RETURNING version, review_status""",
+            (by_pk, json.dumps(provenance, sort_keys=True), pk, workspace_id),
+        )
+        updated = cur.fetchone()
+    if updated is None:  # unreachable: row locked above
+        raise PreconditionFailed(f"no record {pk}")
+    return int(updated[0]), version, str(updated[1])
+
+
+async def handle_knowledge_mark_superseded(
+    verified: VerifiedCall, args: Any, runtime: Any
+) -> MarkSupersededResult:
+    """Mark the exact record/version superseded by another record (R-56).
+
+    Manager role only, version-bound, and history-preserving: both records
+    remain; the old one gains `superseded_by` plus reason/request provenance.
+    """
+    _require_manager(verified, ToolName.KNOWLEDGE_MARK_SUPERSEDED)
+    if runtime.pool is None:
+        raise _NoDatabase("mark superseded needs a database pool")
+    check_supersede_arguments(args)
+    ctx = verified.ctx
+    _, version, review_status = await anyio.to_thread.run_sync(
+        partial(
+            _supersede_note,
+            runtime.pool,
+            workspace_id=ctx.workspace_id,
+            record_id=args.record_id,
+            version=args.version,
+            superseded_by_record_id=args.superseded_by_record_id,
+            reason=args.reason,
+            provenance={
+                "superseded_reason": args.reason,
+                "superseded_request_id": ctx.request_id,
+                "superseded_jti": ctx.jti,
+                "superseded_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            },
+        )
+    )
+    return MarkSupersededResult(
+        tool=ToolName.KNOWLEDGE_MARK_SUPERSEDED,
+        record_id=args.record_id,
+        version=version,
+        review_status=ReviewStatus(review_status),
+        superseded_by_record_id=args.superseded_by_record_id,
+    )
+
+
 @dataclass(frozen=True)
 class ProductTool:
     name: ToolName
@@ -451,5 +754,30 @@ PRODUCT_TOOLS: dict[ToolName, ProductTool] = {
         ),
         handler=handle_read_source_restricted,
         check_arguments=partial(check_read_source_arguments, tier=DataTier.RESTRICTED),
+    ),
+    ToolName.KNOWLEDGE_SAVE_TEAM_NOTE: ProductTool(
+        name=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE,
+        description=(
+            "Save a team note or summary as a draft attributed to the verified "
+            "requester (team tier, never searchable until Maya confirms it)."
+        ),
+        handler=handle_knowledge_save_team_note,
+    ),
+    ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION: ProductTool(
+        name=ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION,
+        description=(
+            "Manager only: confirm the exact draft record and version as Maya's "
+            "authoritative decision (R-46, R-56)."
+        ),
+        handler=handle_knowledge_confirm_maya_decision,
+    ),
+    ToolName.KNOWLEDGE_MARK_SUPERSEDED: ProductTool(
+        name=ToolName.KNOWLEDGE_MARK_SUPERSEDED,
+        description=(
+            "Manager only: mark the exact record and version superseded by another "
+            "record; both records and their history are preserved (R-56)."
+        ),
+        handler=handle_knowledge_mark_superseded,
+        check_arguments=check_supersede_arguments,
     ),
 }

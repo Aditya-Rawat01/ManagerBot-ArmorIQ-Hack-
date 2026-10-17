@@ -127,6 +127,26 @@ begin, cannot be accepted), or `defer` (can be decided later).
   that discuss confidential topics?
 - Decider: `Aditya-Rawat01` with `samarth-chawla`. Needed before **P2-09**. Blocking: **finish**.
 
+**RESOLVED 16 Oct 2026 by `Aditya-Rawat01` with `samarth-chawla` (relayed; D-10
++ D-09 rule 2, no ADR). Implemented in P2-09 (PR #74).**
+
+1. A saved note is **always `team`-tier and always a draft** — including notes
+   saved from a DM that discuss confidential topics (the requester's own
+   words, attributed to them, never authoritative until Maya confirms).
+2. Drafts are **never chunked or embedded**, so they are never searchable
+   evidence (D-09 rule 2). The P2-09 ingestion step is deliberately deferred:
+   no `knowledge_chunks` row is written for a draft.
+3. Drafts are visible only in Maya's metadata-only review queue
+   (`draft_review_queue`, ADR-023) until she confirms them.
+4. The backend **refuses** a `store this` (`knowledge_save_team_note`)
+   `application_rule` in a thread where above-team-tier evidence was
+   delivered — a tier-purity rule at the planner, not in the tool server.
+5. Migration **0012** (claimed on issue #24 before coding) encodes (1) as a
+   schema invariant: `team_notes.tier TEXT NOT NULL DEFAULT 'team' CHECK
+   (tier IN ('team'))`, plus `provenance` and `approved_by_member_id` /
+   `approved_at` columns (PRD §8.1). `team_notes` is toolserver-exclusive, so
+   no ICR and no shared-interface change; `draft_review_queue` untouched.
+
 ### D-11 — Elevated source tools versus the one-elevated-call rule (= U-9)
 
 **RESOLVED 16 Oct 2026 by `VTCodeCraft` with `Aditya-Rawat01` ([issue #22](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/22), ICR approved; no ADR, no contract schema change). Implemented in P2-08 (PR #71).**

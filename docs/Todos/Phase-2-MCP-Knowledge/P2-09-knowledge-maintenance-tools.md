@@ -7,7 +7,7 @@
 | Size | M (2–4 h) |
 | Target window | 15 Oct |
 | Gate role | Required for G2 (registry complete) |
-| Status | Not started |
+| Status | Implemented (P2-09, PR #74); D-10 and D-09 resolved |
 
 ## 1. Task ID and title
 
