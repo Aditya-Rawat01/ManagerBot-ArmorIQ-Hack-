@@ -20,7 +20,7 @@ def test_health_returns_contract_shape(client: TestClient, path: str) -> None:
 
 
 def test_health_needs_no_external_credentials(client: TestClient) -> None:
-    # The default test settings contain no ArmorIQ/Slack/Anthropic/DB secrets.
+    # The default test settings contain no ArmorIQ/Slack/Gemini/DB secrets.
     assert client.get("/health").status_code == 200
 
 

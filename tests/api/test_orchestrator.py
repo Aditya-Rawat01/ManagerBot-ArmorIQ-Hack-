@@ -4,7 +4,7 @@ Offline tests (``__offline_fakes``) run the real orchestrator, planner and
 responder against the doubles in ``tests/api/fakes/`` (scripted gateway,
 recording audit store, P3-06 delivery doubles bound to the real signatures,
 canned planner JSON and responder drafts). They are NOT evidence of any
-ArmorIQ, Slack, Anthropic or database behaviour.
+ArmorIQ, Slack, Gemini or database behaviour.
 
 The ``test_live_*`` tests at the end use a LOCAL migrated and seeded database
 with the real audit store and real P3-06 delivery, still with the scripted
@@ -1267,7 +1267,7 @@ def test_main_leaves_handle_unset_without_config__offline_fakes(
         assert client.get("/health").status_code == 200
         assert getattr(app.state, "orchestrator_handle", None) is None
         assert getattr(app.state, "orchestrator", None) is None
-    assert "ARMORIQ_API_KEY" in caplog.text and "ANTHROPIC_API_KEY" in caplog.text
+    assert "ARMORIQ_API_KEY" in caplog.text and "GEMINI_API_KEY" in caplog.text
     assert "CTX_SECRET" not in caplog.text  # configured settings are not listed
     assert "ctx-offline-fake-secret" not in caplog.text
     assert attempts == []

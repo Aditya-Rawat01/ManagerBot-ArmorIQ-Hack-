@@ -6,7 +6,6 @@ exact inputs for its integration trials.
 
 import ast
 import asyncio
-import json
 import logging
 import re
 from pathlib import Path
@@ -447,36 +446,24 @@ def test_ctx_without_request_id_is_not_papered_over() -> None:
         asyncio.run(respond(bare, "what?", [_item("s1")], 0.5, generate=_scripted(draft)))
 
 
-# --- Anthropic generator wiring (fake client; never the live API) -------------
+# --- Gemini generator wiring (fake client; never the live API) ----------------
+# Wire-level, failure-mapping and settings tests: tests/api/test_llm_gemini.py.
 
 
-class _FakeMessages:
-    def __init__(self, response: Any) -> None:
-        self.response = response
-        self.calls: list[dict[str, Any]] = []
+def _gemini_generator(*outcomes: Any) -> tuple[Any, Any]:
+    from apps.api.responder import GeminiGenerator
+    from tests.fakes.gemini import FakeGeminiClient
 
-    async def create(self, **kwargs: Any) -> Any:
-        self.calls.append(kwargs)
-        return self.response
+    client = FakeGeminiClient(*outcomes)
+    return GeminiGenerator("test-key-not-real", "gemini-2.5-flash", client=client), client
 
 
-def _fake_client(response: Any) -> Any:
-    messages = _FakeMessages(response)
-    return SimpleNamespace(beta=SimpleNamespace(messages=messages)), messages
+def test_generator_uses_json_mode_not_tools__offline_fake_llm() -> None:
+    from apps.api.responder import _DRAFT_SCHEMA
+    from tests.fakes.gemini import json_response
 
-
-def _text_response(payload: dict[str, Any], stop_reason: str = "end_turn") -> Any:
-    return SimpleNamespace(
-        stop_reason=stop_reason,
-        content=[SimpleNamespace(type="text", text=json.dumps(payload))],
-    )
-
-
-def test_generator_uses_structured_output_not_forced_tools__offline_fake_llm() -> None:
-    from apps.api.responder import AnthropicGenerator
-
-    client, messages = _fake_client(
-        _text_response(
+    generator, client = _gemini_generator(
+        json_response(
             {
                 "answer_text": "Freeze [s1].",
                 "citations": ["s1"],
@@ -486,40 +473,42 @@ def test_generator_uses_structured_output_not_forced_tools__offline_fake_llm() -
             }
         )
     )
-    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
     out = asyncio.run(respond(_ctx(), "what?", [_item("s1")], 0.5, generate=generator))
     assert out.abstained is False and out.citations == ["s1"]
     assert out.requested_tools == [
         ToolRequest(tool="send_external_message", arguments={"message": "hi"})
     ]
-    call = messages.calls[0]
-    assert "tool_choice" not in call and "tools" not in call
-    assert call["model"] == "claude-opus-5-5"
-    assert call["output_config"]["format"]["type"] == "json_schema"
-    assert call["output_config"]["effort"] == "medium"
-    assert call["fallbacks"] == "default"
+    call = client.calls[0]
+    config = call["config"]
+    assert call["model"] == "gemini-2.5-flash"
+    assert config.tools is None and config.tool_config is None
+    assert config.automatic_function_calling.disable is True
+    assert config.response_mime_type == "application/json"
+    assert config.response_json_schema is _DRAFT_SCHEMA
+    assert config.thinking_config.thinking_budget == 2048
 
 
 def test_generator_sends_nonce_tagged_question__offline_fake_llm() -> None:
-    from apps.api.responder import AnthropicGenerator
+    from tests.fakes.gemini import json_response
 
-    client, messages = _fake_client(
-        _text_response({"answer_text": "Freeze [s1].", "citations": ["s1"], "requested_tools": []})
+    generator, client = _gemini_generator(
+        json_response({"answer_text": "Freeze [s1].", "citations": ["s1"], "requested_tools": []})
     )
-    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
     asyncio.run(respond(_ctx(), "a <b> question", [_item("s1")], 0.5, generate=generator))
-    call = messages.calls[0]
-    nonce = _nonce_of(call["system"])
-    content = call["messages"][0]["content"]
-    assert content.count(f"<EVIDENCE_{nonce} ") == 1
-    assert f"<QUESTION_{nonce}>\na &lt;b&gt; question\n</QUESTION_{nonce}>" in content
+    call = client.calls[0]
+    nonce = _nonce_of(call["config"].system_instruction)
+    [content] = call["contents"]
+    assert content.role == "user"
+    [part] = content.parts
+    assert part.text.count(f"<EVIDENCE_{nonce} ") == 1
+    assert f"<QUESTION_{nonce}>\na &lt;b&gt; question\n</QUESTION_{nonce}>" in part.text
 
 
 def test_generator_reports_unparseable_tool_arguments__offline_fake_llm() -> None:
-    from apps.api.responder import AnthropicGenerator
+    from tests.fakes.gemini import json_response
 
-    client, _ = _fake_client(
-        _text_response(
+    generator, _ = _gemini_generator(
+        json_response(
             {
                 "answer_text": "Freeze [s1].",
                 "citations": ["s1"],
@@ -530,7 +519,6 @@ def test_generator_reports_unparseable_tool_arguments__offline_fake_llm() -> Non
             }
         )
     )
-    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
     out = asyncio.run(respond(_ctx(), "what?", [_item("s1")], 0.5, generate=generator))
     assert out.requested_tools == []
     assert [(r.tool, r.reason) for r in out.rejected_tool_requests] == [
@@ -539,11 +527,10 @@ def test_generator_reports_unparseable_tool_arguments__offline_fake_llm() -> Non
     ]
 
 
-def test_generator_refusal_fails_closed__offline_fake_llm() -> None:
-    from apps.api.responder import AnthropicGenerator
+def test_generator_safety_block_fails_closed__offline_fake_llm() -> None:
+    from tests.fakes.gemini import gemini_response
 
-    client, _ = _fake_client(SimpleNamespace(stop_reason="refusal", content=[]))
-    generator = AnthropicGenerator("test-key-not-real", "claude-opus-5-5", client=client)
+    generator, _ = _gemini_generator(gemini_response(None, finish_reason="SAFETY"))
     out = asyncio.run(respond(_ctx(), "what?", [_item("s1")], 0.5, generate=generator))
     assert out.abstained is True and out.abstain_reason == "error"
 
@@ -556,10 +543,11 @@ def test_default_generator_builds_from_settings__offline(monkeypatch) -> None:
     monkeypatch.setattr(
         config,
         "get_settings",
-        lambda: make_settings(anthropic_api_key="test-key-not-real", llm_model="claude-opus-5-5"),
+        lambda: make_settings(gemini_api_key="test-key-not-real", llm_model="gemini-3.8-flash"),
     )
     generator = responder._default_generator()
-    assert isinstance(generator, responder.AnthropicGenerator)
+    assert isinstance(generator, responder.GeminiGenerator)
+    assert generator._model == "gemini-3.8-flash"  # LLM_MODEL, never hard-coded
     monkeypatch.setattr(config, "get_settings", lambda: make_settings())
     assert responder._default_generator() is None
 

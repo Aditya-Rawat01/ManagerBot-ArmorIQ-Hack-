@@ -74,9 +74,10 @@ class Settings(BaseSettings):
     slack_team_id: str | None = None
     slack_allowed_channels: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
-    # --- Anthropic -------------------------------------------------------------
-    anthropic_api_key: SecretStr | None = None
-    llm_model: str = "claude-opus-5-5"
+    # --- LLM: Google Gemini, Gemini Developer API (ADR-032) ---------------------
+    # A Google AI Studio key, never a Vertex AI credential.
+    gemini_api_key: SecretStr | None = None
+    llm_model: str = "gemini-2.5-flash"
 
     # --- grounding (responder abstention; calibrated by E17, P3-08) ------------
     # PRD §12 MIN_SCORE. None until E17 calibrates it: the responder abstains

@@ -831,7 +831,7 @@ class Orchestrator:
     """Request lifecycle shared by Slack and web (P3-04). See the module docstring.
 
     Collaborators are injected (offline tests use fakes; ``main.py`` wires
-    the real gateway, Anthropic clients, audit store and P3-06 delivery).
+    the real gateway, Gemini clients, audit store and P3-06 delivery).
     ``audit`` is any object with the ``services.audit.store`` write
     functions; the blocking store and delivery calls run in worker threads.
     """
@@ -1715,7 +1715,7 @@ REQUIRED_SETTINGS: tuple[tuple[str, str], ...] = (
     ("persona_priya_email", "PERSONA_PRIYA_EMAIL"),
     ("ctx_secret", "CTX_SECRET"),
     ("database_url_backend", "DATABASE_URL_BACKEND"),
-    ("anthropic_api_key", "ANTHROPIC_API_KEY"),
+    ("gemini_api_key", "GEMINI_API_KEY"),
 )
 
 
@@ -1745,13 +1745,13 @@ def build_orchestrator(
     from apps.api.core.db import BackendDatabase
     from apps.api.identity import build_member_table
     from apps.api.planner import plan_client_from_settings
-    from apps.api.responder import AnthropicGenerator
+    from apps.api.responder import GeminiGenerator
     from services.authorization.armoriq_gateway import ArmorIQGateway
 
     plan_model = plan_client_from_settings(settings)
     if plan_model is None:  # pragma: no cover - guarded by missing_orchestrator_settings
-        raise ValueError("orchestrator settings missing: ANTHROPIC_API_KEY")
-    key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
+        raise ValueError("orchestrator settings missing: GEMINI_API_KEY")
+    key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
     db = BackendDatabase.from_settings(settings)
     orchestrator = Orchestrator(
         settings=settings,
@@ -1759,7 +1759,7 @@ def build_orchestrator(
         db=db,
         plan_model=plan_model,
         members=build_member_table(settings),
-        generate=AnthropicGenerator(key, settings.llm_model),
+        generate=GeminiGenerator(key, settings.llm_model),
         sender_provider=sender_provider,
     )
     return orchestrator, db

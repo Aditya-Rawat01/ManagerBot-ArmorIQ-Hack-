@@ -87,6 +87,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from apps.api.llm import gemini_client, generate_json
 from services.contracts import (
     FORBIDDEN_ARGUMENT_KEYS,
     ConfirmMayaDecisionResult,
@@ -628,7 +629,7 @@ async def respond(
     request (`evidence_from_results`). `min_score` is the configured
     `MIN_SCORE`. The stricter of it and any result-carried threshold applies.
     `generate` renders a `ModelDraft` from (system, evidence_block,
-    question_block). When it is omitted, an Anthropic-backed generator is used
+    question_block). When it is omitted, a Gemini-backed generator is used
     if a key is configured, and otherwise the request fails closed. Sync and
     async callables are both accepted (offline fakes are sync).
     `manager_name` is the trusted display name used in abstention text.
@@ -747,18 +748,19 @@ async def respond(
 
 
 def _default_generator() -> GenerateFn | None:
-    """Anthropic-backed generator from settings (key + model), else None."""
+    """Gemini-backed generator from settings (key + model), else None."""
     from apps.api.core.config import get_settings
 
     settings = get_settings()
-    key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
-    if not key:
+    key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
+    if not key.strip():
         return None
-    return AnthropicGenerator(key, settings.llm_model)
+    return GeminiGenerator(key, settings.llm_model)
 
 
-# Structured output schema for the draft. Free-form tool arguments travel as a
-# JSON string because strict schemas require closed objects.
+# Structured output schema for the draft (Gemini `response_json_schema`
+# subset). Free-form tool arguments travel as a JSON string because the
+# schema keeps every object closed.
 _DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -780,69 +782,74 @@ _DRAFT_SCHEMA: dict[str, Any] = {
     "required": ["answer_text", "citations", "requested_tools"],
     "additionalProperties": False,
 }
-_LLM_TIMEOUT_S = 60.0
-_LLM_MAX_TOKENS = 16000
-_LLM_EFFORT = "medium"  # claude-opus-5-5 default; set explicitly
-# Server-side refusal fallback ("default" routes by refusal category).
-_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+_DRAFT_KEYS = frozenset({"answer_text", "citations", "requested_tools"})
 
 
-class AnthropicGenerator:
-    """Structured-answer generation via the Anthropic Messages API (P3-03 §9.3).
+class GeminiGenerator:
+    """Structured-answer generation via the Gemini API (P3-03 §9.3, ADR-032).
 
-    Uses structured outputs (`output_config.format`) rather than forced tool
-    use, which current models reject. The escaped, nonce-delimited evidence
-    and question blocks travel verbatim as the user turn, with the
-    untrusted-data system prompt. Any transport, refusal, truncation, or shape
-    failure raises, and `respond` abstains with `error`.
+    One JSON-mode call (`apps.api.llm`) with `_DRAFT_SCHEMA` as
+    `response_json_schema`; no tools or function calling. The escaped,
+    nonce-delimited evidence and question blocks travel verbatim as the user
+    turn, with the untrusted-data system prompt as `system_instruction`. Any
+    SDK, HTTP, timeout, blocked-prompt, safety, truncation (finish reason not
+    `STOP`) or shape failure raises, and `respond` abstains with `error`.
+    The citation validation in `respond` stays the authority.
     """
 
     def __init__(self, api_key: str, model: str, *, client: Any | None = None) -> None:
-        if client is None:
-            from anthropic import AsyncAnthropic
-
-            client = AsyncAnthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S, max_retries=1)
-        self._client = client
+        self._client = client if client is not None else gemini_client(api_key)
         self._model = model
 
     async def __call__(self, system: str, evidence_block: str, question_block: str) -> ModelDraft:
-        response = await self._client.beta.messages.create(
+        text = await generate_json(
+            self._client,
             model=self._model,
-            max_tokens=_LLM_MAX_TOKENS,
-            betas=[_FALLBACK_BETA],
-            fallbacks="default",
             system=system,
-            output_config={
-                "format": {"type": "json_schema", "schema": _DRAFT_SCHEMA},
-                "effort": _LLM_EFFORT,
-            },
-            messages=[{"role": "user", "content": f"{evidence_block}\n\n{question_block}"}],
+            user=f"{evidence_block}\n\n{question_block}",
+            schema=_DRAFT_SCHEMA,
         )
-        if response.stop_reason in ("refusal", "max_tokens"):
-            raise ValueError(f"no usable answer (stop_reason={response.stop_reason})")
-        text = next(
-            (block.text for block in response.content if getattr(block, "type", None) == "text"),
-            None,
-        )
-        if text is None:
-            raise ValueError("model returned no text block")
-        wire = json.loads(text)
-        requested: list[ToolRequest] = []
-        malformed: list[str] = []
-        for item in wire.get("requested_tools") or []:
-            name = str(item.get("tool", ""))
-            try:
-                arguments = json.loads(item.get("arguments_json") or "{}")
-            except (TypeError, ValueError):
-                arguments = None
-            if isinstance(arguments, dict):
-                requested.append(ToolRequest(tool=name, arguments=arguments))
-            else:
-                # Reported as a rejected attempt, never silently dropped.
-                malformed.append(name)
-        return ModelDraft(
-            answer_text=wire["answer_text"],
-            citations=list(wire["citations"]),
-            requested_tools=requested,
-            malformed_tool_requests=malformed,
-        )
+        return parse_draft(text)
+
+
+def parse_draft(text: str) -> ModelDraft:
+    """Strict parser for the `_DRAFT_SCHEMA` wire JSON (raises on any mismatch).
+
+    `requested_tools` may be absent (no requests). A request whose
+    `arguments_json` is not a JSON object is reported in
+    `malformed_tool_requests`, never silently dropped.
+    """
+    wire = json.loads(text)
+    if not isinstance(wire, dict) or not set(wire) <= _DRAFT_KEYS:
+        raise ValueError("draft output does not match the schema")
+    answer_text = wire.get("answer_text")
+    citations = wire.get("citations")
+    raw_requests = wire.get("requested_tools") or []
+    if (
+        not isinstance(answer_text, str)
+        or not isinstance(citations, list)
+        or not all(isinstance(cited, str) for cited in citations)
+        or not isinstance(raw_requests, list)
+    ):
+        raise ValueError("draft output does not match the schema")
+    requested: list[ToolRequest] = []
+    malformed: list[str] = []
+    for item in raw_requests:
+        if not isinstance(item, dict):
+            raise ValueError("draft tool request does not match the schema")
+        name = str(item.get("tool", ""))
+        try:
+            arguments = json.loads(item.get("arguments_json") or "{}")
+        except (TypeError, ValueError):
+            arguments = None
+        if isinstance(arguments, dict):
+            requested.append(ToolRequest(tool=name, arguments=arguments))
+        else:
+            # Reported as a rejected attempt, never silently dropped.
+            malformed.append(name)
+    return ModelDraft(
+        answer_text=answer_text,
+        citations=list(citations),
+        requested_tools=requested,
+        malformed_tool_requests=malformed,
+    )
