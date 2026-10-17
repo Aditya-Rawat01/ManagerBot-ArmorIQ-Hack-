@@ -754,7 +754,8 @@ def test_handle_returns_before_the_plan_runs__offline_fakes() -> None:
     h = build_harness(model=model, steps=two_step(), answer=TEAM_ANSWER)
 
     async def scenario() -> None:
-        request_id = await h.orchestrator.handle(request_ctx(), QUESTION)
+        # The planner is blocked until released: handle must not wait for it.
+        request_id = await asyncio.wait_for(h.orchestrator.handle(request_ctx(), QUESTION), 2)
         assert request_id.startswith("req-")
         assert h.audit.timeline == ["request_received"]  # recorded before returning
         assert model.finished == 0 and h.gateway.start_plan_calls == []
@@ -1449,6 +1450,7 @@ def test_live_audit_sequence_with_fake_gateway() -> None:
 @needs_live_write
 def test_live_confirmed_escalation_with_hold_sequence() -> None:
     from apps.api.core.db import BackendDatabase
+    from apps.api.delivery import GENERIC_THREAD_NOTICE
     from tests.api.fakes.slack import RecordingSlackSender
 
     db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
@@ -1493,8 +1495,12 @@ def test_live_confirmed_escalation_with_hold_sequence() -> None:
             "plan_minted",
         ]
         assert "hold_created" in events and "approval_resolved" in events
-        assert events.index("hold_created") < events.index("approval_resolved")
-        assert events[-2:] == ["delivery_attempted", "delivery_succeeded"]
+        held, resolved = events.index("hold_created"), events.index("approval_resolved")
+        # Maya's HOLD DM is audited (delivery_attempted) while the hold is pending.
+        assert held < events.index("delivery_attempted") < resolved
+        # The answer (DM) is recorded after the approval, then the thread notice.
+        answered = events.index("answer_generated")
+        assert resolved < answered < events.index("delivery_succeeded")
         assert [d[0] for d in decisions] == [
             "authorization_decided",
             "tool_executed",
@@ -1503,7 +1509,9 @@ def test_live_confirmed_escalation_with_hold_sequence() -> None:
         ]
         assert deliveries == [("slack_dm", "pending"), ("slack_dm", "delivered")]
         assert all(CONF_SECRET not in text for _, _, text in sender.thread_posts)
+        assert GENERIC_THREAD_NOTICE in [text for _, _, text in sender.thread_posts]
         assert any(user == "U-maya" for user, _ in sender.dms)  # HOLD notice to Maya
+        assert any(user == "U-sam" and CONF_HIT[0] in text for user, text in sender.dms)
         with db.tx() as cursor:
             cursor.execute(
                 "SELECT payload FROM request_events WHERE request_id = %s "
