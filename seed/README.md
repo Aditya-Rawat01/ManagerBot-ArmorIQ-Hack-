@@ -132,6 +132,25 @@ source. Never a hosted API (R-54). The model cache follows FastEmbed:
 Decisions mirror the freeze (authoritative), the CI conflict (both sides
 authoritative → conflict), and the checklist supersession (v1 → v2 link).
 
+## E17 eval set (`seed/eval/`, P3-08)
+
+Labeled questions for `scripts/eval_e17_grounding.py`; never ingested (the
+ingest reads only the files listed above). Fixed split: `e17_train.json`
+(27 cases, ids `tr-*`) calibrates `MIN_SCORE`; `e17_heldout.json` (20 cases,
+ids `ho-*`) is only measured. Each case is an object with exactly these keys
+(validated by `load_cases`; unknown keys are rejected):
+
+- `id`, `question`, `persona` (`maya`/`sam`/`priya`: the requester whose
+  signed `_ctx` the harness uses), `tiers` (the search tools the plan calls,
+  in order; tiers above the persona's ceiling must be refused);
+- `case_type`: `answerable`, `unrelated`, `weak_evidence`, `conflict`,
+  `superseded`, or `escalation` (PRD §8.3);
+- `expected_answerable`, `expected_source_ids` (answerable: the sources that
+  ground the answer; conflict: the conflicting pair), and
+  `expected_abstain_reason` (`null`, `no_evidence`, or `conflict`).
+
+Synthetic questions only (PRD §0.9).
+
 ## E1 probe record (for P1-06 / #7)
 
 - source_id: `team-friday-deploy-freeze` (team tier, active)

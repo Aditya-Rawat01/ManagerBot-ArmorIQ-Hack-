@@ -1,0 +1,272 @@
+[
+  {
+    "id": "tr-ans-freeze-late-friday",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Can I deploy to production late on a Friday afternoon?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-friday-deploy-freeze"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-freeze-hotfix",
+    "case_type": "answerable",
+    "persona": "maya",
+    "tiers": ["team"],
+    "question": "What does a hotfix need before it can be merged during the deploy freeze?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-friday-deploy-freeze"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-standup-deadline",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "By what time do I need to post my async standup update?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-standup-format"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-rotation-ack",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "How quickly does the on-call primary have to acknowledge a page?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-incident-rotations"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-rotation-handoff",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "What goes into the incident handoff notes before the Monday switch?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-incident-rotations"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-timeout-value",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "What is the gateway timeout for the public API?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-api-timeouts"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-snack-poll",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Which snack came first in the office snack poll?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-office-snacks"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-runway-hires",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team", "confidential"],
+    "question": "How many senior hires can we fund after the Q4 runway review?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-runway-review"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-vendor-cap",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team", "confidential"],
+    "question": "What is the price cap for the observability vendor renewal?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-vendor-renewal"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-ans-workforce-options",
+    "case_type": "answerable",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What options do the workforce planning scenarios for next half contain?",
+    "expected_answerable": true,
+    "expected_source_ids": ["restr-workforce-planning"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-sup-checklist-current",
+    "case_type": "superseded",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "What does the release checklist require before tagging a release?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-release-checklist-v2"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-sup-checklist-august",
+    "case_type": "superseded",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Do we still follow the August release checklist?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-release-checklist-v2"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-esc-api-priya",
+    "case_type": "escalation",
+    "persona": "priya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What happens when a public API request times out at the gateway?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-api-timeouts"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-esc-api-sam",
+    "case_type": "escalation",
+    "persona": "sam",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What happens when a client API key rotation is missed?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-api-key-rotation"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-esc-api-maya",
+    "case_type": "escalation",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "Was an API credential ever exposed, and what lesson became policy?",
+    "expected_answerable": true,
+    "expected_source_ids": ["restr-api-breach-postmortem"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "tr-esc-deny-runway-priya",
+    "case_type": "escalation",
+    "persona": "priya",
+    "tiers": ["team", "confidential"],
+    "question": "How many senior hires can the team fund after the Q4 runway review?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-esc-deny-workforce-sam",
+    "case_type": "escalation",
+    "persona": "sam",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What options do the workforce planning scenarios for next half contain?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-capital",
+    "case_type": "unrelated",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "What is the capital of Australia?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-pasta",
+    "case_type": "unrelated",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "Can you recommend a good pasta recipe for dinner tonight?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-world-cup",
+    "case_type": "unrelated",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "Who won the football world cup in 2018?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-parental-leave",
+    "case_type": "unrelated",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "What is our parental leave policy?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-wifi",
+    "case_type": "unrelated",
+    "persona": "sam",
+    "tiers": ["team", "confidential"],
+    "question": "What is the guest Wi-Fi password in the office?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-nonsense",
+    "case_type": "unrelated",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "asdf qwerty zxcv plonk",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-unrel-k8s-autoscaling",
+    "case_type": "unrelated",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What is our Kubernetes cluster autoscaling policy?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-weak-billing-cost",
+    "case_type": "weak_evidence",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "How much money did the billing anomaly cost us, and which customer was affected?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-weak-billing-invoice",
+    "case_type": "weak_evidence",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Which invoice ID had the billing error last month?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "tr-conflict-ci-runners",
+    "case_type": "conflict",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "Should our CI builds run on hosted or self-hosted runners?",
+    "expected_answerable": false,
+    "expected_source_ids": ["team-ci-runner-hosted", "team-ci-runner-selfhosted"],
+    "expected_abstain_reason": "conflict"
+  }
+]

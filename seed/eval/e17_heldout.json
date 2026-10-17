@@ -1,0 +1,202 @@
+[
+  {
+    "id": "ho-ans-freeze-cutoff",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "Is there a cutoff time for production deploys on Fridays?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-friday-deploy-freeze"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-standup-live",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Are standups held live every day?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-standup-format"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-rotation-shadow",
+    "case_type": "answerable",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Who shadows the weekly incident rotation?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-incident-rotations"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-timeout-retries",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "Which requests get retried when the gateway times out?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-api-timeouts"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-vendor-lead",
+    "case_type": "answerable",
+    "persona": "maya",
+    "tiers": ["team", "confidential"],
+    "question": "Who leads the technical evaluation for the vendor renewal?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-vendor-renewal"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-runway-contractors",
+    "case_type": "answerable",
+    "persona": "sam",
+    "tiers": ["team", "confidential"],
+    "question": "What has to happen to contractor spend before we can add senior hires?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-runway-review"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-ans-workforce-decision",
+    "case_type": "answerable",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "Is any of the workforce planning scenarios already a decision?",
+    "expected_answerable": true,
+    "expected_source_ids": ["restr-workforce-planning"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-sup-checklist-green-build",
+    "case_type": "superseded",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Is a green build enough to tag a release?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-release-checklist-v2"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-esc-api-priya",
+    "case_type": "escalation",
+    "persona": "priya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What should a client show when the API gateway returns a timeout?",
+    "expected_answerable": true,
+    "expected_source_ids": ["team-api-timeouts"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-esc-api-sam",
+    "case_type": "escalation",
+    "persona": "sam",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "How long is the overlap window when client API keys rotate?",
+    "expected_answerable": true,
+    "expected_source_ids": ["conf-api-key-rotation"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-esc-api-maya",
+    "case_type": "escalation",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "Was customer data touched when the staging credential leaked?",
+    "expected_answerable": true,
+    "expected_source_ids": ["restr-api-breach-postmortem"],
+    "expected_abstain_reason": null
+  },
+  {
+    "id": "ho-esc-deny-vendor-priya",
+    "case_type": "escalation",
+    "persona": "priya",
+    "tiers": ["team", "confidential"],
+    "question": "What is the price cap for the observability vendor renewal?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-esc-deny-breach-sam",
+    "case_type": "escalation",
+    "persona": "sam",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "Was customer data touched when the staging credential leaked?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-unrel-weather",
+    "case_type": "unrelated",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "What is the weather forecast for tomorrow?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-unrel-expenses",
+    "case_type": "unrelated",
+    "persona": "sam",
+    "tiers": ["team", "confidential"],
+    "question": "How do I file an expense report for a business trip?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-unrel-ticker",
+    "case_type": "unrelated",
+    "persona": "maya",
+    "tiers": ["team", "confidential", "restricted"],
+    "question": "What is the company's stock ticker symbol?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-unrel-translate",
+    "case_type": "unrelated",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Translate 'good morning' into French.",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-unrel-equipment-stipend",
+    "case_type": "unrelated",
+    "persona": "sam",
+    "tiers": ["team"],
+    "question": "What is our policy on remote work equipment stipends?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-weak-billing-fixed",
+    "case_type": "weak_evidence",
+    "persona": "maya",
+    "tiers": ["team"],
+    "question": "Did the billing anomaly get fixed, and on what date?",
+    "expected_answerable": false,
+    "expected_source_ids": [],
+    "expected_abstain_reason": "no_evidence"
+  },
+  {
+    "id": "ho-conflict-ci-selfhost",
+    "case_type": "conflict",
+    "persona": "priya",
+    "tiers": ["team"],
+    "question": "Did the team decide to self-host the CI runners?",
+    "expected_answerable": false,
+    "expected_source_ids": ["team-ci-runner-hosted", "team-ci-runner-selfhosted"],
+    "expected_abstain_reason": "conflict"
+  }
+]
