@@ -232,34 +232,29 @@ def test_proxy_shape_is_always_not_tested() -> None:
     assert "no verified" in only["evidence"]
 
 
-def test_direct_layer_needs_server_code() -> None:
-    assert probe.direct_layer(200, "invalid_context") == "tool_server_rule"
-    assert probe.direct_layer(200, "replay") == "tool_server_rule"
-    assert probe.direct_layer(401, None) == "unknown"
-    assert probe.direct_layer(503, None) == "unknown"
-    assert probe.direct_layer(None, None) == "unknown"
-    assert probe.direct_layer(200, "mystery") == "unknown"
+def test_direct_calls_read_sse_frames__offline_mock_transport() -> None:
+    """B2 (api job, no `mcp` installed): an SSE `data:` frame and the bearer
+    guard's JSON are read; `response.json()` on SSE would have lost both."""
+    import httpx
 
+    def toolserver(request: httpx.Request) -> httpx.Response:
+        if "authorization" not in request.headers:
+            return httpx.Response(401, json={"error": {"code": "unauthorized", "message": "m"}})
+        frame = (
+            'event: message\ndata: {"jsonrpc":"2.0","id":"x","result":{"isError":true,'
+            '"content":[{"type":"text","text":"{\\"code\\": \\"invalid_context\\"}"}]}}\n\n'
+        )
+        return httpx.Response(200, text=frame, headers={"content-type": "text/event-stream"})
 
-def test_parse_direct_result_shapes() -> None:
-    import json
-
-    body = (
-        200,
-        {
-            "result": {
-                "isError": True,
-                "content": [
-                    {"type": "text", "text": json.dumps({"code": "replay", "message": "x"})}
-                ],
-            }
-        },
-    )
-    assert probe.parse_direct_result(body) == (200, "replay")
-    assert probe.parse_direct_result((401, {"error": {"code": -32000}})) == (401, None)
-    assert probe.parse_direct_result((200, {"result": {"isError": False}})) == (200, None)
-    assert probe.parse_direct_result((None, None)) == (None, None)
-    assert probe.parse_direct_result((200, "not-a-dict")) == (200, None)
+    with httpx.Client(
+        base_url="https://toolserver.offline.invalid", transport=httpx.MockTransport(toolserver)
+    ) as client:
+        rows = probe.group_direct(client, FAKE_BEARER)
+    by_case = {item["case"]: item for item in rows if "case" in item}
+    assert by_case["direct-no-ctx"]["code"] == "invalid_context"
+    assert by_case["direct-no-ctx"]["layer"] == "tool_server_rule"
+    assert by_case["direct-no-bearer"]["code"] == "unauthorized"
+    _assert_no_fake_values(probe.render_table(rows), repr(rows))
 
 
 def test_row_has_all_evidence_fields() -> None:

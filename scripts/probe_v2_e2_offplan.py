@@ -110,11 +110,11 @@ def missing_required(settings: Any, direct: DirectConfig, ledger_dsn: str | None
     return missing
 
 
-# §4 tool-server rejection codes (SHARED_INTERFACES §4): the server speaking
-# for itself. Anything else (HTTP status, transport error) is NOT a layer.
+# §4 tool-server rejection codes (SHARED_INTERFACES §4; services/toolserver
+# security.py + schemas.py): the server speaking for itself inside the MCP
+# result. Anything else (HTTP status, transport error) is NOT a layer.
 TOOL_SERVER_CODES = frozenset(
     {
-        "unauthenticated",
         "invalid_context",
         "context_expired",
         "replay",
@@ -124,43 +124,165 @@ TOOL_SERVER_CODES = frozenset(
         "internal",
     }
 )
+# Top-level `{"error": {"code": ...}}` codes of the tool server's bearer guard
+# (services/toolserver/security.py `BearerTokenGuard`): 401 / 503 JSON.
+BEARER_GUARD_CODES = frozenset({"unauthorized", "endpoint_not_configured"})
+MEMORY_PATH = "/memory/mcp"
+DIRECT_TIMEOUT_S = 90.0  # Render Free may cold-start (~22 s observed, P1-05)
 
 
-def direct_layer(http_status: int | None, code: str | None) -> str:
+@dataclass(frozen=True)
+class McpReply:
+    """What one direct HTTP reply says (never the result body itself).
+
+    ``code``: the §4 code from the MCP result text, or the bearer guard's
+    error code. ``source`` says which shape carried it.
+    """
+
+    http_status: int | None
+    code: str | None
+    source: str
+    is_error: bool | None = None
+    ledger_entry_id: str | None = None
+    original_entry_id: str | None = None
+    meta_keys: tuple[str, ...] = ()
+    jsonrpc_error: int | None = None
+
+
+def _json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _sse_first_message(text: str) -> Any:
+    """First `data:` frame of an SSE body as JSON (cf. tests/toolserver/conftest.py)."""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("data:"):
+            return _json(line.removeprefix("data:").strip())
+    return None
+
+
+def _from_jsonrpc(status: int | None, message: Any, source: str) -> McpReply:
+    if not isinstance(message, dict):
+        return McpReply(status, None, f"{source} (no JSON-RPC message)")
+    error = message.get("error")
+    if isinstance(error, dict):
+        rpc_code = error.get("code")
+        return McpReply(
+            status,
+            None,
+            f"{source} (JSON-RPC error)",
+            jsonrpc_error=rpc_code if isinstance(rpc_code, int) else None,
+        )
+    result = message.get("result")
+    if not isinstance(result, dict):
+        return McpReply(status, None, f"{source} (no result)")
+    meta = result.get("_meta") if isinstance(result.get("_meta"), dict) else {}
+
+    def ref(key: str) -> str | None:
+        value = meta.get(key)
+        return value if isinstance(value, str) and value else None
+
+    code: str | None = None
+    is_error = result.get("isError") is True
+    if is_error:
+        content = result.get("content")
+        first = content[0] if isinstance(content, list) and content else None
+        text = first.get("text") if isinstance(first, dict) else None
+        body = _json(text) if isinstance(text, str) else None
+        found = body.get("code") if isinstance(body, dict) else None
+        code = found if isinstance(found, str) and found in TOOL_SERVER_CODES else None
+    return McpReply(
+        status,
+        code,
+        source,
+        is_error=is_error,
+        ledger_entry_id=ref("ledger_entry_id"),
+        original_entry_id=ref("original_entry_id"),
+        meta_keys=tuple(sorted(str(key) for key in meta)),
+    )
+
+
+def parse_mcp_response(status: int | None, content_type: str, text: str) -> McpReply:
+    """Read one tools/call reply. Never raises on hostile shapes.
+
+    The deployed server answers MCP calls as SSE (`json_response=False`,
+    services/toolserver/main.py): the JSON-RPC message is the `data:` frame.
+    The bearer guard answers 401/503 with `{"error": {"code": ...}}` JSON.
+    """
+    kind = (content_type or "").split(";")[0].strip().lower()
+    if kind == "text/event-stream":
+        return _from_jsonrpc(status, _sse_first_message(text or ""), "sse data frame")
+    if kind == "application/json":
+        body = _json(text or "")
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict) and isinstance(error.get("code"), str):
+            return McpReply(status, error["code"], "bearer guard json")
+        return _from_jsonrpc(status, body, "json body")
+    return McpReply(status, None, f"unparsed ({kind or 'no content type'})")
+
+
+def direct_layer(reply: McpReply) -> str:
     """Enforcing layer for a direct tool-server call.
 
-    Only a §4 code from the response body names the tool-server layer;
-    transport outcomes (401/503/timeout) name nothing and stay unknown.
+    Only the server's own code names the tool-server layer: a §4 code in the
+    MCP result, or the bearer guard's code on its 401/503. Transport
+    outcomes (timeouts, other statuses, unparsed bodies) stay unknown.
     """
-    if code in TOOL_SERVER_CODES:
+    if reply.code in TOOL_SERVER_CODES:
+        return "tool_server_rule"
+    if reply.code in BEARER_GUARD_CODES and reply.http_status in (401, 503):
         return "tool_server_rule"
     return "unknown"
 
 
-def parse_direct_result(body: Any) -> tuple[int | None, str | None]:
-    """Extract (http_status, §4 code) from a tools/call round trip.
+def describe_reply(reply: McpReply) -> str:
+    """One-line observation (codes and references only, never the body)."""
+    parts = [f"http={reply.http_status}", f"code={reply.code}"]
+    if reply.jsonrpc_error is not None:
+        parts.append(f"jsonrpc_error={reply.jsonrpc_error}")
+    if reply.is_error is False:
+        parts.append("isError=false")
+    if reply.ledger_entry_id:
+        parts.append(f"ledger_entry_id={reply.ledger_entry_id}")
+    if reply.original_entry_id:
+        parts.append(f"original_entry_id={reply.original_entry_id}")
+    return " ".join(parts) + f" ({reply.source})"
 
-    Returns (None, None) on transport failure; the code only when the body
-    carries a §4-shaped error. Never raises on hostile shapes.
-    """
-    status, payload = body
-    if not isinstance(payload, dict):
-        return status, None
-    result = payload.get("result")
-    if isinstance(result, dict) and result.get("isError") is True:
-        content = result.get("content")
-        first = content[0] if isinstance(content, list) and content else None
-        text = first.get("text") if isinstance(first, dict) else None
-        try:
-            parsed = json.loads(text) if isinstance(text, str) else None
-        except ValueError:
-            parsed = None
-        code = parsed.get("code") if isinstance(parsed, dict) else None
-        if isinstance(code, str) and code in TOOL_SERVER_CODES:
-            return status, code
-    if isinstance(payload.get("error"), dict):
-        return status, None
-    return status, None
+
+def build_direct_client(base_url: str) -> Any:
+    """Real HTTP client for direct calls (operator path only; tests inject one)."""
+    import httpx
+
+    return httpx.Client(base_url=base_url, timeout=DIRECT_TIMEOUT_S, follow_redirects=False)
+
+
+def post_tool_call(
+    client: Any, bearer: str | None, tool: str, arguments: dict[str, Any], rpc_id: str
+) -> McpReply:
+    """POST one JSON-RPC `tools/call` to `/memory/mcp` (bearer only, no ArmorIQ)."""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
+    payload = {
+        "jsonrpc": "2.0",
+        "id": rpc_id,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": arguments},
+    }
+    try:
+        response = client.post(MEMORY_PATH, json=payload, headers=headers)
+    except Exception as exc:
+        return McpReply(None, None, f"transport error ({type(exc).__name__})")
+    return parse_mcp_response(
+        response.status_code, response.headers.get("content-type", ""), response.text
+    )
 
 
 def row(
@@ -170,7 +292,8 @@ def row(
     observed: str,
     layer: str,
     evidence: str,
-) -> dict[str, str]:
+    **facts: Any,
+) -> dict[str, Any]:
     return {
         "group": group,
         "attempt": attempt,
@@ -178,6 +301,7 @@ def row(
         "observed": observed,
         "layer": layer,
         "evidence": evidence,
+        **facts,
     }
 
 
@@ -260,59 +384,61 @@ def group_proxy_shape() -> list[dict[str, str]]:
     ]
 
 
-def group_direct(base_url: str, bearer: str) -> list[dict[str, str]]:
-    """Group 4 (§9.4): bearer-only direct calls against the deployed server."""
-    import httpx
-
-    calls = (
-        ("no _ctx", {"query": "runway", "limit": 3}),
-        ("forged _ctx", {"query": "runway", "limit": 3, "_ctx": "forged-token"}),
+def direct_row(case: str, attempt: str, expected: str, reply: McpReply) -> dict[str, Any]:
+    """Evidence row for one direct call: the label comes only from the
+    server's own code (SSE data frame or bearer-guard JSON)."""
+    return row(
+        group="direct",
+        attempt=attempt,
+        expected=expected,
+        observed=describe_reply(reply),
+        layer=direct_layer(reply),
+        evidence=f"tool-server reply code ({reply.source}) + Render log",
+        case=case,
+        code=reply.code,
+        http_status=reply.http_status,
+        source=reply.source,
+        ledger_entry_id=reply.ledger_entry_id,
+        original_entry_id=reply.original_entry_id,
     )
-    rows = []
-    for label, args in calls:
-        try:
-            response = httpx.post(
-                f"{base_url.rstrip('/')}/memory/mcp",
-                json={
-                    "jsonrpc": "2.0",
-                    "id": "e2-probe",
-                    "method": "tools/call",
-                    "params": {"name": "knowledge_search_team", "arguments": args},
-                },
-                headers={
-                    "Authorization": f"Bearer {bearer}",
-                    "Accept": "application/json, text/event-stream",
-                    "Content-Type": "application/json",
-                },
-                timeout=60.0,
-            )
-            try:
-                body: Any = response.json()
-            except ValueError:
-                body = None
-        except Exception as exc:
-            rows.append(
-                row(
-                    group="direct",
-                    attempt=f"direct call, {label}",
-                    expected="§4 rejection code",
-                    observed=f"transport failure ({type(exc).__name__})",
-                    layer="unknown",
-                    evidence="no response received; layer cannot be determined",
-                )
-            )
-            continue
-        status, code = parse_direct_result((response.status_code, body))
-        rows.append(
-            row(
-                group="direct",
-                attempt=f"direct call, {label}",
-                expected="§4 rejection code (invalid_context)",
-                observed=f"http={status} code={code}",
-                layer=direct_layer(status, code),
-                evidence="response body §4 code (server speaking) + Render log",
-            )
-        )
+
+
+def group_direct(client: Any, bearer: str) -> list[dict[str, Any]]:
+    """Group 4 (§9.4): direct calls to the tool server (no ArmorIQ).
+
+    ``client`` is an httpx-style client rooted at the tool-server base URL
+    (`build_direct_client`; tests pass a `TestClient`). The bearer is sent
+    as a header only and never printed.
+    """
+    team = "knowledge_search_team"
+    args = {"query": "quokka", "limit": 3}
+    calls = (
+        (
+            "direct-no-bearer",
+            "direct call, no bearer",
+            "401 unauthorized (bearer guard)",
+            None,
+            dict(args),
+        ),
+        (
+            "direct-no-ctx",
+            "direct call, bearer only, no `_ctx`",
+            "invalid_context",
+            bearer,
+            dict(args),
+        ),
+        (
+            "direct-forged-ctx",
+            "direct call, forged (malformed) `_ctx`",
+            "invalid_context",
+            bearer,
+            {**args, "_ctx": "forged.token"},
+        ),
+    )
+    rows = [
+        direct_row(case, attempt, expected, post_tool_call(client, key, team, arguments, case))
+        for case, attempt, expected, key, arguments in calls
+    ]
     rows.append(
         row(
             group="direct",
@@ -321,6 +447,7 @@ def group_direct(base_url: str, bearer: str) -> list[dict[str, str]]:
             observed="pending: needs a prior live jti (e.g. from E1)",
             layer="unknown",
             evidence="operator replays the E1 jti after a live E1",
+            case="direct-replay",
         )
     )
     return rows
@@ -371,7 +498,8 @@ async def run_probe(
     rows.extend(await group_off_plan(gateway, handle, ctx))
     rows.extend(await group_tamper(gateway, handle, ctx))
     rows.extend(group_proxy_shape())
-    rows.extend(group_direct(direct.base_url, direct.bearer or ""))
+    with build_direct_client(direct.base_url) as client:
+        rows.extend(group_direct(client, direct.bearer or ""))
     report = [
         "### E2 — off-plan and tampered-call enforcement",
         f"- Request: {ctx.request_id} (Maya, team-only plan)",
