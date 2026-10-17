@@ -998,10 +998,14 @@ class _DelegationRecorder:
 def _delegation_params(amount: Any) -> Any:
     from armoriq_sdk.models import DelegationRequestParams
 
-    return DelegationRequestParams.model_construct(tool="knowledge_search_confidential", amount=amount)
+    return DelegationRequestParams.model_construct(
+        tool="knowledge_search_confidential", amount=amount
+    )
 
 
-@pytest.mark.parametrize(("amount", "expected"), [(0, 0.01), (None, 0.01), (0.001, 0.01), (2.5, 2.5)])
+@pytest.mark.parametrize(
+    ("amount", "expected"), [(0, 0.01), (None, 0.01), (0.001, 0.01), (2.5, 2.5)]
+)
 def test_delegation_amount_is_clamped_to_the_platform_minimum(amount: Any, expected: float) -> None:
     """armoriq-sdk 0.6.10 sends `amount or 0`; the delegation API rejects < 0.01, so
     every HOLD failed to reach the approver. Only the amount changes."""

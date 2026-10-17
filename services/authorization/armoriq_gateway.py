@@ -18,6 +18,7 @@ decisions (ADR-026).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -162,10 +163,9 @@ def _clamp_delegation_amount(client: Any) -> None:
         return original(params, *args, **kwargs)
 
     _clamped._proxylead_clamped = True  # type: ignore[attr-defined]
-    try:
+    # A read-only fake/stub (AttributeError/TypeError) is left alone.
+    with contextlib.suppress(AttributeError, TypeError):
         client.create_delegation_request = _clamped
-    except (AttributeError, TypeError):  # read-only fake/stub: leave it alone
-        pass
 
 
 def sign_ctx_fields(fields: Mapping[str, Any], secret: str) -> str:
