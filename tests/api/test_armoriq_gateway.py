@@ -981,3 +981,54 @@ def test_parses_what_the_tool_server_emits__offline_fake_sdk() -> None:
     assert rowless.invocation.status is ToolExecutionStatus.REJECTED_BY_TOOL_SERVER
     assert rowless.invocation.error_code == "internal"
     assert rowless.decision.source is DecisionSource.TOOL_SERVER_RULE
+
+
+# --- HOLD delegation amount (E3 live finding, 18 Oct 2026) -------------------------
+
+
+class _DelegationRecorder:
+    def __init__(self) -> None:
+        self.sent: list[Any] = []
+
+    def create_delegation_request(self, params: Any) -> str:
+        self.sent.append(params)
+        return "dlg-fake"
+
+
+def _delegation_params(amount: Any) -> Any:
+    from armoriq_sdk.models import DelegationRequestParams
+
+    return DelegationRequestParams.model_construct(
+        tool="knowledge_search_confidential", amount=amount
+    )
+
+
+@pytest.mark.parametrize(
+    ("amount", "expected"), [(0, 0.01), (None, 0.01), (0.001, 0.01), (2.5, 2.5)]
+)
+def test_delegation_amount_is_clamped_to_the_platform_minimum(amount: Any, expected: float) -> None:
+    """armoriq-sdk 0.6.10 sends `amount or 0`; the delegation API rejects < 0.01, so
+    every HOLD failed to reach the approver. Only the amount changes."""
+    from services.authorization.armoriq_gateway import _clamp_delegation_amount
+
+    client = _DelegationRecorder()
+    _clamp_delegation_amount(client)
+    _clamp_delegation_amount(client)  # idempotent: wrapped once
+    assert client.create_delegation_request(_delegation_params(amount)) == "dlg-fake"
+    sent = client.sent[-1]
+    assert sent.amount == expected
+    assert sent.tool == "knowledge_search_confidential"
+
+
+def test_real_sdk_clients_get_the_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gateway's own client factory (also the probes' inner factory) clamps."""
+    from services.authorization import armoriq_gateway as module
+
+    class _FakeSdkClient(_DelegationRecorder):
+        def __init__(self, api_key: str, agent_id: str) -> None:
+            super().__init__()
+
+    monkeypatch.setattr(module, "ArmorIQClient", _FakeSdkClient)
+    client = ArmorIQGateway(_settings())._build_client("m-sam")
+    client.create_delegation_request(_delegation_params(0))
+    assert client.sent[-1].amount == 0.01

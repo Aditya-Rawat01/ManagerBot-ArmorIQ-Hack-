@@ -18,6 +18,7 @@ decisions (ADR-026).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import threading
@@ -134,6 +135,39 @@ CtxSigner = Callable[[Mapping[str, Any], str], str]
 HoldObserver = Callable[[ApprovalStatus], None]
 
 
+# ArmorIQ's delegation (approval) API rejects amounts below 0.01, but
+# armoriq-sdk 0.6.10 ``invoke_with_policy`` sends ``policy_context.amount or 0``
+# for tools without an amount field (all of ours), so every HOLD failed with
+# "Action held for approval (delegation request failed)" (E3, 18 Oct 2026).
+# The SDK's own session path clamps to 0.01 (session.py); do the same here.
+MIN_DELEGATION_AMOUNT = 0.01
+
+
+def _clamp_delegation_amount(client: Any) -> None:
+    """Wrap ``client.create_delegation_request`` once so amount >= 0.01.
+
+    Only the approval request's amount changes; the decision, tool, plan and
+    arguments are untouched, and a HOLD still waits for the console decision.
+    """
+    original = getattr(client, "create_delegation_request", None)
+    if original is None or getattr(original, "_proxylead_clamped", False):
+        return
+
+    def _clamped(params: Any, *args: Any, **kwargs: Any) -> Any:
+        amount = getattr(params, "amount", None)
+        if not isinstance(amount, int | float) or amount < MIN_DELEGATION_AMOUNT:
+            if hasattr(params, "model_copy"):
+                params = params.model_copy(update={"amount": MIN_DELEGATION_AMOUNT})
+            else:
+                params.amount = MIN_DELEGATION_AMOUNT
+        return original(params, *args, **kwargs)
+
+    _clamped._proxylead_clamped = True  # type: ignore[attr-defined]
+    # A read-only fake/stub (AttributeError/TypeError) is left alone.
+    with contextlib.suppress(AttributeError, TypeError):
+        client.create_delegation_request = _clamped
+
+
 def sign_ctx_fields(fields: Mapping[str, Any], secret: str) -> str:
     """Default signer: P1-04 ``sign_ctx`` (``iat``/``exp`` as epoch seconds)."""
     values = dict(fields)
@@ -214,7 +248,9 @@ class ArmorIQGateway:
         key = _secret_value(getattr(self._settings, "armoriq_api_key", None))
         if not key:
             raise sdk_exceptions.ConfigurationException("ARMORIQ_API_KEY is not configured")
-        return ArmorIQClient(api_key=key, agent_id=self._agent_id)
+        client = ArmorIQClient(api_key=key, agent_id=self._agent_id)
+        _clamp_delegation_amount(client)
+        return client
 
     # -- plans ------------------------------------------------------------
 
