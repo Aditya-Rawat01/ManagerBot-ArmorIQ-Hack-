@@ -26,14 +26,16 @@ only, never values).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import re
 import secrets
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -51,6 +53,7 @@ DEFAULT_TOOLSERVER_BASE_URL = "https://managerbot-armoriq-hack.onrender.com"
 EXIT_COMPLETE = 0
 EXIT_ERROR = 1
 EXIT_PREREQUISITES = 2
+EXIT_NOT_COMPLETE = 3
 
 
 class _DirectSettings(BaseSettings):
@@ -310,6 +313,244 @@ def row(
     }
 
 
+# --- independent evidence (I2): wire, SDK exceptions, timestamps -------------------
+
+PRE_NETWORK_LABEL = "armoriq_sdk_plan_check"
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-+/=.]{32,}")
+
+
+def utc_now() -> str:
+    """UTC timestamp with milliseconds, e.g. `2026-10-17T06:37:17.123Z`."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def redact_text(text: str | None, limit: int = 240) -> str | None:
+    """Exception/reason text safe to print: e-mails masked (`e1.mask_emails`),
+    token-like runs (>= 32 chars) replaced, length capped."""
+    if not text:
+        return text
+    masked = e1.mask_emails(text) or ""
+    return _TOKENISH.sub("<redacted>", masked)[:limit]
+
+
+@dataclass
+class WireEvent:
+    """One HTTP request the SDK client sent: method, host, path, status, and
+    for `/invoke` the NAMES of the params sent (never values, headers, or
+    bodies) plus whether each watched injected value went out unchanged."""
+
+    at: str
+    method: str
+    host: str
+    path: str
+    status: int | None = None
+    params_keys: tuple[str, ...] | None = None
+    injected_sent: dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def is_invoke(self) -> bool:
+        return self.method == "POST" and self.path.endswith("/invoke")
+
+
+@dataclass
+class SdkCall:
+    """One gateway call into the SDK client and how it ended (no values)."""
+
+    method: str
+    at: str
+    exception_class: str | None = None
+    # IntentMismatchException only: the SDK sets `action` when it raises on a
+    # proxy HTTP 409 (client.py:976-981), not on its pre-network plan check
+    # (client.py:814-819).
+    proxy_form: bool | None = None
+    message: str | None = None
+    status_code: int | None = None
+
+
+class SdkRecorder:
+    """Evidence about the SDK client, collected through the gateway's
+    `client_factory` seam: httpx event hooks on the client's `http_client`
+    count every request; `RecordingClient` records every exception."""
+
+    def __init__(self) -> None:
+        self.events: list[WireEvent] = []
+        self.calls: list[SdkCall] = []
+        self.watch: dict[str, Any] = {}
+        self.hooked = False
+        self._pending: dict[int, WireEvent] = {}
+
+    def attach(self, http_client: Any) -> bool:
+        hooks = getattr(http_client, "event_hooks", None)
+        if not isinstance(hooks, Mapping):
+            return False
+        http_client.event_hooks = {
+            "request": [*hooks.get("request", []), self._on_request],
+            "response": [*hooks.get("response", []), self._on_response],
+        }
+        self.hooked = True
+        return True
+
+    def _on_request(self, request: Any) -> None:
+        event = WireEvent(
+            at=utc_now(),
+            method=str(request.method),
+            host=str(request.url.host),
+            path=str(request.url.path),
+        )
+        if event.is_invoke:
+            try:
+                body = json.loads(request.content)
+            except Exception:
+                body = None
+            params = body.get("params") if isinstance(body, Mapping) else None
+            if isinstance(params, Mapping):
+                event.params_keys = tuple(sorted(str(key) for key in params))
+                for key, value in self.watch.items():
+                    event.injected_sent[key] = key in params and params[key] == value
+        self.events.append(event)
+        self._pending[id(request)] = event
+
+    def _on_response(self, response: Any) -> None:
+        event = self._pending.pop(id(response.request), None)
+        if event is not None:
+            event.status = int(response.status_code)
+
+
+class RecordingClient:
+    """Wraps the gateway's SDK client (never imports the SDK, ADR-018):
+    attaches the wire hooks and records how each `invoke` /
+    `invoke_with_policy` ended. Everything else passes through."""
+
+    def __init__(self, inner: Any, recorder: SdkRecorder) -> None:
+        self._inner = inner
+        self._recorder = recorder
+        recorder.attach(getattr(inner, "http_client", None))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def _record(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        call = SdkCall(method=method, at=utc_now())
+        self._recorder.calls.append(call)
+        try:
+            return getattr(self._inner, method)(*args, **kwargs)
+        except Exception as exc:
+            call.exception_class = type(exc).__name__
+            if call.exception_class == "IntentMismatchException":
+                call.proxy_form = getattr(exc, "action", None) is not None
+            call.message = redact_text(str(exc))
+            status = getattr(exc, "status_code", None)
+            call.status_code = status if isinstance(status, int) else None
+            raise
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        return self._record("invoke", *args, **kwargs)
+
+    def invoke_with_policy(self, *args: Any, **kwargs: Any) -> Any:
+        return self._record("invoke_with_policy", *args, **kwargs)
+
+
+@dataclass
+class Window:
+    """What happened during one attempt: UTC start/end, SDK requests, SDK
+    calls, and the `_ctx` envelopes the gateway signed."""
+
+    started_at: str
+    ended_at: str = ""
+    wire: list[WireEvent] = field(default_factory=list)
+    calls: list[SdkCall] = field(default_factory=list)
+    signed: list[CapturedCtx] = field(default_factory=list)
+    hooked: bool = False
+
+
+class Observer:
+    """Opens one evidence window per attempt (recorder/capture optional, so
+    the direct-call helpers also work on their own)."""
+
+    def __init__(self, recorder: SdkRecorder | None = None, capture: Any = None) -> None:
+        self.recorder = recorder
+        self.capture = capture
+
+    @contextlib.contextmanager
+    def window(self, watch: Mapping[str, Any] | None = None) -> Iterator[Window]:
+        recorder, capture = self.recorder, self.capture
+        marks = (
+            len(recorder.events) if recorder else 0,
+            len(recorder.calls) if recorder else 0,
+            len(capture.captured) if capture else 0,
+        )
+        if recorder:
+            recorder.watch = dict(watch or {})
+        window = Window(started_at=utc_now(), hooked=bool(recorder and recorder.hooked))
+        try:
+            yield window
+        finally:
+            window.ended_at = utc_now()
+            if recorder:
+                window.wire = recorder.events[marks[0] :]
+                window.calls = recorder.calls[marks[1] :]
+                window.hooked = recorder.hooked
+                recorder.watch = {}
+            if capture:
+                window.signed = capture.captured[marks[2] :]
+
+
+def _statuses(events: list[WireEvent]) -> str:
+    return ", ".join(str(event.status) for event in events) or "no response"
+
+
+def check_wire(item: dict[str, Any]) -> None:
+    """Cross-check a gateway label against the wire and the SDK exception.
+
+    A pre-network label (`armoriq_sdk_plan_check`) needs zero requests to
+    the proxy `/invoke` and a pre-network-form IntentMismatchException; a
+    request where the label claims none is flagged (a proxy 409 names the
+    proxy). A reported tool-server result needs a proxy request.
+    """
+    window: Window | None = item.get("window")
+    label = item.get("gateway_label")
+    if window is None or label is None:
+        return
+    flags: list[str] = item.setdefault("flags", [])
+    invokes = [event for event in window.wire if event.is_invoke]
+    mismatch = next(
+        (call for call in window.calls if call.exception_class == "IntentMismatchException"),
+        None,
+    )
+    if label == PRE_NETWORK_LABEL:
+        if not window.hooked:
+            flags.append(
+                "no wire hooks on the SDK client: the pre-network claim of "
+                "armoriq_sdk_plan_check cannot be checked"
+            )
+            item["layer"] = "unknown (no wire evidence)"
+        elif invokes:
+            flags.append(
+                "the label armoriq_sdk_plan_check claims a pre-network rejection, but "
+                f"{len(invokes)} request(s) went to the proxy /invoke (HTTP "
+                f"{_statuses(invokes)}): gateway ICR"
+            )
+            if any(event.status == 409 for event in invokes):
+                item["layer"] = (
+                    "armoriq_proxy_decision (HTTP 409 from the proxy; gateway label "
+                    "armoriq_sdk_plan_check: ICR)"
+                )
+            else:
+                item["layer"] = "unknown (gateway label contradicted by the wire)"
+        elif mismatch is None or mismatch.proxy_form:
+            flags.append("no pre-network IntentMismatchException was observed for this label")
+            item["layer"] = "unknown (no SDK exception evidence)"
+        else:
+            item["wire_ok"] = True
+        return
+    reached = item.get("status") in ("executed", "rejected_by_tool_server", "unknown")
+    proxy_decided = label == "armoriq_policy_decision" and item.get("gateway_outcome") == "block"
+    if (reached or proxy_decided) and window.hooked and not invokes:
+        flags.append("a proxy/tool-server result was reported but no request reached /invoke")
+    elif reached or proxy_decided:
+        item["wire_ok"] = window.hooked
+
+
 E2_TOOL = "knowledge_search_team"
 E2_QUERY = e1.E1_QUERY  # the P2-03 seed phrase (team tier)
 E2_LIMIT = e1.E1_LIMIT
@@ -391,7 +632,18 @@ async def start_case_plan(
     )
 
 
-async def group_off_plan(gateway: Any, settings: Any) -> list[dict[str, Any]]:
+def gateway_facts(decision: Any) -> dict[str, Any]:
+    """The gateway's own verdict, kept apart from the evidence-checked layer."""
+    return {
+        "gateway_label": decision.source.value,
+        "gateway_outcome": decision.outcome.value,
+        "reason": e1.mask_emails(decision.reason),
+    }
+
+
+async def group_off_plan(
+    gateway: Any, settings: Any, observer: Observer | None = None
+) -> list[dict[str, Any]]:
     """Group 1 (§9.1): unplanned tool NAMES under a team-only plan.
 
     `attempt_off_plan` calls the SDK's plain `invoke`, which compares the
@@ -413,13 +665,15 @@ async def group_off_plan(gateway: Any, settings: Any) -> list[dict[str, Any]]:
     ctx, _, handle, failed = await start_case_plan(
         gateway, settings, attempts[0][0], "off-plan attempts", expected
     )
+    observer = observer or Observer()
     rows = []
     for case, tool, args in attempts:
         attempt = f"unplanned `{tool.value}` under a knowledge_search_team-only plan"
         if failed is not None:
             rows.append({**failed, "case": case, "attempt": attempt})
             continue
-        decision = await gateway.attempt_off_plan(handle, tool, dict(args), ctx)
+        with observer.window() as window:
+            decision = await gateway.attempt_off_plan(handle, tool, dict(args), ctx)
         rows.append(
             row(
                 group="off-plan",
@@ -427,20 +681,22 @@ async def group_off_plan(gateway: Any, settings: Any) -> list[dict[str, Any]]:
                 expected=expected,
                 observed=f"{decision.outcome.value} ({decision.source.value})",
                 layer=decision.source.value,
-                evidence="gateway decision (SDK mismatch exception)",
+                evidence="gateway decision + 0 proxy requests (wire hooks) + SDK exception form",
                 case=case,
                 request_id=ctx.request_id,
                 tool=tool.value,
+                window=window,
+                **gateway_facts(decision),
             )
         )
     return rows
 
 
-def validator_row(key: str, value: Any) -> dict[str, Any]:
+def validator_row(key: str, value: Any, observer: Observer | None = None) -> dict[str, Any]:
     """§9.3 first half: the PlannedToolCall validator on the injected key.
 
-    Local only (no network). Prints the pydantic error types, never the
-    offending value.
+    Local only (the window shows no SDK request). Prints the pydantic error
+    types, never the offending value.
     """
     from pydantic import ValidationError
 
@@ -448,25 +704,31 @@ def validator_row(key: str, value: Any) -> dict[str, Any]:
 
     attempt = f"planned step with `{key}` added, built through the PlannedToolCall validator"
     expected = "rejected by the validator (application_rule) before any network call"
-    try:
-        PlannedToolCall(
-            step_index=0,
-            mcp=McpEndpoint.MEMORY,
-            tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
-            arguments={**planned_arguments(), key: value},
-            purpose="E2 tamper probe",
-        )
-    except ValidationError as exc:
-        kinds = ", ".join(sorted({str(error.get("type")) for error in exc.errors()}))
+    error: ValidationError | None = None
+    with (observer or Observer()).window() as window:
+        try:
+            PlannedToolCall(
+                step_index=0,
+                mcp=McpEndpoint.MEMORY,
+                tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
+                arguments={**planned_arguments(), key: value},
+                purpose="E2 tamper probe",
+            )
+        except ValidationError as exc:
+            error = exc
+    if error is not None:
+        kinds = ", ".join(sorted({str(item.get("type")) for item in error.errors()}))
         return row(
             group="tamper",
             attempt=attempt,
             expected=expected,
             observed=f"rejected locally: ValidationError ({kinds})",
             layer="application_rule",
-            evidence="PlannedToolCall validator (services/contracts/models.py)",
+            evidence="PlannedToolCall validator (services/contracts/models.py); 0 requests",
             case=f"validator-{key}",
             key=key,
+            window=window,
+            local_ok=not window.wire,
         )
     return row(
         group="tamper",
@@ -477,6 +739,7 @@ def validator_row(key: str, value: Any) -> dict[str, Any]:
         evidence="none",
         case=f"validator-{key}",
         key=key,
+        window=window,
     )
 
 
@@ -498,9 +761,17 @@ def invoke_layer(described: Mapping[str, Any], *, strips: bool = False) -> str:
 
 
 def _invoke_observed(described: Mapping[str, Any]) -> str:
+    """ArmorIQ's part and the tool server's part of one invoke, separately."""
+    status = described.get("invocation_status")
+    source = described.get("decision_source")
+    if status in ("executed", "rejected_by_tool_server", "unknown"):
+        armoriq = "ArmorIQ: allowed (the proxy forwarded the call)"
+    elif source == "armoriq_policy_decision":
+        armoriq = f"ArmorIQ: {described['decision_outcome']} (armoriq_policy_decision)"
+    else:
+        armoriq = f"gateway: {described['decision_outcome']} ({source})"
     return (
-        f"ArmorIQ: {described['decision_outcome']} ({described['decision_source']}); "
-        f"tool server: status={described['invocation_status']} "
+        f"{armoriq}; tool server: status={status} "
         f"error_code={described['error_code']} "
         f"ledger_entry_id={described['ledger_entry_id']}"
     )
@@ -515,14 +786,18 @@ async def run_tampered_invoke(
     expected: str,
     arguments: Mapping[str, Any],
     strips: bool,
+    watch: Mapping[str, Any] | None = None,
+    observer: Observer | None = None,
 ) -> dict[str, Any]:
     """Invoke step 0 of a fresh valid plan with ``arguments`` swapped in
     (`gateway.invoke_step(handle, 0, ctx, tampered_plan)`): the SDK finds the
-    step by its (unchanged) action name, so the request goes to the proxy."""
+    step by its (unchanged) action name, so the request goes to the proxy.
+    ``watch`` names injected values to look for in the `/invoke` body."""
     ctx, plan, handle, failed = await start_case_plan(gateway, settings, case, attempt, expected)
     if failed is not None:
         return failed
-    outcome = await gateway.invoke_step(handle, 0, ctx, tampered_plan(plan, arguments))
+    with (observer or Observer()).window(watch) as window:
+        outcome = await gateway.invoke_step(handle, 0, ctx, tampered_plan(plan, arguments))
     described = e1.describe_outcome(outcome)
     return row(
         group="tamper",
@@ -538,10 +813,14 @@ async def run_tampered_invoke(
         error_code=described["error_code"],
         ledger_entry_id=described["ledger_entry_id"],
         business_arguments={k: v for k, v in arguments.items() if not k.startswith("_")},
+        window=window,
+        **gateway_facts(outcome.decision),
     )
 
 
-async def group_tamper(gateway: Any, settings: Any) -> list[dict[str, Any]]:
+async def group_tamper(
+    gateway: Any, settings: Any, observer: Observer | None = None
+) -> list[dict[str, Any]]:
     """Group 3 (§9.3): tampering with the PLANNED step under a valid plan.
 
     The changed query asks the server-side argument-binding question. Each
@@ -561,10 +840,11 @@ async def group_tamper(gateway: Any, settings: Any) -> list[dict[str, Any]]:
             ),
             arguments=planned_arguments(TAMPERED_QUERY),
             strips=False,
+            observer=observer,
         )
     ]
     for key, value in TAMPER_INJECTIONS:
-        rows.append(validator_row(key, value))
+        rows.append(validator_row(key, value, observer))
         rows.append(
             await run_tampered_invoke(
                 gateway,
@@ -574,6 +854,8 @@ async def group_tamper(gateway: Any, settings: Any) -> list[dict[str, Any]]:
                 expected=_TAMPER_EXPECTED[key],
                 arguments={**planned_arguments(), key: value},
                 strips=key.startswith("_"),
+                watch={key: value},
+                observer=observer,
             )
         )
     return rows
@@ -611,6 +893,7 @@ def group_proxy_shape() -> list[dict[str, Any]]:
             layer="not tested",
             evidence="none: no verified direct-proxy shape exists in-tree (Day-1 doc rule)",
             case="proxy-shape",
+            window=Window(started_at=utc_now(), ended_at=utc_now()),
         )
     ]
 
@@ -745,7 +1028,23 @@ def mint_ctx(
     return sign_ctx(envelope, secret), jti
 
 
-def direct_replay_row(client: Any, bearer: str, source: ReplaySource) -> dict[str, Any]:
+def observed_call(
+    observer: Observer | None,
+    client: Any,
+    bearer: str | None,
+    tool: str,
+    arguments: dict,
+    case: str,
+) -> tuple[McpReply, Window]:
+    """One direct call inside its own evidence window (UTC timestamps)."""
+    with (observer or Observer()).window() as window:
+        reply = post_tool_call(client, bearer, tool, arguments, case)
+    return reply, window
+
+
+def direct_replay_row(
+    client: Any, bearer: str, source: ReplaySource, observer: Observer | None = None
+) -> dict[str, Any]:
     """Replay (§9.4): POST an already-executed, still-valid `_ctx` again.
 
     Expected `replay` with `_meta.original_entry_id` equal to the first
@@ -769,8 +1068,10 @@ def direct_replay_row(client: Any, bearer: str, source: ReplaySource) -> dict[st
             case="direct-replay",
             code=None,
             jti=source.jti,
+            window=Window(started_at=utc_now(), ended_at=utc_now()),
         )
-    reply = post_tool_call(
+    reply, window = observed_call(
+        observer,
         client,
         bearer,
         "knowledge_search_team",
@@ -778,6 +1079,7 @@ def direct_replay_row(client: Any, bearer: str, source: ReplaySource) -> dict[st
         "direct-replay",
     )
     item = direct_row("direct-replay", attempt, expected, reply)
+    item["window"] = window
     same = reply.original_entry_id == source.ledger_entry_id
     item["observed"] += (
         f"; replayed {age:.0f} s after signing; original_entry_id "
@@ -790,7 +1092,13 @@ def direct_replay_row(client: Any, bearer: str, source: ReplaySource) -> dict[st
 
 
 def group_direct(
-    client: Any, bearer: str, *, ctx_secret: str, request_id: str
+    client: Any,
+    bearer: str,
+    *,
+    ctx_secret: str,
+    request_id: str,
+    observer: Observer | None = None,
+    spacing_s: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Group 4 (§9.4): direct calls to the tool server (no ArmorIQ).
 
@@ -833,10 +1141,12 @@ def group_direct(
         ("direct-expired", "direct call, expired `_ctx` (exp 400 s ago, lifetime 300 s)",
          "context_expired", bearer, team, {**args, "_ctx": expired}),
     )  # fmt: skip
-    return [
-        direct_row(case, attempt, expected, post_tool_call(client, key, tool, arguments, case))
-        for case, attempt, expected, key, tool, arguments in calls
-    ]
+    rows = []
+    for case, attempt, expected, key, tool, arguments in calls:
+        reply, window = observed_call(observer, client, key, tool, arguments, case)
+        rows.append({**direct_row(case, attempt, expected, reply), "window": window})
+        time.sleep(spacing_s)
+    return rows
 
 
 def _cell(value: Any) -> str:
@@ -863,8 +1173,89 @@ def render_table(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _wire_line(window: Window) -> str:
+    if not window.hooked:
+        return "wire: no hooks on an SDK client (no SDK traffic expected, or hooks unavailable)"
+    invokes = [event for event in window.wire if event.is_invoke]
+    if not invokes:
+        return f"wire: {len(window.wire)} request(s) during the attempt (0 to the proxy /invoke)"
+    keys = sorted({key for event in invokes for key in (event.params_keys or ())})
+    line = (
+        f"wire: {len(invokes)} request(s) to the proxy /invoke (HTTP {_statuses(invokes)}); "
+        f"{len(window.wire)} request(s) during the attempt in total; params keys sent: {keys}"
+    )
+    sent: dict[str, bool] = {}
+    for event in invokes:
+        for key, value in event.injected_sent.items():
+            sent[key] = sent.get(key, False) or value
+    for key, value in sent.items():
+        line += f"; `{key}` sent as injected: {'yes' if value else 'no (replaced before sending)'}"
+    return line
+
+
+def _sdk_line(call: SdkCall) -> str:
+    if call.exception_class is None:
+        return f"SDK: {call.method} returned (no exception)"
+    form = ""
+    if call.proxy_form is not None:
+        form = (
+            " (proxy-response form: action attribute set)"
+            if call.proxy_form
+            else " (pre-network form: no action attribute)"
+        )
+    status = f", status_code={call.status_code}" if call.status_code is not None else ""
+    return f'SDK: {call.method} raised {call.exception_class}{form}{status}: "{call.message}"'
+
+
+def render_details(rows: list[dict[str, Any]]) -> str:
+    """Per-attempt evidence: UTC window, gateway verdict and masked reason,
+    SDK exception, wire counts, signed jti(s), tool-server reply, flags."""
+    lines = ["#### Attempt details (UTC; identifiers only, never tokens or values)"]
+    for number, item in enumerate(rows, start=1):
+        window: Window | None = item.get("window")
+        span = f"[{window.started_at} → {window.ended_at}]" if window else "[not timed]"
+        head = f"- #{number} `{item.get('case')}` {span}"
+        if item.get("request_id"):
+            head += f" request_id={item['request_id']}"
+        lines.append(head)
+        if item.get("gateway_label"):
+            lines.append(
+                f"  - gateway: {item.get('gateway_outcome')} ({item['gateway_label']}); "
+                f"reason: {redact_text(item.get('reason'))}"
+            )
+        if window is not None:
+            lines.extend(f"  - {_sdk_line(call)}" for call in window.calls)
+            if item.get("gateway_label"):
+                lines.append(f"  - {_wire_line(window)}")
+            elif window.hooked:
+                lines.append(
+                    f"  - SDK client requests during the attempt: {len(window.wire)} "
+                    "(ArmorIQ not involved)"
+                )
+            if window.signed:
+                lines.append(
+                    "  - signed `_ctx` jti(s): " + ", ".join(entry.jti for entry in window.signed)
+                )
+        if item.get("source"):
+            lines.append(f"  - tool server reply: {item['observed']}")
+        lines.extend(f"  - FLAG: {flag}" for flag in item.get("flags", []))
+    return "\n".join(lines)
+
+
+GATEWAY_ICR_NOTE = (
+    "Gateway ICR (not changed by this PR; steward of "
+    "services/authorization/armoriq_gateway.py): `invoke_step` and "
+    "`attempt_off_plan` map every IntentMismatchException to "
+    "`armoriq_sdk_plan_check`, but armoriq-sdk 0.6.10 raises it both on its "
+    "pre-network plan check (client.py:814-819, no `action` attribute) and on a "
+    "proxy HTTP 409 (client.py:976-981, `action` set). The gateway should tell "
+    "them apart; until then this probe decides from wire evidence and the "
+    "exception form, and flags any contradiction."
+)
+
+
 async def run_baseline(
-    gateway: Any, settings: Any, capture: CtxCapture
+    gateway: Any, settings: Any, capture: CtxCapture, observer: Observer | None = None
 ) -> tuple[dict[str, Any], ReplaySource | None]:
     """The planned call (ALLOW expected): its signed `_ctx` is the replay source."""
     ctx, plan = e1.build_maya_request(settings)
@@ -877,15 +1268,16 @@ async def run_baseline(
             group="baseline",
             attempt=attempt,
             expected=expected,
-            observed=f"plan/mint {decision.outcome.value} ({decision.source.value})",
-            layer=decision.source.value,
+            observed=f"not run: plan/mint {decision.outcome.value} ({decision.source.value})",
+            layer="unknown",
             evidence="gateway log",
             case="planned-baseline",
+            request_id=ctx.request_id,
         ), None
-    mark = len(capture.captured)
-    outcome = await gateway.invoke_step(handle, 0, ctx, plan)
+    with (observer or Observer(capture=capture)).window() as window:
+        outcome = await gateway.invoke_step(handle, 0, ctx, plan)
     described = e1.describe_outcome(outcome)
-    signed = [item for item in capture.since(mark) if item.jti == described["jti"]]
+    signed = [item for item in window.signed if item.jti == described["jti"]]
     source = None
     if described["invocation_status"] == "executed" and described["ledger_entry_id"] and signed:
         source = ReplaySource(
@@ -900,18 +1292,34 @@ async def run_baseline(
         group="baseline",
         attempt=attempt,
         expected=expected,
-        observed=(
-            f"{described['decision_outcome']} ({described['decision_source']}); "
-            f"status={described['invocation_status']} "
-            f"ledger_entry_id={described['ledger_entry_id']} jti={described['jti']}"
-        ),
-        layer=described["decision_source"],
-        evidence="gateway log + `_meta.ledger_entry_id`",
+        observed=_invoke_observed(described),
+        layer=invoke_layer(described),
+        evidence="gateway result + `_meta.ledger_entry_id`",
         case="planned-baseline",
         jti=described["jti"],
         request_id=ctx.request_id,
+        status=described["invocation_status"],
+        error_code=described["error_code"],
+        ledger_entry_id=described["ledger_entry_id"],
+        business_arguments=dict(plan.steps[0].arguments),
+        described=described,
+        window=window,
+        **gateway_facts(outcome.decision),
     )
     return item, source
+
+
+def _replay_not_run(reason: str) -> dict[str, Any]:
+    return row(
+        group="direct",
+        attempt="replayed `_ctx` (same jti, same arguments, within CTX_TTL_S)",
+        expected="replay with original_entry_id = the first call's ledger entry",
+        observed=f"not run: {reason}",
+        layer="unknown",
+        evidence="none",
+        case="direct-replay",
+        window=Window(started_at=utc_now(), ended_at=utc_now()),
+    )
 
 
 async def run_probe(
@@ -929,31 +1337,32 @@ async def run_probe(
     ``sdk_client_factory``, ``direct_client`` and ``ctx_signer_inner`` are
     seams for offline tests only; the operator path builds the gateway's own
     SDK client, a real HTTP client for the base URL, and the real signer.
+    Either way the SDK client is wrapped (`RecordingClient`) through the
+    gateway's `client_factory` seam, so every label is checked on the wire.
     """
     from services.authorization import armoriq_gateway
 
     capture = CtxCapture(ctx_signer_inner)
+    recorder = SdkRecorder()
+    observer = Observer(recorder, capture)
+    holder: dict[str, Any] = {}
+
+    def recording_factory(member_id: str) -> Any:
+        inner = sdk_client_factory or holder["gateway"]._build_client
+        return RecordingClient(inner(member_id), recorder)
+
     gateway = armoriq_gateway.ArmorIQGateway(
-        settings, client_factory=sdk_client_factory, ctx_signer=capture
+        settings, client_factory=recording_factory, ctx_signer=capture
     )
+    holder["gateway"] = gateway
     client = direct_client if direct_client is not None else build_direct_client(direct.base_url)
     try:
-        baseline, replay_source = await run_baseline(gateway, settings, capture)
+        baseline, replay_source = await run_baseline(gateway, settings, capture, observer)
         rows: list[dict[str, Any]] = [baseline]
         if replay_source is not None:
-            rows.append(direct_replay_row(client, direct.bearer or "", replay_source))
+            rows.append(direct_replay_row(client, direct.bearer or "", replay_source, observer))
         else:
-            rows.append(
-                row(
-                    group="direct",
-                    attempt="replayed `_ctx` (same jti, same arguments, within CTX_TTL_S)",
-                    expected="replay with original_entry_id = the first call's ledger entry",
-                    observed="not run: the planned call did not execute with a ledger entry",
-                    layer="unknown",
-                    evidence="none",
-                    case="direct-replay",
-                )
-            )
+            rows.append(_replay_not_run("the planned call did not execute with a ledger entry"))
         await asyncio.sleep(spacing_s)
         rows.extend(
             group_direct(
@@ -961,14 +1370,19 @@ async def run_probe(
                 direct.bearer or "",
                 ctx_secret=e1.secret_text(settings.ctx_secret),
                 request_id=str(baseline.get("request_id") or "e2-direct"),
+                observer=observer,
+                spacing_s=spacing_s,
             )
         )
     finally:
         if direct_client is None:
             client.close()
-    rows.extend(await group_off_plan(gateway, settings))
+    rows.extend(await group_off_plan(gateway, settings, observer))
     rows.extend(group_proxy_shape())
-    rows.extend(await group_tamper(gateway, settings))
+    rows.extend(await group_tamper(gateway, settings, observer))
+    for item in rows:
+        check_wire(item)
+    flagged = [item for item in rows if item.get("flags")]
     report = [
         "### E2 — off-plan and tampered-call enforcement",
         "- Requester: Maya (team-only one-step plans; a fresh plan per invoked case)",
@@ -977,10 +1391,15 @@ async def run_probe(
         "this probe asserts no local execution only.",
         "- Server-side plan binding: tool names: not tested (no verified direct-proxy "
         "shape; the SDK stops unplanned names client-side); " + argument_binding_verdict(rows),
+        f"- {GATEWAY_ICR_NOTE}",
+        "- Flags: "
+        + (", ".join(f"#{rows.index(item) + 1} {item['case']}" for item in flagged) or "none"),
         "",
         render_table(rows),
+        "",
+        render_details(rows),
     ]
-    return 0, "\n".join(report)
+    return (EXIT_NOT_COMPLETE if flagged else EXIT_COMPLETE), "\n".join(report)
 
 
 def _fail(message: str) -> int:
@@ -1006,7 +1425,10 @@ def main(argv: list[str] | None = None) -> int:
     if direct.base_url_problem is not None:
         return _fail(direct.base_url_problem)
     try:
-        code, report = asyncio.run(run_probe(settings, direct=direct, ledger_dsn=ledger_dsn))
+        # Only the gateway's own INFO/WARNING lines (request_id, jti, ledger
+        # reference, exception class) go to stderr, as in E1.
+        with e1.gateway_logs_to_stderr():
+            code, report = asyncio.run(run_probe(settings, direct=direct, ledger_dsn=ledger_dsn))
     except Exception as exc:
         print(f"probe_v2_e2_offplan: probe error ({type(exc).__name__})", file=sys.stderr)
         return EXIT_ERROR

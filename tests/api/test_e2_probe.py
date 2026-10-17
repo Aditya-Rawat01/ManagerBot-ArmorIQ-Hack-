@@ -11,6 +11,7 @@ at temporary env files so a developer `.env` can never make a test go live.
 """
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -453,23 +454,29 @@ class _OfflineSdkClient__offline_fake:
     """Fake ArmorIQ SDK client mirroring the armoriq-sdk 0.6.10 behaviour the
     probe relies on: the pre-network plan-name check (client.py:804-819),
     the `_policy_context` overwrite in `invoke_with_policy` (1671-1673), and
-    a proxy 409 raised as IntentMismatchException(action=...) (976-981).
+    a proxy 409 raised as IntentMismatchException(action=...) (976-981), and
+    a proxy enforcement block raised as PolicyBlockedException (893, 932-941).
     The fake proxy forwards to the fake tool server over a MockTransport, so
-    the probe's wire hooks see every request."""
+    the probe's wire hooks see every request. ``proxy_refuse(body)`` returns
+    an HTTP status to answer instead of forwarding; ``policy_block(body)``
+    returns a block reason."""
 
     def __init__(
         self,
         server: _OfflineToolServer__offline_fake,
         *,
-        proxy_status: dict[str, int] | None = None,
+        proxy_refuse: Callable[[dict], int | None] | None = None,
+        policy_block: Callable[[dict], str | None] | None = None,
+        expose_http_client: bool = True,
     ) -> None:
-        import httpx
-
         self.server = server
-        self.proxy_status = proxy_status or {}
+        self.proxy_refuse = proxy_refuse
+        self.policy_block = policy_block
         self.minted: list[list[dict[str, object]]] = []
         self.invoked: list[tuple[str, str, list[str]]] = []
-        self.http_client = httpx.Client(transport=httpx.MockTransport(self._proxy))
+        self._wire = httpx.Client(transport=httpx.MockTransport(self._proxy))
+        if expose_http_client:
+            self.http_client = self._wire
 
     def for_user(self, email: str) -> object:
         client = self
@@ -496,7 +503,7 @@ class _OfflineSdkClient__offline_fake:
                 f"Plan contains actions: {actions}."
             )
         self.invoked.append((mcp, action, sorted((params or {}).keys())))
-        response = self.http_client.post(
+        response = self._wire.post(
             f"{OFFLINE_PROXY}/invoke",
             json={"mcp": mcp, "action": action, "params": dict(params or {})},
         )
@@ -511,7 +518,15 @@ class _OfflineSdkClient__offline_fake:
                 action=action,
                 status_code=response.status_code,
             )
-        result = response.json()["result"]
+        data = response.json()
+        enforcement = data.get("enforcement")
+        if enforcement:
+            raise sdk_exceptions.PolicyBlockedException(
+                data.get("message") or "Enforcement: block",
+                enforcement_action=enforcement.get("action"),
+                reason=enforcement.get("reason"),
+            )
+        result = data["result"]
         return SimpleNamespace(
             result=result, status="error" if result.get("isError") else "success", verified=True
         )
@@ -537,13 +552,16 @@ class _OfflineSdkClient__offline_fake:
     def _proxy(self, request: httpx.Request) -> httpx.Response:
         import json
 
-        import httpx
-
         body = json.loads(request.content)
-        action = body["action"]
-        if action in self.proxy_status:
-            return httpx.Response(self.proxy_status[action], json={"error": "fake proxy refusal"})
-        result = self.server.call(action, dict(body["params"]))
+        refused = self.proxy_refuse(body) if self.proxy_refuse else None
+        if refused:
+            return httpx.Response(refused, json={"error": "fake proxy refusal"})
+        reason = self.policy_block(body) if self.policy_block else None
+        if reason:
+            return httpx.Response(
+                200, json={"enforcement": {"action": "block", "reason": reason}, "message": "m"}
+            )
+        result = self.server.call(body["action"], dict(body["params"]))
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
 
@@ -560,15 +578,20 @@ def _offline_settings() -> Settings:
 def _offline_run(
     *,
     server: _OfflineToolServer__offline_fake | None = None,
-    proxy_status: dict[str, int] | None = None,
+    proxy_refuse: Callable[[dict], int | None] | None = None,
+    policy_block: Callable[[dict], str | None] | None = None,
+    expose_http_client: bool = True,
     ledger_dsn: str | None = FAKE_DSN,
     **kwargs: object,
 ) -> tuple[int, str, _OfflineToolServer__offline_fake, _OfflineSdkClient__offline_fake]:
     """`probe.run_probe` over the real gateway with the offline fakes."""
-    import httpx
-
     server = server or _OfflineToolServer__offline_fake()
-    sdk = _OfflineSdkClient__offline_fake(server, proxy_status=proxy_status)
+    sdk = _OfflineSdkClient__offline_fake(
+        server,
+        proxy_refuse=proxy_refuse,
+        policy_block=policy_block,
+        expose_http_client=expose_http_client,
+    )
     direct = probe.DirectConfig(
         bearer=FAKE_BEARER, base_url=OFFLINE_BASE_URL, base_url_source="offline test"
     )
@@ -743,3 +766,132 @@ def test_off_plan_cases_are_separate_and_never_reach_the_proxy__offline_fake_sdk
     assert proxied == {"knowledge_search_team"}
     assert not server.egress_rows
     assert all(tool != "send_external_message" for tool, _ in server.executions)
+
+
+# --- I2: independent evidence for every label ----------------------------------------
+
+
+def _details(record: str, case: str) -> str:
+    """The "Attempt details" block of one case."""
+    block: list[str] = []
+    inside = False
+    for line in record.splitlines():
+        if line.startswith("- #"):
+            inside = f"`{case}`" in line
+        elif line.startswith(("#", "- ")) and not line.startswith("  "):
+            inside = False
+        if inside:
+            block.append(line)
+    assert block, f"no details for {case}"
+    return "\n".join(block)
+
+
+def test_off_plan_label_is_backed_by_zero_requests_and_the_exception__offline_fake_sdk() -> None:
+    """I2: the pre-network claim is checked on the wire (httpx hooks on the SDK
+    client via the `client_factory` seam) and by the exception's form."""
+    _, record, _, _ = _offline_run()
+    for case in ("offplan-confidential", "offplan-honeypot"):
+        block = _details(record, case)
+        assert "0 request(s) during the attempt (0 to the proxy /invoke)" in block
+        assert "IntentMismatchException (pre-network form: no action attribute)" in block
+        assert "not found in the original plan" in block
+        assert "FLAG" not in block
+    assert "FLAG" not in record
+
+
+def test_proxy_409_contradicting_the_sdk_label_is_flagged__offline_fake_sdk() -> None:
+    """I2 + ICR: the SDK also raises IntentMismatchException on a proxy 409,
+    which the gateway labels `armoriq_sdk_plan_check`. The wire shows the
+    request, so the probe flags the label, names the proxy, and exits 3."""
+
+    def refuse_changed_query(body: dict) -> int | None:
+        return 409 if body["params"].get("query") == probe.TAMPERED_QUERY else None
+
+    code, record, _, _ = _offline_run(proxy_refuse=refuse_changed_query)
+    block = _details(record, "tamper-query")
+    assert "gateway: block (armoriq_sdk_plan_check)" in block
+    assert "1 request(s) to the proxy /invoke (HTTP 409)" in block
+    assert "IntentMismatchException (proxy-response form: action attribute set)" in block
+    assert "FLAG: the label armoriq_sdk_plan_check claims a pre-network rejection" in block
+    assert "armoriq_proxy_decision (HTTP 409" in _rows_by_case(record)["tamper-query"]
+    assert "Gateway ICR" in record
+    assert code == 3
+
+
+def test_policy_block_reason_is_masked__offline_fake_sdk() -> None:
+    def block_user_email(body: dict) -> str | None:
+        return f"policy denied {FAKE_EMAIL}" if "user_email" in body["params"] else None
+
+    _, record, _, _ = _offline_run(policy_block=block_user_email)
+    block = _details(record, "inject-user_email")
+    assert "gateway: block (armoriq_policy_decision)" in block
+    assert "reason: policy denied m***@e***.com" in block
+    assert "1 request(s) to the proxy /invoke (HTTP 200)" in block
+    assert "armoriq_policy_decision" in _rows_by_case(record)["inject-user_email"]
+    _assert_no_fake_values(record)
+
+
+def test_every_attempt_has_utc_timestamps__offline_fake_sdk() -> None:
+    import re
+
+    _, record, _, _ = _offline_run()
+    stamps = re.findall(
+        r"- #\d+ `[a-z_-]+` \[(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z) → "
+        r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z)\]",
+        record,
+    )
+    assert len(stamps) == 22
+    assert all(start <= end for start, end in stamps)
+
+
+def test_forged_values_on_the_wire__offline_fake_sdk() -> None:
+    """The `/invoke` body shows which injected values left the SDK unchanged
+    (key names and booleans only): `_policy_context` is replaced by the SDK."""
+    _, record, _, _ = _offline_run()
+    assert "`_policy_context` sent as injected: no" in _details(record, "inject-_policy_context")
+    assert "`_approvals` sent as injected: yes" in _details(record, "inject-_approvals")
+    assert "`tier` sent as injected: yes" in _details(record, "inject-tier")
+    for leaked in INJECTED_VALUES:
+        assert leaked not in record
+
+
+def test_pre_network_claim_without_wire_hooks_is_flagged__offline_fake_sdk() -> None:
+    code, record, _, _ = _offline_run(expose_http_client=False)
+    assert "FLAG: no wire hooks on the SDK client" in _details(record, "offplan-confidential")
+    assert code == 3
+
+
+def test_main_shows_gateway_log_lines_on_stderr__offline_fake_sdk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The run is wrapped in `e1.gateway_logs_to_stderr()`: jti and exception
+    class lines reach stderr; the handler is removed afterwards."""
+    import logging
+
+    _write_all_settings(monkeypatch, tmp_path)
+    gateway_logger = logging.getLogger(probe.e1.GATEWAY_LOGGER)
+    handlers = list(gateway_logger.handlers)
+    real_run_probe = probe.run_probe
+
+    async def offline_run_probe(settings: object, **kwargs: object) -> tuple[int, str]:
+        server = _OfflineToolServer__offline_fake()
+        sdk = _OfflineSdkClient__offline_fake(server)
+        with httpx.Client(
+            base_url=OFFLINE_BASE_URL, transport=httpx.MockTransport(server.http)
+        ) as client:
+            return await real_run_probe(
+                _offline_settings(),
+                direct=kwargs["direct"],  # type: ignore[arg-type]
+                ledger_dsn=None,
+                sdk_client_factory=lambda member_id: sdk,
+                direct_client=client,
+                spacing_s=0.0,
+            )
+
+    monkeypatch.setattr(probe, "run_probe", offline_run_probe)
+    probe.main([])
+    captured = capsys.readouterr()
+    assert "[gateway INFO] gateway step ok request_id=" in captured.err
+    assert "[gateway INFO] gateway off-plan blocked" in captured.err
+    assert gateway_logger.handlers == handlers
+    _assert_no_fake_values(captured.out, captured.err)
