@@ -684,6 +684,590 @@
       "title": "KnowledgeSearchResult",
       "type": "object"
     },
+    "ManagerConnectorStatus": {
+      "additionalProperties": false,
+      "description": "One connector tile of ``GET /api/v1/manager/health``.\n\n``status`` is the machine value; ``label`` is the exact wording the\nconsole shows (P4-04 §9.6). ``planned`` is never a fake health result:\nit marks a connector that does not exist yet (Gmail, Drive, Meet).",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "connected",
+            "unavailable",
+            "planned"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "label"
+      ],
+      "title": "ManagerConnectorStatus",
+      "type": "object"
+    },
+    "ManagerHealthView": {
+      "additionalProperties": false,
+      "description": "``GET /api/v1/manager/health``: real checks, one row per connector.\n\nEvery ``connected`` / ``unavailable`` verdict comes from a live probe\n(tool-server ``/health``, a backend ``SELECT 1``, the Slack socket\nthread); an unconfigured or failed probe reports ``unavailable``, never\na fake ``connected``.",
+      "properties": {
+        "checked_at": {
+          "format": "date-time",
+          "title": "Checked At",
+          "type": "string"
+        },
+        "connectors": {
+          "items": {
+            "$ref": "#/$defs/ManagerConnectorStatus"
+          },
+          "title": "Connectors",
+          "type": "array"
+        },
+        "environment": {
+          "title": "Environment",
+          "type": "string"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "version",
+        "environment",
+        "checked_at",
+        "connectors"
+      ],
+      "title": "ManagerHealthView",
+      "type": "object"
+    },
+    "ManagerHoldView": {
+      "additionalProperties": false,
+      "description": "One unresolved HOLD of ``GET /api/v1/manager/holds``.\n\n``armoriq_console_url`` is the D-22 target where Maya resolves it;\n``note`` repeats that approval happens only there. There is no approve\nor reject field by design (R-40, Arch §5.6).",
+      "properties": {
+        "approval_state": {
+          "$ref": "#/$defs/ApprovalState"
+        },
+        "armoriq_console_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Armoriq Console Url"
+        },
+        "delegation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Delegation Id"
+        },
+        "note": {
+          "title": "Note",
+          "type": "string"
+        },
+        "plan_id": {
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "requested_at": {
+          "format": "date-time",
+          "title": "Requested At",
+          "type": "string"
+        },
+        "requester_persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonaKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "step_index": {
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "plan_id",
+        "step_index",
+        "tool",
+        "delegation_id",
+        "approval_state",
+        "requester_persona",
+        "requested_at",
+        "armoriq_console_url",
+        "note"
+      ],
+      "title": "ManagerHoldView",
+      "type": "object"
+    },
+    "ManagerRequestSummary": {
+      "additionalProperties": false,
+      "description": "One row of ``GET /api/v1/manager/requests`` (newest first).\n\nMirrors the P3-01 ``RequestSummary``; only IDs that have a\n``request_received`` event are listed. Identity fields are empty when\nthe stored origin payload is unreadable.",
+      "properties": {
+        "entry_point": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntryPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_event_at": {
+          "format": "date-time",
+          "title": "Last Event At",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "requester_persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonaKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "request_id",
+        "entry_point",
+        "requester_persona",
+        "last_event_at"
+      ],
+      "title": "ManagerRequestSummary",
+      "type": "object"
+    },
+    "ManagerTimelineEntry": {
+      "additionalProperties": false,
+      "description": "One event of ``GET /api/v1/manager/requests/{request_id}/timeline``.\n\nMerged request / decision / delivery events, oldest first, with the\nconsole's correlation fields: ``jti`` and ``ledger_entry_id`` line up\nwith the execution ledger (SHARED_INTERFACES §13). Every optional field\nis a whitelisted extraction from the reader's redacted payload; missing\nor unknown values stay ``None`` rather than failing the page.",
+      "properties": {
+        "approval_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delegation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Delegation Id"
+        },
+        "delivered_to_persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonaKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery_channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryChannel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Delivery Status"
+        },
+        "enforcement_layer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Enforcement Layer"
+        },
+        "error_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error Class"
+        },
+        "event_type": {
+          "title": "Event Type",
+          "type": "string"
+        },
+        "execution_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolExecutionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "is_armoriq_policy": {
+          "title": "Is Armoriq Policy",
+          "type": "boolean"
+        },
+        "jti": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Jti"
+        },
+        "kind": {
+          "enum": [
+            "request",
+            "decision",
+            "delivery"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "ledger_entry_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ledger Entry Id"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Plan Id"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reason"
+        },
+        "simulated": {
+          "title": "Simulated",
+          "type": "boolean"
+        },
+        "step_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Step Index"
+        },
+        "tier_delivered": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_server_reached": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Tool Server Reached"
+        },
+        "validation_outcome": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Validation Outcome"
+        }
+      },
+      "required": [
+        "occurred_at",
+        "kind",
+        "event_type",
+        "plan_id",
+        "step_index",
+        "tool",
+        "decision_source",
+        "enforcement_layer",
+        "is_armoriq_policy",
+        "jti",
+        "ledger_entry_id",
+        "execution_status",
+        "tool_server_reached",
+        "validation_outcome",
+        "error_class",
+        "outcome",
+        "reason",
+        "delegation_id",
+        "approval_state",
+        "delivery_channel",
+        "delivery_status",
+        "delivered_to_persona",
+        "tier_delivered",
+        "simulated"
+      ],
+      "title": "ManagerTimelineEntry",
+      "type": "object"
+    },
+    "ManagerTopicRuleUpdate": {
+      "additionalProperties": false,
+      "description": "``PUT /api/v1/manager/topic-rules`` body: topic + ceiling only.\n\nA request body, so it can never carry identity or authority: unknown\nkeys (``member_id``, ``app_role``, ``actor``, ...) are refused with a\n``422`` envelope. ``topic`` validity is enforced by\n``apps.api.topic_map.validate_topic`` (normalization, length,\nspecificity), mapped to the same ``422``; the stored\n``created_by_member_id`` always comes from the session.",
+      "properties": {
+        "max_tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "topic",
+        "max_tier"
+      ],
+      "title": "ManagerTopicRuleUpdate",
+      "type": "object"
+    },
+    "ManagerTopicRuleView": {
+      "additionalProperties": false,
+      "description": "One topic-map rule (P3-02): retrieval configuration, not authority.",
+      "properties": {
+        "max_tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "rule_id": {
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "topic": {
+          "title": "Topic",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "topic",
+        "max_tier"
+      ],
+      "title": "ManagerTopicRuleView",
+      "type": "object"
+    },
+    "ManagerTopicRulesView": {
+      "additionalProperties": false,
+      "description": "``GET /api/v1/manager/topic-rules``: the rules plus the access note.",
+      "properties": {
+        "note": {
+          "title": "Note",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/ManagerTopicRuleView"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rules",
+        "note"
+      ],
+      "title": "ManagerTopicRulesView",
+      "type": "object"
+    },
+    "ManagerUnansweredView": {
+      "additionalProperties": false,
+      "description": "One queue row of ``GET /api/v1/manager/unanswered``.\n\nThe question is stored redacted at write time and passed through\nunchanged; no protected snippet is ever part of this view.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Reason"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "requester_persona": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PersonaKey"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "request_id",
+        "question",
+        "reason",
+        "status",
+        "requester_persona",
+        "created_at"
+      ],
+      "title": "ManagerUnansweredView",
+      "type": "object"
+    },
     "McpEndpoint": {
       "description": "Registered MCP endpoint names (PRD v2 §2). Must match the ArmorIQ console exactly.",
       "enum": [

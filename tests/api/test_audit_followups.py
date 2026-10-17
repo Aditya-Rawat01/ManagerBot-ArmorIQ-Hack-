@@ -608,8 +608,26 @@ def test_timeline_shows_tool_and_true_armoriq_label(source: str, is_policy: bool
         fetchall=[
             [(NOW, "hold_created", "plan-1", 0, None, {"state": "pending"}, "read_source_team")],
             [
-                (NOW, "authorization_decided", "plan-1", 0, source, {}, "knowledge_search_team"),
-                (NOW, "authorization_decided", None, None, source, {"tool_name": "x_tool"}, None),
+                (
+                    NOW,
+                    "authorization_decided",
+                    "plan-1",
+                    0,
+                    "jti-planned",
+                    source,
+                    {},
+                    "knowledge_search_team",
+                ),
+                (
+                    NOW,
+                    "authorization_decided",
+                    None,
+                    None,
+                    None,
+                    source,
+                    {"tool_name": "x_tool"},
+                    None,
+                ),
             ],
             [],
         ]
@@ -618,7 +636,9 @@ def test_timeline_shows_tool_and_true_armoriq_label(source: str, is_policy: bool
     request_entry, planned, off_plan = entries
     assert request_entry.tool_name == "read_source_team"
     assert request_entry.is_armoriq_policy is False  # only decisions can be
+    assert request_entry.jti is None  # delivery-style rows carry no jti
     assert planned.tool_name == "knowledge_search_team"
+    assert planned.jti == "jti-planned"  # P4-04 additive field, ledger correlation
     assert off_plan.tool_name == "x_tool"
     assert planned.is_armoriq_policy is is_policy
     assert "JOIN plan_steps" in all_sql(db)
@@ -835,7 +855,10 @@ def test_add_unanswered_rejects_snippet_refs(refs: object) -> None:
 def test_unanswered_reason_keyed_by_question_id() -> None:
     db = FakeDatabase(
         fetchall=[
-            [(9, "req-1", "first?", "open", NOW), (10, "req-1", "second?", "open", NOW)],
+            [
+                (9, "req-1", "m-priya", "first?", "open", NOW),
+                (10, "req-1", None, "second?", "open", NOW),
+            ],
             # Companion events name their question; the later request-level
             # abstention (record_answer) must not overwrite them.
             [
@@ -850,9 +873,22 @@ def test_unanswered_reason_keyed_by_question_id() -> None:
     assert "unanswered_question_id" in all_sql(db)
 
 
+def test_unanswered_returns_stored_requester() -> None:
+    db = FakeDatabase(
+        fetchall=[
+            [
+                (9, "req-1", "m-priya", "why?", "open", NOW),
+                (10, "req-1", None, "again?", "open", NOW),
+            ]
+        ]
+    )
+    by_id = {item.question_id: item.requester_member_id for item in unanswered(db, maya())}
+    assert by_id == {9: "m-priya", 10: None}
+
+
 def test_unanswered_falls_back_to_request_abstention_reason() -> None:
     db = FakeDatabase(
-        fetchall=[[(9, "req-1", "why?", "open", NOW)], [("req-1", None, "no_evidence")]]
+        fetchall=[[(9, "req-1", "m-priya", "why?", "open", NOW)], [("req-1", None, "no_evidence")]]
     )
     [item] = unanswered(db, maya())
     assert item.reason == "no_evidence"

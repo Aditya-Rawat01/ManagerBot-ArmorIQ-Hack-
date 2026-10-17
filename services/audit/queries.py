@@ -75,6 +75,10 @@ class TimelineEntry:
     # Planned tool for (plan_id, step_index), joined from plan_steps; for
     # off-plan decisions, the payload's tool_name when one was recorded.
     tool_name: str | None = None
+    # Additive (P4-04, SHARED_INTERFACES §10): the invocation ID that ledger
+    # rows carry (AuditEvent shape, §13). None for delivery events, which
+    # have no jti column.
+    jti: str | None = None
 
     @property
     def is_armoriq_policy(self) -> bool:
@@ -107,6 +111,9 @@ class UnansweredItem:
     reason: str | None
     status: str
     created_at: datetime
+    # Additive (P4-04, SHARED_INTERFACES §10): the queue's requester, stored
+    # by ``add_unanswered`` since 0004 and returned for the console.
+    requester_member_id: str | None = None
 
 
 def _require_manager(actor: AuthenticatedUser) -> None:
@@ -475,7 +482,8 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
 
     Request and decision events carry the planned ``tool_name`` for their
     plan step (``plan_steps`` join), so the console shows which tool each
-    decision was for.
+    decision was for; they also carry ``jti`` (P4-04 additive field) for
+    ledger correlation. Delivery events have neither column set.
     """
     _require_manager(actor)
     entries: list[TimelineEntry] = []
@@ -487,7 +495,7 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
             "WHERE e.request_id = %s ORDER BY e.occurred_at, e.id LIMIT %s",
             [request_id, _TIMELINE_LIMIT],
         )
-        for occurred_at, event_type, plan_id, step, _jti, payload, tool in _rows(cursor):
+        for occurred_at, event_type, plan_id, step, jti, payload, tool in _rows(cursor):
             entries.append(
                 TimelineEntry(
                     occurred_at=occurred_at,
@@ -498,16 +506,18 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
                     decision_source=None,
                     payload=redact_payload(payload if isinstance(payload, dict) else {}),
                     tool_name=_tool_name(tool, payload),
+                    jti=jti,
                 )
             )
         cursor.execute(
-            "SELECT d.occurred_at, d.event_type, d.plan_id, d.step_index, d.decision_source, "
-            "d.payload, ps.tool_name FROM decision_events d LEFT JOIN plan_steps ps "
+            "SELECT d.occurred_at, d.event_type, d.plan_id, d.step_index, d.jti, "
+            "d.decision_source, d.payload, ps.tool_name FROM decision_events d "
+            "LEFT JOIN plan_steps ps "
             "ON ps.plan_id = d.plan_id AND ps.step_index = d.step_index "
             "WHERE d.request_id = %s ORDER BY d.occurred_at, d.id LIMIT %s",
             [request_id, _TIMELINE_LIMIT],
         )
-        for occurred_at, event_type, plan_id, step, source, payload, tool in _rows(cursor):
+        for occurred_at, event_type, plan_id, step, jti, source, payload, tool in _rows(cursor):
             entries.append(
                 TimelineEntry(
                     occurred_at=occurred_at,
@@ -518,6 +528,7 @@ def timeline(db: AuditDatabase, request_id: str, actor: AuthenticatedUser) -> li
                     decision_source=str(source) if source else None,
                     payload=redact_payload(payload if isinstance(payload, dict) else {}),
                     tool_name=_tool_name(tool, payload),
+                    jti=jti,
                 )
             )
         cursor.execute(
@@ -572,13 +583,14 @@ def unanswered(
     The reason comes from the companion ``answer_abstained`` event whose
     ``unanswered_question_id`` names the row; when ``add_unanswered`` did
     not append one (it would have duplicated ``record_answer``'s abstention),
-    the request's latest abstention reason is used.
+    the request's latest abstention reason is used. ``requester_member_id``
+    is the stored requester (P4-04 additive field; null for legacy rows).
     """
     _require_manager(actor)
     items: list[UnansweredItem] = []
     with db.tx() as cursor:
         cursor.execute(
-            "SELECT id, request_id, question, status, created_at FROM "
+            "SELECT id, request_id, requester_member_id, question, status, created_at FROM "
             "unanswered_questions WHERE (%s OR status = 'open') "
             "ORDER BY created_at LIMIT %s",
             [not only_open, _MAX_LIMIT],
@@ -599,7 +611,7 @@ def unanswered(
                     by_question[str(question_ref)] = reason
                 else:
                     by_request[str(event_request)] = reason
-        for question_id, request_id, question, status, created_at in rows:
+        for question_id, request_id, requester, question, status, created_at in rows:
             items.append(
                 UnansweredItem(
                     question_id=question_id,
@@ -609,6 +621,7 @@ def unanswered(
                     reason=by_question.get(str(question_id), by_request.get(str(request_id))),
                     status=str(status),
                     created_at=created_at,
+                    requester_member_id=str(requester) if requester else None,
                 )
             )
         return items

@@ -4,6 +4,17 @@ Pydantic models are the single source of truth. The frontend consumes the
 generated JSON Schema (services/contracts/schemas/) as TypeScript types.
 """
 
+from .api_manager import (
+    ManagerConnectorStatus,
+    ManagerHealthView,
+    ManagerHoldView,
+    ManagerRequestSummary,
+    ManagerTimelineEntry,
+    ManagerTopicRulesView,
+    ManagerTopicRuleUpdate,
+    ManagerTopicRuleView,
+    ManagerUnansweredView,
+)
 from .api_requests import (
     CitationView,
     ConfirmationOfferView,
@@ -139,6 +150,15 @@ __all__ = [
     "KnowledgeSearchRestrictedArgs",
     "KnowledgeSearchResult",
     "KnowledgeSearchTeamArgs",
+    "ManagerConnectorStatus",
+    "ManagerHealthView",
+    "ManagerHoldView",
+    "ManagerRequestSummary",
+    "ManagerTimelineEntry",
+    "ManagerTopicRuleUpdate",
+    "ManagerTopicRuleView",
+    "ManagerTopicRulesView",
+    "ManagerUnansweredView",
     "MarkSupersededResult",
     "McpEndpoint",
     "OffPlanAttemptView",
