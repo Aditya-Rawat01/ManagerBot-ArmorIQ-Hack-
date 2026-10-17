@@ -19,6 +19,7 @@ supersede, bound to the exact record+version. D-09 rule 2 (clarified 17 Oct
 import inspect
 import json
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -477,6 +478,45 @@ def test_database_refuses_self_supersession() -> None:
             (int(saved["record_id"]),),
         )
     assert note_row(saved["record_id"])["superseded_by_id"] is None
+
+
+@NEEDS_DB
+def test_supersede_binds_exact_version(real_model: Any) -> None:
+    """Review I5 (live): a stale (or future) target version is
+    `precondition_failed` and writes nothing; the exact version succeeds."""
+    with live_client() as client:
+        target = ok_json(save_note(client, f"p209 stale target {uuid.uuid4().hex}", **SAM))
+        head = saved_authoritative(client, "p209 stale head")
+        for wrong in (target["version"] + 1, target["version"] + 7):
+            refused = supersede(client, target["record_id"], wrong, head["record_id"])
+            assert result_text(refused)["code"] == "precondition_failed", wrong
+        assert note_row(target["record_id"])["superseded_by_id"] is None
+        ok_json(supersede(client, target["record_id"], target["version"], head["record_id"]))
+    assert note_row(target["record_id"])["superseded_by_id"] == int(head["record_id"])
+
+
+@NEEDS_DB
+def test_other_workspace_cannot_confirm_or_supersede(real_model: Any) -> None:
+    """Review I5 (live): Maya's `_ctx` for ANOTHER workspace cannot confirm
+    or supersede this workspace's notes (`precondition_failed`, the same
+    answer as a missing record). Both calls would succeed without the
+    workspace filter: the draft is confirmable and the head is a valid
+    replacement."""
+    other = {"workspace_id": f"workspace-other-{uuid.uuid4().hex[:8]}"}
+    with live_client() as client:
+        draft = ok_json(save_note(client, f"p209 xws draft {uuid.uuid4().hex}", **SAM))
+        head = saved_authoritative(client, "p209 xws head")
+        refused = [
+            confirm(client, draft["record_id"], 1, **other),
+            supersede(client, draft["record_id"], 1, head["record_id"], **other),
+        ]
+    for message in refused:
+        assert result_text(message)["code"] == "precondition_failed"
+    row = note_row(draft["record_id"])
+    assert row["review_status"] == "draft" and row["superseded_by_id"] is None
+    assert row["approved_by_member_id"] is None
+    assert note_row(head["record_id"])["superseded_by_id"] is None
+    assert source_rows(f"note-{draft['record_id']}") == []
 
 
 @NEEDS_DB
@@ -1088,19 +1128,293 @@ def test_self_supersede_cannot_hide_behind_another_spelling(spelling: str) -> No
     assert tools_memory.parse_record_id("9223372036854775807") == 2**63 - 1
 
 
+# R-57: what a maintenance tool must never read or write. Table names are
+# matched without their schema, so `FROM members`, `JOIN public.members` and
+# `UPDATE plans` are all caught.
+R57_FORBIDDEN = (
+    "members",
+    "plans",
+    "plan_steps",
+    "approval_requests",
+    "topic_access_rules",
+    "workspaces",
+    "GRANT ",
+    "REVOKE ",
+    "ALTER ROLE",
+    "SET ROLE",
+    "SET SESSION AUTHORIZATION",
+)
+# Every function the three maintenance handlers run (directly or through a
+# helper). A new helper must be added here to be scanned.
+R57_FUNCTIONS = (
+    "handle_knowledge_save_team_note",
+    "handle_knowledge_confirm_maya_decision",
+    "handle_knowledge_mark_superseded",
+    "_require_manager",
+    "parse_record_id",
+    "_note_pk",
+    "check_confirm_arguments",
+    "check_supersede_arguments",
+    "_insert_note",
+    "_confirm_note",
+    "_note_from_row",
+    "_require_confirmable",
+    "_embed_note_source",
+    "_insert_note_source",
+    "note_source_id",
+    "note_source_title",
+    "_supersede_note",
+    "_supersede_note_source",
+)
+
+
+def _code_only(source: str) -> str:
+    """Source without comments/docstrings' prose lines that merely mention
+    a table (the SQL strings stay: they are what matters)."""
+    return "\n".join(line.split("#", 1)[0] for line in source.splitlines())
+
+
 @pytest.mark.parametrize("tool", [SAVE, CONFIRM, SUPERSEDE])
 def test_maintenance_tools_have_no_policy_or_identity_side_effects(tool: ToolName) -> None:
-    """R-57: nothing in a maintenance handler reads or writes policy,
-    permission, member, or plan tables — role and identity come only from
-    the verified `_ctx`."""
+    """R-57: the maintenance tools are registered as MAINTENANCE and their
+    handler is one of the scanned functions."""
     assert TOOL_CATALOG[tool].kind is ToolKind.MAINTENANCE
-    handler = tools_memory.PRODUCT_TOOLS[tool].handler
-    source = inspect.getsource(handler)
-    for forbidden in (
-        "FROM public.members",
-        "FROM public.plans",
-        "FROM public.approval_requests",
-        "GRANT",
-        "REVOKE",
-    ):
-        assert forbidden not in source, (tool.value, forbidden)
+    assert tools_memory.PRODUCT_TOOLS[tool].handler.__name__ in R57_FUNCTIONS
+
+
+@pytest.mark.parametrize("name", R57_FUNCTIONS)
+def test_maintenance_helpers_never_touch_policy_or_identity(name: str) -> None:
+    """R-57 (review I5): nothing the maintenance tools run — handlers AND
+    the helpers that hold their SQL — reads or writes policy, permission,
+    member, plan or workspace tables, or changes roles/grants; role and
+    identity come only from the verified `_ctx`."""
+    source = _code_only(inspect.getsource(getattr(tools_memory, name)))
+    sql_words = source.replace("public.", "")
+    for forbidden in R57_FORBIDDEN:
+        if forbidden.endswith(" ") or forbidden.isupper():
+            assert forbidden not in source, (name, forbidden)
+            continue
+        for verb in ("FROM ", "JOIN ", "INTO ", "UPDATE "):
+            assert f"{verb}{forbidden}" not in sql_words, (name, verb + forbidden)
+
+
+def test_maintenance_sql_lives_only_in_scanned_functions() -> None:
+    """Every `public.` table the P2-09 section names sits inside a scanned
+    function (no SQL constant or helper escapes the R-57 scan)."""
+    module = inspect.getsource(tools_memory)
+    start = module.index("# P2-09 — knowledge maintenance")
+    end = module.index("class ProductTool")
+    section = module[start:end]
+    scanned = "".join(inspect.getsource(getattr(tools_memory, name)) for name in R57_FUNCTIONS)
+    for table in set(re.findall(r"public\.[a-z_]+", section)):
+        assert table in scanned, table
+    statements = re.findall(r'"""\s*(?:SELECT|INSERT|UPDATE|DELETE)[^"]*"""', section)
+    assert statements, "the section holds the maintenance SQL"
+    for statement in statements:
+        assert statement in scanned, statement[:60]
+
+
+# --- I5: mutation-resistant offline checks (CI-visible) ----------------------
+
+
+@pytest.mark.parametrize("persona", [SAM, PRIYA, {**MAYA, "app_role": "senior"}])
+@pytest.mark.parametrize("tool", [CONFIRM, SUPERSEDE])
+def test_role_check_runs_before_any_sql(
+    monkeypatch: pytest.MonkeyPatch, tool: ToolName, persona: dict
+) -> None:
+    """Review I5: confirm AND supersede refuse every non-manager role (Sam,
+    Priya, even Maya's member ID with a non-manager role: the ROLE decides,
+    not the member ID) with a recorded `out_of_scope` before the pool is
+    touched — the scripted records would otherwise make the call succeed.
+    (`CtxEnvelope` itself refuses roles outside manager/senior/junior.)"""
+    pool = RecordingPool(
+        [note(5, review_status="authoritative"), note(6, review_status="authoritative")],
+        [{"source_id": "note-5"}],
+    )
+    install_embedder(monkeypatch, pool)
+    ledger = FakeLedger()
+    with recording_client(monkeypatch, pool, ledger) as client:
+        if tool is CONFIRM:
+            pool.notes[5]["review_status"] = "draft"
+            message = confirm(client, "5", 1, persona=persona)
+        else:
+            message = supersede(client, "5", 1, "6", persona=persona)
+    assert result_text(message)["code"] == "out_of_scope"
+    assert pool.statements == [] and pool.events == []
+    assert [e.execution_status.value for e in ledger.entries.values()] == [
+        "rejected_by_tool_server"
+    ]
+
+
+@pytest.mark.parametrize(("stored", "asked"), [(2, 1), (1, 2)])
+def test_confirm_binds_the_exact_version_offline(
+    monkeypatch: pytest.MonkeyPatch, stored: int, asked: int
+) -> None:
+    """Review I5: a version mismatch (stale or ahead) is
+    `precondition_failed`: nothing embedded, nothing written."""
+    pool = RecordingPool([note(5, version=stored)])
+    calls = install_embedder(monkeypatch, pool)
+    with recording_client(monkeypatch, pool) as client:
+        message = confirm(client, "5", asked)
+    assert result_text(message)["code"] == "precondition_failed"
+    assert calls == [] and pool.writes() == []
+
+
+@pytest.mark.parametrize(("stored", "asked"), [(2, 1), (1, 2)])
+def test_supersede_binds_the_exact_version_offline(
+    monkeypatch: pytest.MonkeyPatch, stored: int, asked: int
+) -> None:
+    """Review I5: supersede is bound to the target's exact version."""
+    pool = RecordingPool([note(5, version=stored), note(6, review_status="authoritative")])
+    with recording_client(monkeypatch, pool) as client:
+        message = supersede(client, "5", asked, "6")
+    assert result_text(message)["code"] == "precondition_failed"
+    assert pool.writes() == []
+
+
+def test_save_writes_a_team_draft_by_the_ctx_requester_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I5: the INSERT stores literal `'draft'`, version 1 and tier
+    `'team'`; author and workspace are the verified `_ctx` values; nothing
+    is chunked, embedded or made a source."""
+    pool = RecordingPool()
+    calls = install_embedder(monkeypatch, pool)
+    with recording_client(monkeypatch, pool) as client:
+        message = save_note(
+            client,
+            "Remember the freeze",
+            requester_member_id="m-ctx-author",
+            workspace_id="workspace-ctx",
+            request_id="req-ctx",
+        )
+    body = ok_json(message)
+    assert body["review_status"] == "draft" and body["record_id"] == "41"
+    [(sql_text, params, in_tx)] = pool.statements
+    assert sql_text.startswith("INSERT INTO public.team_notes")
+    columns = sql_text[sql_text.index("(") + 1 : sql_text.index(")")]
+    assert _columns(columns) == [
+        "workspace_id",
+        "author_member_id",
+        "title",
+        "content",
+        "content_kind",
+        "review_status",
+        "version",
+        "content_hash",
+        "tier",
+        "provenance",
+    ]
+    assert "VALUES (%s, %s, %s, %s, %s, 'draft', 1, %s, 'team', %s)" in sql_text
+    assert "authoritative" not in sql_text
+    workspace, author, title, content, kind, digest, provenance = params
+    assert (workspace, author, title, content, kind) == (
+        "workspace-ctx",
+        "m-ctx-author",
+        None,
+        "Remember the freeze",
+        "note",
+    )
+    assert digest == _sha("Remember the freeze") and in_tx
+    assert json.loads(provenance)["request_id"] == "req-ctx"
+    assert calls == []
+
+
+def test_confirm_records_the_ctx_manager_as_approver_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I5: `approved_by_member_id` is the verified `_ctx` requester
+    (never an argument, never a constant)."""
+    pool = RecordingPool([note(5)])
+    install_embedder(monkeypatch, pool)
+    with recording_client(monkeypatch, pool) as client:
+        ok_json(confirm(client, "5", 1, requester_member_id="m-ctx-approver"))
+    [(sql_text, params, _)] = pool.matching("UPDATE public.team_notes")
+    assert "SET review_status = 'authoritative', approved_by_member_id = %s" in sql_text
+    assert params == ("m-ctx-approver", 5, "workspace-primary")
+    [(_, source_params, _)] = pool.matching("INSERT INTO public.source_records")
+    assert json.loads(source_params[5])["approved_by_member_id"] == "m-ctx-approver"
+
+
+def test_every_maintenance_statement_is_scoped_to_the_ctx_workspace_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review I5: the confirm read, the confirm lock, the supersede lock
+    (target AND replacement) and every write filter on the verified `_ctx`
+    workspace — a dropped filter or a wrong parameter fails here."""
+    workspace = "workspace-ctx"
+    notes = [
+        note(5, workspace_id=workspace),
+        note(6, workspace_id=workspace, review_status="authoritative"),
+        note(7, workspace_id=workspace),
+    ]
+    pool = RecordingPool(notes, [{"source_id": "note-6"}])
+    install_embedder(monkeypatch, pool)
+    with recording_client(monkeypatch, pool) as client:
+        ok_json(confirm(client, "5", 1, workspace_id=workspace))
+        ok_json(supersede(client, "7", 1, "6", workspace_id=workspace))
+    team_notes = [e for e in pool.statements if "public.team_notes" in e[0]]
+    read, lock, flip, supersede_lock, link = team_notes
+    assert read[0].endswith("WHERE id = %s AND workspace_id = %s")
+    assert read[1] == (5, workspace)
+    assert lock[0].endswith("WHERE id = %s AND workspace_id = %s FOR UPDATE")
+    assert lock[1] == (5, workspace)
+    assert flip[0].endswith("WHERE id = %s AND workspace_id = %s RETURNING version, approved_at")
+    assert flip[1][1:] == (5, workspace)
+    both = "WHERE id IN (%s, %s) AND workspace_id = %s ORDER BY id FOR UPDATE"
+    assert supersede_lock[0].endswith(both)
+    assert supersede_lock[1] == (7, 6, workspace)
+    assert "WHERE id = %s AND workspace_id = %s RETURNING version, review_status" in link[0]
+    assert link[1][2:] == (7, workspace)
+    sources = [e for e in pool.statements if "public.source_records" in e[0]]
+    assert len(sources) == 3  # confirm insert, replacement lookup, source update
+    insert, lookup, update = sources
+    assert insert[1][1] == workspace
+    assert "WHERE workspace_id = %s AND source_id = %s" in lookup[0]
+    assert lookup[1] == (workspace, "note-6")
+    assert "WHERE workspace_id = %s AND source_id = %s" in update[0]
+    assert update[1][1:] == (workspace, "note-7")
+    [(_, chunk_params, _)] = pool.matching("INSERT INTO public.knowledge_chunks")
+    assert chunk_params[1] == workspace
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"author_member_id": "m-maya"},
+        {"author": "maya"},
+        {"requester_member_id": "m-maya"},
+        {"workspace_id": "workspace-other"},
+        {"review_status": "authoritative"},
+        {"tier": "confidential"},
+        {"version": 2},
+        {"approved_by_member_id": "m-maya"},
+    ],
+)
+def test_save_rejects_author_and_authority_arguments(extra: dict) -> None:
+    """Review I5 / R-57: the author (and workspace, review status, tier,
+    version, approver) can never come from arguments — any such key is a
+    recorded `invalid_arguments`, before the handler runs."""
+    with dev_client() as client:
+        message = call(
+            client,
+            {
+                "content": "attempted attribution",
+                "content_kind": "note",
+                **extra,
+                "_ctx": make_ctx(tool=SAVE.value, **PRIYA),
+            },
+            tool=SAVE.value,
+        )
+    assert result_text(message)["code"] == "invalid_arguments", extra
+
+
+@pytest.mark.parametrize("extra", [{"approved": True}, {"approved_by_member_id": "m-maya"}])
+def test_confirm_accepts_no_approval_text(extra: dict) -> None:
+    """PRD §8.4: an "approved" value is never input; only record_id + version."""
+    with dev_client() as client:
+        ctx = make_ctx(tool=CONFIRM.value, **MAYA)
+        message = call(
+            client, {"record_id": "5", "version": 1, **extra, "_ctx": ctx}, tool=CONFIRM.value
+        )
+    assert result_text(message)["code"] == "invalid_arguments"
