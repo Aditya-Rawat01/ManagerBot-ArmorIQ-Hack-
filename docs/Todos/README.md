@@ -28,7 +28,7 @@ not resolved silently.
 - **Resolved 14 Oct 2026** (ADR-015 to ADR-030): web app hosting on Vercel (ADR-030), containerization with Docker (ADR-029), D-01 (tool module names), D-08 (`psycopg` 3 + SQL migrations), D-19, D-07 (Render for the API and tool server), D-02, D-18, D-03, D-04, D-20, D-26, D-12, D-17, D-29, the ArmorIQ policy evidence set, and D-25 (no assignments; contributors self-assign).
 - Still open:
   - ArmorIQ Org Admin access and the API key (`Aditya-Rawat01`, tracked in P1-01 / #2).
-- Participants: `Aditya-Rawat01` acts as Maya (Org Admin, console approver, host); the team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Blocker issue #1 is closed.
+- Participants: Maya's ArmorIQ account is `VTCodeCraft`'s work account (updated 17 Oct 2026; must be Org Admin, console approver), `Aditya-Rawat01` hosts; the team picks Sam and Priya from `samarth-chawla`, `VTCodeCraft`, `parthgoyal26-03-2005`. Blocker issue #1 is closed.
 
 ## Phases
 
