@@ -1455,11 +1455,14 @@ def test_live_confirmed_escalation_with_hold_sequence() -> None:
 
     db = BackendDatabase(LIVE_DSN)  # type: ignore[arg-type]
     sender = RecordingSlackSender()
+    # Delegation IDs are unique per approval row in the append-only store, so
+    # every run needs its own (a reused one is refused: fails closed).
+    delegation = f"dlg-live-{uuid.uuid4().hex[:12]}"
     gateway = ScriptedGateway(
         two_step(
             **{
                 ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL: HoldThen(
-                    ApprovalState.APPROVED, CONF_RESULT
+                    ApprovalState.APPROVED, CONF_RESULT, delegation_id=delegation
                 )
             }
         )
@@ -1526,7 +1529,7 @@ def test_live_confirmed_escalation_with_hold_sequence() -> None:
             )
             approvals = cursor.fetchall()
         assert payload["escalation_confirmed"] is True
-        assert [tuple(row) for row in approvals] == [("approved", "dlg-fake-1")]
+        assert [tuple(row) for row in approvals] == [("approved", delegation)]
     finally:
         db.close()
 
