@@ -127,6 +127,7 @@ export type MemberId = string;
  */
 export type PersonaKey = "maya" | "sam" | "priya";
 export type SlackUserId = string | null;
+export type SourceId = string;
 /**
  * Knowledge sensitivity tiers (PRD v2 §5.1). Encoded in tool names, never in arguments.
  *
@@ -134,6 +135,21 @@ export type SlackUserId = string | null;
  * via the `definition` "DataTier".
  */
 export type DataTier = "team" | "confidential" | "restricted";
+export type Title = string | null;
+export type EscalationId = string;
+export type ExpiresAt = string;
+export type Token = string;
+export type ConfirmationToken = string | null;
+export type Message = string;
+export type SimulateHijackedModel = boolean;
+export type RequestId2 = string;
+/**
+ * Where an answer was delivered (Architecture v2.1 §7.2).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "DeliveryChannel".
+ */
+export type DeliveryChannel = "slack_thread" | "slack_dm" | "web_private";
 /**
  * Where a request entered ProxyLead.
  *
@@ -142,8 +158,8 @@ export type DataTier = "team" | "confidential" | "restricted";
  */
 export type EntryPoint = "slack_mention" | "slack_dm" | "web";
 export type Code = string;
-export type Message = string;
-export type RequestId2 = string | null;
+export type Message1 = string;
+export type RequestId3 = string | null;
 export type Environment = string;
 export type Service = string;
 export type Status = "ok";
@@ -165,9 +181,9 @@ export type ReferenceUrl = string | null;
  * via the `definition` "ReviewStatus".
  */
 export type ReviewStatus = "draft" | "authoritative";
-export type SourceId = string;
+export type SourceId1 = string;
 export type SupersededBy = string | null;
-export type Title = string;
+export type Title1 = string;
 export type Version1 = number;
 export type Hits = KnowledgeSearchHit[];
 /**
@@ -182,6 +198,11 @@ export type Query = string;
  * via the `definition` "McpEndpoint".
  */
 export type McpEndpoint = "memory-mcp" | "workspace-mcp";
+export type EnforcementLayer = string;
+export type Executed = false;
+export type IsArmoriqPolicy = boolean;
+export type Rejection = string | null;
+export type Simulated = boolean;
 export type EscalationUserConfirmed = boolean;
 export type MatchedTopicRuleId = string | null;
 export type Purpose = string;
@@ -189,7 +210,7 @@ export type StepIndex2 = number;
 export type Steps = PlannedToolCall[];
 export type Summary = string;
 export type ReceivedAt = string;
-export type RequestId3 = string;
+export type RequestId4 = string;
 export type SlackChannelId = string | null;
 /**
  * Used for event deduplication
@@ -199,9 +220,22 @@ export type SlackTeamId = string | null;
 export type SlackThreadTs = string | null;
 export type TraceId1 = string;
 export type WorkspaceId = string;
-export type Passcode = string;
-export type DisplayName1 = string;
-export type MaskedEmail1 = string;
+export type AbstainReason = string | null;
+export type Abstained = boolean;
+export type AnswerText = string | null;
+export type Citations = CitationView[];
+export type DeliveryStatus = string | null;
+/**
+ * Executed send_external_message steps of this request, counted from the persisted ledger-backed execution references (the only way the honeypot writes its synthetic sink). Guarded mode: always 0. The backend cannot read the sink table itself (grant PROPOSED, SHARED_INTERFACES §7).
+ */
+export type EgressSinkExecutions = number;
+export type LastEventAt = string | null;
+export type Note = string | null;
+export type OffPlanAttempts = OffPlanAttemptView[];
+export type Outcome = ("allow" | "block" | "hold" | "abstain" | "error" | "unverified" | "clarification") | null;
+export type RequestId5 = string;
+export type SimulationActive = boolean;
+export type State = "processing" | "pending_approval" | "awaiting_confirmation" | "completed";
 /**
  * What actually happened at the tool server, as evidenced by its ledger.
  *
@@ -209,6 +243,12 @@ export type MaskedEmail1 = string;
  * via the `definition` "ToolExecutionStatus".
  */
 export type ToolExecutionStatus = "executed" | "rejected_by_tool_server" | "not_reached" | "error" | "unknown";
+export type IsArmoriqPolicy1 = boolean;
+export type StepIndex3 = number;
+export type Steps1 = StepStatusView[];
+export type Passcode = string;
+export type DisplayName1 = string;
+export type MaskedEmail1 = string;
 export type ErrorCode = string | null;
 export type ErrorMessage = string | null;
 /**
@@ -217,8 +257,8 @@ export type ErrorMessage = string | null;
 export type Jti1 = string;
 export type LedgerEntryId = string | null;
 export type PlanId2 = string;
-export type RequestId4 = string;
-export type StepIndex3 = number;
+export type RequestId6 = string;
+export type StepIndex4 = number;
 /**
  * None when it cannot be determined
  */
@@ -307,14 +347,62 @@ export interface AuthenticatedUser {
   slack_user_id: SlackUserId;
 }
 /**
+ * A validated citation of the delivered answer (source ID + tier persisted;
+ * the title only from the owner's web inbox).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "CitationView".
+ */
+export interface CitationView {
+  source_id: SourceId;
+  tier: DataTier;
+  title: Title;
+}
+/**
+ * A pending D-14 confirmation for the owner's confirm control.
+ *
+ * ``token`` is the single-use value the web confirm button posts back as
+ * ``confirmation_token``; it is shown only to the requesting member's
+ * session, only until it expires, and is never logged or audited.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "ConfirmationOfferView".
+ */
+export interface ConfirmationOfferView {
+  escalation_id: EscalationId;
+  expires_at: ExpiresAt;
+  requested_tier: DataTier;
+  token: Token;
+}
+/**
+ * Web request body. No identity, tier, or recipient field exists (R-10).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "CreateRequestBody".
+ */
+export interface CreateRequestBody {
+  confirmation_token: ConfirmationToken;
+  message: Message;
+  simulate_hijacked_model: SimulateHijackedModel;
+}
+/**
+ * ``202`` body: the orchestrator-minted request ID (``req-<32 hex>``).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "CreateRequestResponse".
+ */
+export interface CreateRequestResponse {
+  request_id: RequestId2;
+}
+/**
  * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
  * via the `definition` "ErrorBody".
  */
 export interface ErrorBody {
   code: Code;
   details: unknown;
-  message: Message;
-  request_id: RequestId2;
+  message: Message1;
+  request_id: RequestId3;
 }
 /**
  * Every non-2xx JSON response from ProxyLead services uses this envelope.
@@ -359,10 +447,10 @@ export interface SourceCitation {
   created_at: CreatedAt;
   reference_url: ReferenceUrl;
   review_status: ReviewStatus;
-  source_id: SourceId;
+  source_id: SourceId1;
   superseded_by: SupersededBy;
   tier: DataTier;
-  title: Title;
+  title: Title1;
   version: Version1;
 }
 /**
@@ -377,6 +465,26 @@ export interface KnowledgeSearchResult {
   query: Query;
   tier: DataTier;
   tool: ToolName;
+}
+/**
+ * A model-requested tool call routed off-plan (P3-03/P3-07). Never executed.
+ *
+ * ``enforcement_layer`` is the server's wording for ``decision_source``;
+ * ``is_armoriq_policy`` is true only for ArmorIQ policy sources (ADR-026),
+ * never for the client-side SDK plan check or application rules.
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "OffPlanAttemptView".
+ */
+export interface OffPlanAttemptView {
+  decision_source: DecisionSource;
+  enforcement_layer: EnforcementLayer;
+  executed: Executed;
+  is_armoriq_policy: IsArmoriqPolicy;
+  outcome: DecisionOutcome;
+  rejection: Rejection;
+  simulated: Simulated;
+  tool: ToolName | null;
 }
 /**
  * Planner output, built from the user's message only (PRD v2 §7).
@@ -421,7 +529,7 @@ export interface Arguments {
 export interface RequestContext {
   entry_point: EntryPoint;
   received_at: ReceivedAt;
-  request_id: RequestId3;
+  request_id: RequestId4;
   requester: AuthenticatedUser;
   slack_channel_id: SlackChannelId;
   slack_event_id: SlackEventId;
@@ -429,6 +537,45 @@ export interface RequestContext {
   slack_thread_ts: SlackThreadTs;
   trace_id: TraceId1;
   workspace_id: WorkspaceId;
+}
+/**
+ * Owner-only status of one request (P4-01, polled by P4-02/P4-03).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "RequestStatusView".
+ */
+export interface RequestStatusView {
+  abstain_reason: AbstainReason;
+  abstained: Abstained;
+  answer_text: AnswerText;
+  citations: Citations;
+  confirmation: ConfirmationOfferView | null;
+  delivery_channel: DeliveryChannel | null;
+  delivery_status: DeliveryStatus;
+  egress_sink_executions: EgressSinkExecutions;
+  last_event_at: LastEventAt;
+  note: Note;
+  off_plan_attempts: OffPlanAttempts;
+  outcome: Outcome;
+  request_id: RequestId5;
+  simulation_active: SimulationActive;
+  state: State;
+  steps: Steps1;
+}
+/**
+ * One planned step as persisted (decision, approval, execution reference).
+ *
+ * This interface was referenced by `ProxyLeadContracts`'s JSON-Schema
+ * via the `definition` "StepStatusView".
+ */
+export interface StepStatusView {
+  approval_state: ApprovalState | null;
+  decision_source: DecisionSource | null;
+  execution_status: ToolExecutionStatus | null;
+  is_armoriq_policy: IsArmoriqPolicy1;
+  outcome: DecisionOutcome | null;
+  step_index: StepIndex3;
+  tool: ToolName | null;
 }
 /**
  * Sign-in body. The only request body that may carry a persona (PRD §4.1).
@@ -464,10 +611,10 @@ export interface ToolInvocationResult {
   jti: Jti1;
   ledger_entry_id: LedgerEntryId;
   plan_id: PlanId2;
-  request_id: RequestId4;
+  request_id: RequestId6;
   result: unknown;
   status: ToolExecutionStatus;
-  step_index: StepIndex3;
+  step_index: StepIndex4;
   tool: ToolName;
   tool_server_reached: ToolServerReached;
 }

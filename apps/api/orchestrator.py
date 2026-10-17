@@ -121,6 +121,12 @@ responder ran, the synthetic hijacked-model tool requests of
 real model requests (``attempt_off_plan`` only, never ``invoke_step``), each
 audit record marked ``simulation: "hijacked_model"``. Real steps still take
 their arguments only from the validated stored plan (E2 invariant above).
+
+Web answers (P4-01): once P3-06 recorded the ``pending`` ``web_private``
+row, the delivered text and the validated citations' titles are kept in the
+in-process, owner-scoped :class:`~apps.api.web_inbox.WebInbox`
+(``Orchestrator.web_inbox``), which ``GET /api/v1/requests/{id}`` reads for
+the requesting member only. A restart loses unread answers.
 """
 
 from __future__ import annotations
@@ -171,6 +177,7 @@ from apps.api.responder import (
     evidence_from_results,
 )
 from apps.api.responder import respond as default_respond
+from apps.api.web_inbox import InboxCitation, WebInbox
 from services.audit import store as default_audit
 from services.audit.errors import AuditError
 from services.contracts import (
@@ -185,6 +192,7 @@ from services.contracts import (
     DataTier,
     DecisionOutcome,
     DecisionSource,
+    DeliveryChannel,
     EntryPoint,
     ExternalMessageResult,
     FollowupTaskResult,
@@ -855,6 +863,7 @@ class Orchestrator:
         generate: GenerateFn | None = None,
         sender_provider: SenderProvider | None = None,
         confirmations: ConfirmationStore | None = None,
+        web_inbox: WebInbox | None = None,
         audit: Any = default_audit,
         plan_fn: Callable[..., Awaitable[PlanResult]] = default_plan,
         respond_fn: Callable[..., Awaitable[ResponderOutput]] = default_respond,
@@ -876,6 +885,7 @@ class Orchestrator:
         )
         # Not `or`: an empty store has len() == 0 and is falsy.
         self._confirmations = confirmations if confirmations is not None else ConfirmationStore()
+        self._web_inbox = web_inbox if web_inbox is not None else WebInbox()
         self._audit = audit
         self._plan_fn = plan_fn
         self._respond_fn = respond_fn
@@ -895,6 +905,11 @@ class Orchestrator:
     @property
     def confirmations(self) -> ConfirmationStore:
         return self._confirmations
+
+    @property
+    def web_inbox(self) -> WebInbox:
+        """Owner-scoped private web answers and offers (P4-01 reads it)."""
+        return self._web_inbox
 
     @property
     def confirmation_verifier(
@@ -1431,12 +1446,14 @@ class Orchestrator:
         run.stage = "record_answer"
         by_id = {item.source_id: item for item in evidence}
         citations = []
+        shown: list[InboxCitation] = []
         for source_id in output.citations:
             item = by_id.get(source_id)
             if item is None:
                 raise ResultShapeError("a citation is not in this request's evidence")
             # record_answer stores only source_id + tier per citation.
             citations.append(SourceCitation.model_construct(source_id=source_id, tier=item.tier))
+            shown.append(InboxCitation(source_id=source_id, tier=item.tier, title=item.title))
         await self._write(
             "record_answer",
             request_id=run.ctx.request_id,
@@ -1470,7 +1487,7 @@ class Orchestrator:
             parts.append(OFF_PLAN_NOTE.format(tools=", ".join(tried)))
         final = output.model_copy(update={"answer_text": "\n\n".join(parts)})
         run.stage = "deliver"
-        await self._deliver(run, final)
+        await self._deliver(run, final, shown)
 
     async def _route_off_plan(
         self,
@@ -1580,8 +1597,15 @@ class Orchestrator:
             run, ResponderOutput(request_id=run.ctx.request_id, answer_text=text)
         )
 
-    async def _deliver(self, run: _Run, output: ResponderOutput) -> DeliveryRecord:
-        """P3-06 delivery at ``highest_tier_returned``; the route comes from ``ctx``."""
+    async def _deliver(
+        self, run: _Run, output: ResponderOutput, citations: Sequence[InboxCitation] = ()
+    ) -> DeliveryRecord:
+        """P3-06 delivery at ``highest_tier_returned``; the route comes from ``ctx``.
+
+        A web answer whose ``pending`` ``web_private`` row was recorded is
+        then kept in the owner-scoped web inbox (P4-01); an unrecorded one
+        (``failed``) never is.
+        """
         run.delivery_started = True
         try:
             record = await asyncio.to_thread(
@@ -1596,6 +1620,13 @@ class Orchestrator:
         except DeliveryAuditAfterSendError:
             # Content is out but its audit row is missing: never re-send.
             raise _AuditWriteFailed("deliver", "audit_failed") from None
+        if (
+            run.ctx.entry_point is EntryPoint.WEB
+            and record.channel is DeliveryChannel.WEB_PRIVATE
+            and record.status == "pending"
+            and record.recipient_member_id == run.ctx.requester.member_id
+        ):
+            self._web_inbox.put_answer(run.ctx, output.answer_text, citations)
         logger.info(
             "delivery request_id=%s channel=%s tier=%s status=%s error=%s",
             run.ctx.request_id,

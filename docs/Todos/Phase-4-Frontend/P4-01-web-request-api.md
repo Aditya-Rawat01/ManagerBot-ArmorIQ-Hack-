@@ -7,7 +7,7 @@
 | Size | M (2–4 h) |
 | Target window | 15 Oct PM |
 | Gate role | Web uses the same path as Slack (Arch §9) |
-| Status | Not started |
+| Status | Implemented on `w6/a-p401-p307` (offline tests green; not merged). Handoff notes: §15.1 |
 
 ## 1. Task ID and title
 
@@ -110,6 +110,74 @@ cd apps/web && npm run gen:types && git diff --exit-code -- src/types/generated
 ## 15. Handoff deliverables for dependent agents
 
 - P4-02 / P4-03: endpoint contracts, generated TypeScript types, polling guidance (interval, terminal states).
+
+### 15.1 Handoff notes (as implemented)
+
+Interfaces: SHARED_INTERFACES §1.1 (endpoints, now as implemented), §10
+(`request_detail`, `simulation_activated`), §12 (orchestrator web inbox).
+D-21 is still open: the spec default (polling, the §1.1 paths) is
+implemented here as the P4-01 interface, not recorded as a decision.
+
+**Endpoints** (`apps/api/routes/requests.py`, contracts
+`services/contracts/api_requests.py`, TS in
+`apps/web/src/types/generated/contracts.ts`):
+
+- `POST /api/v1/requests`, body `CreateRequestBody` = `{message,
+  confirmation_token?, simulate_hijacked_model}` only (`extra="forbid"`,
+  strict types; `message` ≤ 4000 chars, non-blank unless
+  `confirmation_token` is set; a confirmation cannot enable the simulation).
+  Any other key (`persona`, `member_id`, `email`, `tier`, `recipient`, ...)
+  → `422 validation_error`, no input echo. No/invalid session → `401
+  unauthenticated` (checked before the body). No orchestrator → `503
+  requests_unavailable`. Refused by the orchestrator → `400
+  request_rejected`; not recorded → `503 request_not_recorded`. Success →
+  `202 CreateRequestResponse {request_id}` (`req-<32 hex>`).
+- `GET /api/v1/requests/{request_id}` → `RequestStatusView` for the session's
+  own request. Another member's ID, a missing ID and a malformed ID all give
+  the same `404 not_found`. `503` without the orchestrator / database.
+- `RequestStatusView`: `request_id`, `state` (`processing` |
+  `pending_approval` | `awaiting_confirmation` | `completed`), `outcome`
+  (`allow` | `block` | `hold` | `abstain` | `error` | `unverified` |
+  `clarification` | null), `note` (HOLD: console note, no approve action),
+  `steps[]` (`StepStatusView`: `step_index`, `tool`, `outcome`,
+  `decision_source`, `is_armoriq_policy`, `execution_status`,
+  `approval_state`), `off_plan_attempts[]` (`OffPlanAttemptView`: `tool`,
+  `outcome`, `decision_source`, server-worded `enforcement_layer`,
+  `is_armoriq_policy`, `executed: false`, `simulated`, `rejection`),
+  `simulation_active`, `egress_sink_executions`, `answer_text`,
+  `citations[]` (`CitationView`: `source_id`, `tier`, `title`), `abstained`,
+  `abstain_reason`, `delivery_channel`, `delivery_status`, `confirmation`
+  (`ConfirmationOfferView` or null), `last_event_at`.
+
+**Where values come from.** State, outcome, steps, off-plan attempts,
+simulation flag, sink count, citation IDs/tiers and delivery come only from
+persisted rows: `services.audit.queries.request_status` (owner gate) and the
+new owner-only `request_detail` (same owner rule). `answer_text`, citation
+titles and `confirmation` come from the requester's in-process web inbox
+(`apps/api/web_inbox.py`, `Orchestrator.web_inbox`): the orchestrator puts
+the delivered text there only after P3-06 recorded the `pending`
+`web_private` row; `main.py` registers `web_inbox.put_offer` as the web D-14
+confirmation presenter. Items are bound to member + workspace (anyone else
+gets nothing), expire after 1 hour, at most 1000 are kept. **A restart
+loses unread answers and offers** (single uvicorn worker, D-27): the status
+stays readable, the text does not; the user asks again. The web
+`delivery_events` row stays `pending` (follow-up: record `delivered` on the
+owner's first read).
+
+**For P4-02 / P4-03.** Sign in (P1-03 cookie), `POST`, then poll `GET` every
+2 s while `processing`, every 5 s while `pending_approval` (a HOLD can last
+`APPROVAL_TIMEOUT_MS`, 15 min); stop at `completed` or
+`awaiting_confirmation`. To confirm an escalation, post a NEW request with
+`confirmation_token = confirmation.token` (owner-only, single use, expires at
+`confirmation.expires_at`; never log or display it); to decline, let it
+expire. Show `enforcement_layer` / `decision_source` as given; claim
+"ArmorIQ policy" only when `is_armoriq_policy` is true (ADR-026). The
+simulation toggle is `simulate_hijacked_model` (P3-07 §15.1).
+
+**Deploy:** no new variable. The routes need the orchestrator settings
+(`ARMORIQ_API_KEY`, `PERSONA_{MAYA,SAM,PRIYA}_EMAIL`, `CTX_SECRET`,
+`DATABASE_URL_BACKEND`, `GEMINI_API_KEY`) and the session settings
+(`SESSION_SECRET`, `DEMO_PASSCODE`); one uvicorn worker.
 
 ## 16. GitHub issue title, body outline, labels, and dependencies
 

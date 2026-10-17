@@ -16,15 +16,14 @@ Routing (task §9.1):
 - ``web`` → ``web_private``, recorded as a ``pending`` delivery row, never
   ``delivered``; no Slack call.
 
-KNOWN GAP — web answer storage (ICR pending with P3-01 / P4-01): no table,
-store function, or API persists the private answer text so that
-``GET /api/v1/requests/{id}`` can return it to the owning session member
-(``delivery_events`` and ``request_events`` are metadata-only, and this
-module invents no storage). A web answer therefore reaches nobody yet, so it
-is recorded ``pending`` and ``request_status().delivered`` stays false.
-Once the ICR defines where the answer is stored and who records
-``delivered`` (e.g. when it is stored for, or fetched by, the owner), this
-branch writes there and records ``delivered`` accordingly.
+Web answer storage (P4-01): this module still only records the ``pending``
+``web_private`` row (``delivery_events`` / ``request_events`` stay
+metadata-only). After that row exists, the orchestrator keeps the text in
+its in-process, owner-scoped web inbox (``apps/api/web_inbox.py``), which
+``GET /api/v1/requests/{id}`` returns to the requesting member only (lost on
+a restart). Nothing records ``delivered`` for web yet, so
+``request_status().delivered`` stays false for web requests (follow-up:
+record ``delivered`` when the owner first reads it).
 
 Slack transport arrives as a :class:`SlackSender` (P3-05's agreed shape:
 ``post_in_thread`` / ``send_dm``, raising on failure). P3-05 is not merged,
@@ -417,9 +416,9 @@ def deliver(
     recipient = ctx.requester.member_id
 
     if ctx.entry_point is EntryPoint.WEB:
-        # KNOWN GAP (module docstring): nothing stores the web answer text
-        # yet, so it is recorded ``pending`` — never ``delivered`` — until
-        # the P3-01/P4-01 ICR defines answer storage.
+        # Recorded ``pending`` (never ``delivered``); the orchestrator keeps
+        # the text in the owner-scoped web inbox once this row exists (P4-01,
+        # module docstring).
         delivery_id = _record(
             db,
             ctx=ctx,

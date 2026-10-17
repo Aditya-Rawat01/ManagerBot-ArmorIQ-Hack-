@@ -2,7 +2,8 @@
 
 Authorization model (callers: P4-01 web request routes, P4-04 manager console):
 
-- ``request_status`` is owner-only: the caller passes the *trusted*
+- ``request_status`` and ``request_detail`` (P4-01 addition) are
+  owner-only: the caller passes the *trusted*
   ``member_id`` resolved from the session (P1-03), never a client-supplied
   string. A bare ``member_id`` proves nothing on its own — the route must
   resolve it from the signed session first.
@@ -183,6 +184,232 @@ def request_status(db: AuditDatabase, request_id: str, member_id: str) -> Reques
             pending_holds=int(holds_row[0]) if holds_row else 0,
             delivered=bool(delivered_row and delivered_row[0]),
             last_event_at=last_row[0] if last_row else None,
+        )
+
+
+@dataclass(frozen=True)
+class StepRecord:
+    """One planned step as persisted (P4-01 status view)."""
+
+    step_index: int
+    tool_name: str | None
+    outcome: str | None = None
+    decision_source: str | None = None
+    approval_state: str | None = None
+    execution_status: str | None = None
+
+
+@dataclass(frozen=True)
+class OffPlanRecord:
+    """One off-plan decision event (``off_plan: true``; never executed)."""
+
+    tool_name: str | None
+    outcome: str
+    decision_source: str
+    rejection: str | None
+    simulated: bool
+
+
+@dataclass(frozen=True)
+class AnswerRecord:
+    """The persisted ``record_answer`` event: citation IDs + tiers only."""
+
+    abstained: bool
+    reason: str | None
+    citations: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class RequestDetail:
+    """Owner-only persisted state of one request (P4-01 GET).
+
+    Built only from ``request_events``, ``decision_events``, ``plan_steps``,
+    ``approval_requests`` and ``delivery_events`` (never protected tables
+    or tool-server tables, which the backend role cannot read).
+    ``honeypot_executions`` counts this request's ``tool_executed``
+    references (ledger-backed by construction) for ``send_external_message``
+    steps: the only way the honeypot can write its synthetic sink.
+    """
+
+    request_id: str
+    entry_point: str
+    steps: tuple[StepRecord, ...]
+    off_plan: tuple[OffPlanRecord, ...]
+    plan_decision: tuple[str, str] | None  # (outcome, source) of a failed mint
+    error: bool
+    plan_rejected: bool
+    escalated: bool
+    simulation_active: bool
+    answer: AnswerRecord | None
+    delivery_channel: str | None
+    delivery_status: str | None
+    pending_holds: int
+    honeypot_executions: int
+    last_event_at: datetime | None
+
+
+_HONEYPOT_TOOL = "send_external_message"
+
+
+def _dict(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+@fail_closed
+def request_detail(db: AuditDatabase, request_id: str, member_id: str) -> RequestDetail:
+    """Owner-only persisted detail for P4-01 (same owner rule as ``request_status``).
+
+    ``member_id`` must be the session-resolved member (P1-03). Another
+    member's request raises ``AuditNotAuthorizedError``; a missing one
+    ``AuditNotFoundError``. Payloads are re-redacted before use.
+    """
+    with db.tx() as cursor:
+        origin = _request_origin(cursor, request_id)
+        payload = _dict(origin["payload"])
+        if payload.get("requester_member_id") != member_id:
+            raise AuditNotAuthorizedError("request belongs to another member")
+        cursor.execute(
+            "SELECT ps.step_index, ps.tool_name FROM plan_steps ps "
+            "JOIN plans p ON p.id = ps.plan_id WHERE p.request_id = %s "
+            "ORDER BY p.created_at, ps.step_index LIMIT %s",
+            [request_id, _MAX_LIMIT],
+        )
+        tools: dict[int, str | None] = {}
+        for step_index, tool_name in _rows(cursor):
+            if isinstance(step_index, int):
+                tools[step_index] = _text(tool_name)
+        steps: dict[int, dict[str, str | None]] = {index: {} for index in tools}
+
+        cursor.execute(
+            "SELECT event_type, step_index, decision_source, payload FROM decision_events "
+            "WHERE request_id = %s ORDER BY occurred_at, id LIMIT %s",
+            [request_id, _TIMELINE_LIMIT],
+        )
+        off_plan: list[OffPlanRecord] = []
+        plan_decision: tuple[str, str] | None = None
+        error = False
+        executed_honeypots = 0
+        for event_type, step_index, source, raw in _rows(cursor):
+            data = redact_payload(_dict(raw))
+            if event_type in ("tool_executed", "tool_rejected"):
+                if isinstance(step_index, int) and step_index in steps:
+                    status = _text(data.get("execution_status"))
+                    if event_type == "tool_executed":
+                        status = "executed"
+                        if tools.get(step_index) == _HONEYPOT_TOOL:
+                            executed_honeypots += 1
+                    steps[step_index]["execution_status"] = status
+                continue
+            if event_type != "authorization_decided":
+                continue
+            outcome = _text(data.get("outcome")) or "unverified"
+            label = _text(source) or "unknown"
+            if data.get("request_outcome") == "error":
+                error = True
+            elif data.get("off_plan") is True:
+                off_plan.append(
+                    OffPlanRecord(
+                        tool_name=_text(data.get("tool_name")),
+                        outcome=outcome,
+                        decision_source=label,
+                        rejection=_text(data.get("rejection")),
+                        simulated=data.get("simulation") == "hijacked_model",
+                    )
+                )
+            elif isinstance(step_index, int) and step_index in steps:
+                steps[step_index]["outcome"] = outcome
+                steps[step_index]["decision_source"] = label
+                approval = _text(data.get("approval_state"))
+                if approval is not None:
+                    steps[step_index]["approval_state"] = approval
+            elif data.get("stage") == "start_plan":
+                plan_decision = (outcome, label)
+
+        cursor.execute(
+            "SELECT ar.step_index, ar.state FROM approval_requests ar "
+            "JOIN plans p ON p.id = ar.plan_id WHERE p.request_id = %s ORDER BY ar.id LIMIT %s",
+            [request_id, _MAX_LIMIT],
+        )
+        latest_approval: dict[int, str] = {}
+        for step_index, state in _rows(cursor):
+            if isinstance(step_index, int) and isinstance(state, str):
+                latest_approval[step_index] = state
+        for step_index, state in latest_approval.items():
+            if step_index in steps:
+                steps[step_index]["approval_state"] = state
+
+        cursor.execute(
+            "SELECT event_type, payload, occurred_at FROM request_events "
+            "WHERE request_id = %s ORDER BY occurred_at, id LIMIT %s",
+            [request_id, _TIMELINE_LIMIT],
+        )
+        answer: AnswerRecord | None = None
+        plan_rejected = escalated = simulation_active = False
+        last_event_at: datetime | None = None
+        for event_type, raw, occurred_at in _rows(cursor):
+            if isinstance(occurred_at, datetime):
+                last_event_at = occurred_at
+            data = redact_payload(_dict(raw))
+            if event_type == "plan_rejected":
+                plan_rejected = True
+            elif event_type == "escalation_created":
+                escalated = True
+            elif event_type == "simulation_activated":
+                simulation_active = True
+            elif event_type in ("answer_generated", "answer_abstained"):
+                citations = []
+                listed = data.get("citations")
+                for item in listed if isinstance(listed, list) else []:
+                    entry = _dict(item)
+                    source_id, tier = _text(entry.get("source_id")), _text(entry.get("tier"))
+                    if source_id and tier:
+                        citations.append((source_id, tier))
+                answer = AnswerRecord(
+                    abstained=event_type == "answer_abstained",
+                    reason=_text(data.get("reason")),
+                    citations=tuple(citations),
+                )
+
+        cursor.execute(
+            "SELECT delivery_channel, delivery_status FROM delivery_events "
+            "WHERE request_id = %s ORDER BY occurred_at DESC, id DESC LIMIT 1",
+            [request_id],
+        )
+        delivery = cursor.fetchone()
+        channel = status = None
+        if isinstance(delivery, Sequence) and len(delivery) == 2:
+            channel, status = _text(delivery[0]), _text(delivery[1])
+
+        return RequestDetail(
+            request_id=request_id,
+            entry_point=str(payload.get("entry_point", "")),
+            steps=tuple(
+                StepRecord(
+                    step_index=index,
+                    tool_name=tools.get(index),
+                    outcome=values.get("outcome"),
+                    decision_source=values.get("decision_source"),
+                    approval_state=values.get("approval_state"),
+                    execution_status=values.get("execution_status"),
+                )
+                for index, values in sorted(steps.items())
+            ),
+            off_plan=tuple(off_plan),
+            plan_decision=plan_decision,
+            error=error,
+            plan_rejected=plan_rejected,
+            escalated=escalated,
+            simulation_active=simulation_active,
+            answer=answer,
+            delivery_channel=channel,
+            delivery_status=status,
+            pending_holds=sum(1 for state in latest_approval.values() if state == "pending"),
+            honeypot_executions=executed_honeypots,
+            last_event_at=last_event_at,
         )
 
 
@@ -388,13 +615,18 @@ def unanswered(
 
 
 __all__ = [
+    "AnswerRecord",
+    "OffPlanRecord",
     "PendingHold",
+    "RequestDetail",
     "RequestStatusView",
     "RequestSummary",
+    "StepRecord",
     "TimelineEntry",
     "UnansweredItem",
     "pending_holds",
     "recent_requests",
+    "request_detail",
     "request_status",
     "timeline",
     "unanswered",

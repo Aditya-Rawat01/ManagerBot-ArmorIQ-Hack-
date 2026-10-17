@@ -342,6 +342,120 @@
       "title": "AuthenticatedUser",
       "type": "object"
     },
+    "CitationView": {
+      "additionalProperties": false,
+      "description": "A validated citation of the delivered answer (source ID + tier persisted;\nthe title only from the owner's web inbox).",
+      "properties": {
+        "source_id": {
+          "title": "Source Id",
+          "type": "string"
+        },
+        "tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        }
+      },
+      "required": [
+        "source_id",
+        "tier",
+        "title"
+      ],
+      "title": "CitationView",
+      "type": "object"
+    },
+    "ConfirmationOfferView": {
+      "additionalProperties": false,
+      "description": "A pending D-14 confirmation for the owner's confirm control.\n\n``token`` is the single-use value the web confirm button posts back as\n``confirmation_token``; it is shown only to the requesting member's\nsession, only until it expires, and is never logged or audited.",
+      "properties": {
+        "escalation_id": {
+          "title": "Escalation Id",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "requested_tier": {
+          "$ref": "#/$defs/DataTier"
+        },
+        "token": {
+          "title": "Token",
+          "type": "string"
+        }
+      },
+      "required": [
+        "escalation_id",
+        "requested_tier",
+        "expires_at",
+        "token"
+      ],
+      "title": "ConfirmationOfferView",
+      "type": "object"
+    },
+    "CreateRequestBody": {
+      "additionalProperties": false,
+      "description": "Web request body. No identity, tier, or recipient field exists (R-10).",
+      "properties": {
+        "confirmation_token": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmation Token"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Message",
+          "type": "string"
+        },
+        "simulate_hijacked_model": {
+          "default": false,
+          "title": "Simulate Hijacked Model",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "message",
+        "confirmation_token",
+        "simulate_hijacked_model"
+      ],
+      "title": "CreateRequestBody",
+      "type": "object"
+    },
+    "CreateRequestResponse": {
+      "additionalProperties": false,
+      "description": "``202`` body: the orchestrator-minted request ID (``req-<32 hex>``).",
+      "properties": {
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id"
+      ],
+      "title": "CreateRequestResponse",
+      "type": "object"
+    },
     "DataTier": {
       "description": "Knowledge sensitivity tiers (PRD v2 §5.1). Encoded in tool names, never in arguments.",
       "enum": [
@@ -375,6 +489,16 @@
         "unknown"
       ],
       "title": "DecisionSource",
+      "type": "string"
+    },
+    "DeliveryChannel": {
+      "description": "Where an answer was delivered (Architecture v2.1 §7.2).",
+      "enum": [
+        "slack_thread",
+        "slack_dm",
+        "web_private"
+      ],
+      "title": "DeliveryChannel",
       "type": "string"
     },
     "EntryPoint": {
@@ -569,6 +693,69 @@
       "title": "McpEndpoint",
       "type": "string"
     },
+    "OffPlanAttemptView": {
+      "additionalProperties": false,
+      "description": "A model-requested tool call routed off-plan (P3-03/P3-07). Never executed.\n\n``enforcement_layer`` is the server's wording for ``decision_source``;\n``is_armoriq_policy`` is true only for ArmorIQ policy sources (ADR-026),\nnever for the client-side SDK plan check or application rules.",
+      "properties": {
+        "decision_source": {
+          "$ref": "#/$defs/DecisionSource"
+        },
+        "enforcement_layer": {
+          "title": "Enforcement Layer",
+          "type": "string"
+        },
+        "executed": {
+          "const": false,
+          "default": false,
+          "title": "Executed",
+          "type": "boolean"
+        },
+        "is_armoriq_policy": {
+          "title": "Is Armoriq Policy",
+          "type": "boolean"
+        },
+        "outcome": {
+          "$ref": "#/$defs/DecisionOutcome"
+        },
+        "rejection": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rejection"
+        },
+        "simulated": {
+          "title": "Simulated",
+          "type": "boolean"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "tool",
+        "outcome",
+        "decision_source",
+        "enforcement_layer",
+        "is_armoriq_policy",
+        "executed",
+        "simulated",
+        "rejection"
+      ],
+      "title": "OffPlanAttemptView",
+      "type": "object"
+    },
     "PersonaKey": {
       "description": "Fictional demo members (PRD v2 §1). Labels only — never identity proof.",
       "enum": [
@@ -757,6 +944,177 @@
       "title": "RequestContext",
       "type": "object"
     },
+    "RequestStatusView": {
+      "additionalProperties": false,
+      "description": "Owner-only status of one request (P4-01, polled by P4-02/P4-03).",
+      "properties": {
+        "abstain_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Abstain Reason"
+        },
+        "abstained": {
+          "title": "Abstained",
+          "type": "boolean"
+        },
+        "answer_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Answer Text"
+        },
+        "citations": {
+          "items": {
+            "$ref": "#/$defs/CitationView"
+          },
+          "title": "Citations",
+          "type": "array"
+        },
+        "confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmationOfferView"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery_channel": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeliveryChannel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivery_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Delivery Status"
+        },
+        "egress_sink_executions": {
+          "description": "Executed send_external_message steps of this request, counted from the persisted ledger-backed execution references (the only way the honeypot writes its synthetic sink). Guarded mode: always 0. The backend cannot read the sink table itself (grant PROPOSED, SHARED_INTERFACES §7).",
+          "minimum": 0,
+          "title": "Egress Sink Executions",
+          "type": "integer"
+        },
+        "last_event_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Last Event At"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Note"
+        },
+        "off_plan_attempts": {
+          "items": {
+            "$ref": "#/$defs/OffPlanAttemptView"
+          },
+          "title": "Off Plan Attempts",
+          "type": "array"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "enum": [
+                "allow",
+                "block",
+                "hold",
+                "abstain",
+                "error",
+                "unverified",
+                "clarification"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Outcome"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "simulation_active": {
+          "title": "Simulation Active",
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "processing",
+            "pending_approval",
+            "awaiting_confirmation",
+            "completed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/StepStatusView"
+          },
+          "title": "Steps",
+          "type": "array"
+        }
+      },
+      "required": [
+        "request_id",
+        "state",
+        "outcome",
+        "note",
+        "steps",
+        "off_plan_attempts",
+        "simulation_active",
+        "egress_sink_executions",
+        "answer_text",
+        "citations",
+        "abstained",
+        "abstain_reason",
+        "delivery_channel",
+        "delivery_status",
+        "confirmation",
+        "last_event_at"
+      ],
+      "title": "RequestStatusView",
+      "type": "object"
+    },
     "ReviewStatus": {
       "description": "Knowledge authority (PRD v2 §8.4). Supersession is tracked separately.",
       "enum": [
@@ -886,6 +1244,82 @@
         "reference_url"
       ],
       "title": "SourceCitation",
+      "type": "object"
+    },
+    "StepStatusView": {
+      "additionalProperties": false,
+      "description": "One planned step as persisted (decision, approval, execution reference).",
+      "properties": {
+        "approval_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decision_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolExecutionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "is_armoriq_policy": {
+          "title": "Is Armoriq Policy",
+          "type": "boolean"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DecisionOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "step_index": {
+          "minimum": 0,
+          "title": "Step Index",
+          "type": "integer"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "step_index",
+        "tool",
+        "outcome",
+        "decision_source",
+        "is_armoriq_policy",
+        "execution_status",
+        "approval_state"
+      ],
+      "title": "StepStatusView",
       "type": "object"
     },
     "ToolExecutionStatus": {

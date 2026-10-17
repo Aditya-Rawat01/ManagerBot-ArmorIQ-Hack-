@@ -40,7 +40,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     are built only when every required setting exists (names in
     ``apps.api.orchestrator.REQUIRED_SETTINGS``); they then set
     ``app.state.orchestrator`` (``confirm`` and ``handle`` for P4-01) and
-    ``app.state.orchestrator_handle`` (the Slack ``OrchestratorHandle``).
+    ``app.state.orchestrator_handle`` (the Slack ``OrchestratorHandle``),
+    plus ``app.state.audit_db`` (the owner-only status reads of P4-01) and the
+    web confirmation presenter (the owner-scoped web inbox, P4-01).
     Missing settings are logged by NAME only and the API serves HTTP only.
     Construction makes no network call (clients and the pool are lazy).
 
@@ -108,8 +110,13 @@ def _start_orchestrator(app: FastAPI) -> tuple[Any, Any, Any]:
         return None, None, None
     if settings.min_score is None:
         logger.info("MIN_SCORE unset: answers abstain (threshold_unset) until E17 calibrates it")
+    from services.contracts import EntryPoint
+
+    # P4-01: D-14 offers for web requests go to the requester's web inbox.
+    orchestrator.set_confirmation_presenter(EntryPoint.WEB, orchestrator.web_inbox.put_offer)
     app.state.orchestrator = orchestrator
     app.state.orchestrator_handle = orchestrator.handle
+    app.state.audit_db = db
     logger.info("orchestrator ready")
     return orchestrator, db, slot
 
