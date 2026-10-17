@@ -204,6 +204,27 @@ def test_team_notes_cannot_supersede_themselves() -> None:
     assert "VALIDATE CONSTRAINT team_notes_not_self_superseded" in text
 
 
+def test_team_notes_least_privilege_for_the_toolserver() -> None:
+    """Review M2 (0013): no DELETE, UPDATE only on the lifecycle columns (in
+    that order: the table-level revoke would drop a column grant made
+    before it), and the grant check covers both."""
+    text = _sql_text()
+    revoke_update = text.rindex("REVOKE UPDATE ON public.team_notes FROM proxylead_toolserver;")
+    column_grant = text.rindex("GRANT UPDATE (review_status, approved_by_member_id, approved_at,")
+    assert "REVOKE DELETE ON public.team_notes FROM proxylead_toolserver;" in text
+    assert revoke_update < column_grant
+    assert column_grant > text.rindex(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON public.team_notes TO proxylead_toolserver"
+    )
+    granted = text[column_grant : text.index(")", column_grant)]
+    assert set(verify_script.TEAM_NOTES_LIFECYCLE_COLUMNS) == set(
+        re.findall(r"[a-z_]+", granted.split("(", 1)[1])
+    )
+    assert not set(verify_script.TEAM_NOTES_IMMUTABLE_COLUMNS) & set(
+        verify_script.TEAM_NOTES_LIFECYCLE_COLUMNS
+    )
+
+
 def test_backend_can_read_metadata_view() -> None:
     assert "GRANT SELECT ON public.draft_review_queue TO proxylead_backend" in _sql_text()
 

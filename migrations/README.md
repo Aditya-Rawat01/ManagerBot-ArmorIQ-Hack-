@@ -90,7 +90,8 @@ still verify numbering, grants, and enum parity.
 | `workspaces`, `members` | SELECT | — (denied) |
 | `slack_events`, `topic_access_rules`, `plans`, `plan_steps`, `approval_requests`, `unanswered_questions` | full CRUD (UPDATE on approvals required for resolution) | — (denied) |
 | `request_events`, `decision_events`, `delivery_events` | SELECT + INSERT (append-only; `plan_id` FKs are `ON DELETE RESTRICT` since 0009, so deleting a plan cannot cascade into them) | — (denied) |
-| `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | — (denied) | full CRUD |
+| `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance` | — (denied) | full CRUD |
+| `team_notes` | — (denied) | SELECT + INSERT; UPDATE only on `review_status`, `approved_by_member_id`, `approved_at`, `superseded_by_id`, `provenance`, `updated_at`; DELETE revoked (0013) |
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
 | `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |
 | `tool_call_attempts` (0008) | — (denied, incl. INSERT) | SELECT + INSERT (append-only) |

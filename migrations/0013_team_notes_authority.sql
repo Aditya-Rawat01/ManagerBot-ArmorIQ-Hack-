@@ -4,27 +4,33 @@
 -- when the merge of main (P2-10 follow-up, claimed 0012 on issue #23, pushed
 -- first) left two 0012 files. `migrate.py` refuses duplicate numbers, and
 -- only this file (the later claim) moved — the re-claim is recorded on #24.
--- `team_notes` is a
--- toolserver-exclusive table (SHARED_INTERFACES DB ledger: backend has no
--- SELECT), so this is no shared-interface change and needs no ICR. The
--- ADR-023 `draft_review_queue` keeps its exact 0006 column list; only its
--- filter tightens (superseded drafts leave the queue, review I1).
+-- Amended by the PR #79 review fixes (unmerged, never applied to Neon).
 --
--- Adds what PRD v2 §8.1 requires every record to carry and P2-09 step 9
--- writes, none of which the 0003 table had:
---   * tier            — D-10 (resolved 16 Oct 2026): saved notes are ALWAYS
---                       team-tier. The CHECK encodes that as an invariant:
---                       no future code path can store another tier.
---   * provenance      — request_id / jti / recorded_at from the verified
---                       `_ctx`, injected by trusted code, never arguments.
---   * approved_by /   — step 9.2: Maya's confirmation provenance (who
---     approved_at         confirmed, and when). NULL while draft.
+-- `team_notes` is a toolserver-exclusive table (SHARED_INTERFACES DB ledger:
+-- backend has no SELECT), so this is no shared-interface change and needs no
+-- ICR. The ADR-023 `draft_review_queue` keeps its exact 0006 column list;
+-- only its filter tightens (superseded drafts leave the queue, review I1).
 --
--- version and supersession constraints already exist (0003), so nothing else
--- changes. Existing rows take the defaults (team-tier drafts, unapproved).
--- Grants travel with objects (migrations/README.md rule 3): table-level
--- grants from 0005 cover the new columns; the seed insert lists its columns
--- explicitly and is unaffected.
+-- 1. Columns PRD v2 §8.1 requires every record to carry and P2-09 step 9
+--    writes, none of which the 0003 table had:
+--      * tier            — D-10: saved notes are ALWAYS team-tier. The CHECK
+--                          encodes that as an invariant: no future code path
+--                          can store another tier.
+--      * provenance      — request_id / jti / recorded_at from the verified
+--                          `_ctx`, injected by trusted code, never arguments.
+--      * approved_by /   — step 9.2: Maya's confirmation provenance (who
+--        approved_at         confirmed, and when). NULL while draft.
+--    Existing rows take the defaults (team-tier drafts, unapproved).
+-- 2. CHECK: a note never supersedes itself (review I2).
+-- 3. `draft_review_queue` lists current drafts only (review I1).
+-- 4. Least privilege for the tool server on `team_notes` (review M2): no
+--    DELETE (history is never deleted), and UPDATE only on the lifecycle
+--    columns P2-09 writes. Content, title, kind, author, workspace, tier,
+--    version and hashes are immutable for the runtime role. The seed ingest
+--    runs as the migration role and is unaffected.
+-- Confirmed notes are also written to `source_records` / `knowledge_chunks`
+-- (D-09 rule 2): the 0005 toolserver grants on those tables already cover it,
+-- so nothing is widened here.
 
 ALTER TABLE public.team_notes
     ADD COLUMN IF NOT EXISTS tier TEXT NOT NULL DEFAULT 'team'
@@ -79,3 +85,18 @@ WHERE review_status = 'draft'
 REVOKE ALL ON public.draft_review_queue FROM PUBLIC;
 REVOKE ALL ON public.draft_review_queue FROM proxylead_toolserver;
 GRANT SELECT ON public.draft_review_queue TO proxylead_backend;
+
+-- Review M2: least privilege on team_notes for the tool server. Its only
+-- statements are INSERT (save), SELECT (+ FOR UPDATE, which needs UPDATE on
+-- at least one column), and UPDATEs of the lifecycle columns (confirm:
+-- review_status / approved_by_member_id / approved_at / updated_at;
+-- supersede: superseded_by_id / provenance / updated_at). Revoking the
+-- table-level UPDATE also drops any column grants, so the column grant
+-- follows it. The backend stays denied (0005).
+REVOKE DELETE ON public.team_notes FROM proxylead_toolserver;
+REVOKE UPDATE ON public.team_notes FROM proxylead_toolserver;
+GRANT UPDATE (review_status, approved_by_member_id, approved_at, superseded_by_id,
+              provenance, updated_at)
+    ON public.team_notes TO proxylead_toolserver;
+GRANT SELECT, INSERT ON public.team_notes TO proxylead_toolserver;
+REVOKE ALL ON public.team_notes FROM proxylead_backend;
