@@ -128,7 +128,7 @@ begin, cannot be accepted), or `defer` (can be decided later).
 - Decider: `Aditya-Rawat01` with `samarth-chawla`. Needed before **P2-09**. Blocking: **finish**.
 
 **RESOLVED 16 Oct 2026 by `Aditya-Rawat01` with `samarth-chawla` (relayed; D-10
-+ D-09 rule 2, no ADR). Implemented in P2-09 (PR #74).**
++ D-09 rule 2, no ADR). Implemented in P2-09 (PR #79).**
 
 1. A saved note is **always `team`-tier and always a draft** — including notes
    saved from a DM that discuss confidential topics (the requester's own
