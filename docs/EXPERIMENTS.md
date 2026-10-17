@@ -13,7 +13,7 @@ organization and the deployed HTTPS MCP endpoint. Mocks never pass a gate.
 | E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | — |
 | E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | — |
 | E5 | E12 + E14 | Agent/MCP/tool names, member resolution, policy schema | **NOT RUN** | — |
-| E17 | — | Grounding: threshold, citations, abstention | **NOT RUN** | — |
+| E17 | — | Grounding: threshold, citations, abstention | **PASS** for G6 (2026-10-17 17:26 UTC, local DB, not ArmorIQ evidence): `MIN_SCORE=0.65` chosen on train; held-out 1 false accept (weak evidence), 0 false abstains. Weak-evidence and conflict abstention NOT MET | §E17 record below |
 
 As of the foundation bootstrap (2026-10-14) no ArmorIQ organization, API key,
 or deployed MCP endpoint has been used from this repository.
@@ -711,6 +711,177 @@ gateway should tell the two apart (by `exc.action` or the HTTP status).
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query']; `_policy_context` sent as injected: no (replaced before sending)
   - signed `_ctx` jti(s): dcf2511175914b42bfb734c7ec613f68
   - DB: attempt row #54 (knowledge_search_team, accepted, jti dcf2511175914b42bfb734c7ec613f68); ledger row #22 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
+
+## E17 record (P3-08, #30)
+
+**Status: PASS for G6 (2026-10-17 17:26 UTC): E17 recorded and `MIN_SCORE` calibrated on the
+train split (0.65) and configured. Two PRD §8.3 behaviors are NOT MET and listed below:
+weak-evidence abstention (3 of 3 cases are false accepts) and conflict abstention (0 of 2).**
+
+This is evidence of retrieval and responder behavior on a small synthetic corpus. It is not
+proof of factual correctness, and it is **not ArmorIQ evidence** (ArmorIQ is not involved).
+
+### E17 — grounding evaluation and `MIN_SCORE` calibration
+
+- Run at (UTC): 2026-10-17 17:26 (three identical runs: `--split train`, `--split heldout`,
+  `--split all`; a fourth `--split all` run was byte-identical, sha256 `e970bac5…aa8c`)
+- Operator: `VTCodeCraft` (via Claude Code)
+- Commit: harness, eval set and tests at `da05181` (branch `w6/b-p308-e17`, base `main`
+  `187988b`), run from a `git archive` snapshot of `da05181` in a clean `python:3.12-slim`
+  container (`pip install -e ".[api,toolserver,dev]"`, Python 3.12.15, `HF_HUB_OFFLINE=1`).
+- Database: a local throw-away `pgvector/pgvector:pg18` container (PostgreSQL 18.6, pgvector
+  0.8.7), no published ports. `scripts/migrate.py` (13 applied), the DOCKER.md §6 login roles,
+  then `python -m services.knowledge.ingest --source seed/` with synthetic
+  `PERSONA_*_EMAIL=<persona>@example.test` (15 sources, 16 chunks, 3 members). The harness
+  connected as the **toolserver login role** (`DATABASE_URL_TOOLSERVER`). Never Neon.
+- Embedding model: `BAAI/bge-small-en-v1.5+fastembed-0.9.0` (read from the ingested sources'
+  provenance; 384 dims; local ONNX, no hosted API).
+- Score: `KnowledgeSearchHit.score` = cosine similarity of the returned chunk (P2-05). The
+  responder grounds only on search hits with `score >= MIN_SCORE`.
+- Harness path (spec §9 step 2): the tool server's own app (`create_app`) in-process, called
+  over MCP streamable HTTP with a bearer and an HMAC-signed test `_ctx` per call (both random
+  per run). Every call went through the real dispatcher: `_ctx` verification, argument
+  validation, member tier ceiling, the `knowledge_search_*` handler, hybrid retrieval
+  (limit 10), and a ledger row. The responder was the production `respond(...)` fed by
+  `evidence_from_results(...)` with no `refutes` links (what the orchestrator passes today),
+  with an **offline extractive generator** that cites every grounding source it is given (no
+  LLM call, so no Gemini behavior is measured).
+- Corpus: 15 source records, 14 searchable (active + authoritative); chunks: team 10,
+  confidential 4, restricted 2. Superseded: `team-release-checklist-v1`.
+- Eval set (`seed/eval/`, synthetic, fixed split): **train 27** cases (`e17_train.json`:
+  answerable 10, superseded 2, escalation 5, unrelated 7, weak_evidence 2, conflict 1) and
+  **held-out 20** (`e17_heldout.json`: answerable 7, superseded 1, escalation 5, unrelated 5,
+  weak_evidence 1, conflict 1). All three personas ask escalation questions in both splits.
+  Conflict cases are excluded from calibration (a threshold cannot produce the `conflict`
+  abstention), so calibration uses 26 train cases (15 answerable, 11 unanswerable) and is
+  measured on 19 held-out cases (11 answerable, 8 unanswerable).
+- Calibration rule (`choose_threshold`, train only; held-out cases are refused): fixed grid
+  0.30..0.95 in steps of 0.01; cost = 2 × false accepts + false abstains + misgrounded accepts
+  (a false accept costs double: grounding fails closed, D-23); among the minimal-cost values,
+  the upper median. Minimal train cost was 4 for every value from 0.62 to 0.68 (7 values), so
+  the choice is **0.65**, the middle of that gap.
+
+Candidate thresholds (harness output; FA = false accept, FAb = false abstain, MG = accepted
+without any expected source clearing the threshold):
+
+| MIN_SCORE | train FA | train FAb | train MG | train cost | held-out FA | held-out FAb | held-out MG |
+|---|---|---|---|---|---|---|---|
+| 0.30 | 11 | 0 | 0 | 22 | 8 | 0 | 0 |
+| 0.35 | 11 | 0 | 0 | 22 | 8 | 0 | 0 |
+| 0.40 | 11 | 0 | 0 | 22 | 8 | 0 | 0 |
+| 0.45 | 10 | 0 | 0 | 20 | 8 | 0 | 0 |
+| 0.50 | 9 | 0 | 0 | 18 | 6 | 0 | 0 |
+| 0.55 | 6 | 0 | 0 | 12 | 5 | 0 | 0 |
+| 0.60 | 4 | 0 | 0 | 8 | 2 | 0 | 0 |
+| 0.65 **chosen** | 2 | 0 | 0 | 4 | 1 | 0 | 0 |
+| 0.70 | 2 | 1 | 0 | 5 | 1 | 0 | 0 |
+| 0.75 | 2 | 2 | 0 | 6 | 1 | 3 | 0 |
+| 0.80 | 0 | 8 | 0 | 8 | 0 | 9 | 0 |
+| 0.85 | 0 | 10 | 0 | 10 | 0 | 10 | 0 |
+| 0.90 | 0 | 15 | 0 | 15 | 0 | 11 | 0 |
+| 0.95 | 0 | 15 | 0 | 15 | 0 | 11 | 0 |
+
+- **Chosen `MIN_SCORE`: 0.65** (train only).
+- Train at 0.65: false accepts **2** (`tr-weak-billing-cost` 0.7623, `tr-weak-billing-invoice`
+  0.7618); false abstains **0**; misgrounded **0**.
+- **Held-out at 0.65: false accepts 1** (`ho-weak-billing-fixed`, max score 0.7909 on
+  `team-billing-rumor`); **false abstains 0**; misgrounded 0. All 11 held-out answerable
+  cases are correct accepts (an expected source clears 0.65); 7 of 8 held-out unanswerable
+  cases abstain (`no_evidence`).
+- Score separation: lowest answerable max score 0.6876 (train, `tr-ans-rotation-ack`) /
+  0.7403 (held-out); highest unrelated or no-access max score 0.6109 (train,
+  `tr-esc-deny-workforce-sam`) / 0.6391 (held-out, `ho-esc-deny-breach-sam`). Across both
+  splits the clean gap is only 0.6391..0.6876: 0.65 sits 0.011 above the closest refusal and
+  0.038 below the closest answer.
+
+Acceptance (PRD §8.3), over all 47 cases at 0.65:
+
+| Item | Result | Evidence |
+|---|---|---|
+| No answer unless an allowed result clears `MIN_SCORE` | **MET** | 0 violations: every answered case has an allowed hit ≥ 0.65; responder and metric agree on every non-conflict case |
+| Every citation is a source returned in this request | **MET** | 0 violations (the responder's own citation validation ran on every draft) |
+| Superseded records not presented as current | **MET** | `team-release-checklist-v1` never returned or cited; the 3 superseded-topic cases (2 train, 1 held-out) answer from `team-release-checklist-v2` only |
+| No unauthorized tier content or metadata | **MET** | 10 above-ceiling calls (Priya → confidential/restricted, Sam → restricted) were all refused `out_of_scope` by the tool server's tier ceiling, with no result body; no returned hit above the persona's ceiling; the 4 no-access cases abstain |
+| Weak evidence below the threshold | **NOT MET** | the rumor record `team-billing-rumor` is authoritative and on-topic, so it scores 0.76–0.79 (above most answerable cases); rejecting it needs about 0.80, which abstains on 8 of 15 train (9 of 11 held-out) answerable cases. 3/3 weak-evidence cases are false accepts |
+| Conflicting decisions abstain (`conflict`) | **NOT MET** | `tr-conflict-ci-runners` and `ho-conflict-ci-selfhost` answered, citing both CI-runner records: nothing produces a `refutes` link yet (responder docstring; a P2-04/P2-08 ICR) |
+| False accepts and false abstains documented | **MET** | listed above and in the per-case table |
+
+Limitations:
+- Small corpus (14 searchable sources) and 45 calibration cases; the clean gap is 0.05 wide, so
+  the threshold is noisy. Recalibrate (rerun this harness) whenever the embedding model, the
+  chunking, or the corpus changes, and before any claim on a larger corpus.
+- The generator is an offline stand-in: the record measures retrieval scores and the
+  responder's deterministic gates, not Gemini's answers. With the real model, a weak-evidence
+  answer could still be declined in text, but that is untested.
+- The harness calls the tool server in-process. ArmorIQ policy, the planner's tool choice and
+  the deployed Render/Neon stack are not exercised (E1–E5 cover ArmorIQ).
+- Eval questions were written by the operator with knowledge of the corpus; held-out phrasing
+  differs from train, but this is not an independent test set.
+
+- Outcome: **PASS** for G6 (record complete, `MIN_SCORE` calibrated on train and measured on
+  held-out, failures listed). Grounding claims are limited accordingly: weak-evidence and
+  conflict abstention are NOT MET.
+- Configuration: `MIN_SCORE=0.65` (API service; `apps/api/.env.example`, `.env.example`).
+  ADR-033 resolves D-23.
+- Next: P3-04/P5-03 set `MIN_SCORE=0.65` on the Render API service. A conflict producer (ICR on
+  `SourceCitation` / decisions) and a weak-evidence signal (for example, keep rumors as drafts
+  or add a non-authoritative review status) are follow-ups; P5-02/P5-04 must not claim either.
+
+Per-case results at 0.65 (`--split all`, harness output verbatim):
+
+```text
+## Per-case results (all) at MIN_SCORE 0.65
+(#rank = RRF rank inside that tier's search call; max = best allowed score)
+| case | type | persona | calls (tier:status) | expected | top hits (source score #rank) | max | outcome | abstained (reason) | citations |
+|---|---|---|---|---|---|---|---|---|---|
+| tr-ans-freeze-hotfix | answerable | maya | team:ok | team-friday-deploy-freeze | team-friday-deploy-freeze 0.7581 #1; team-api-timeouts 0.6138 #2; team-release-checklist-v2 0.6043 #3 | 0.7581 | correct_accept | no | team-friday-deploy-freeze |
+| tr-ans-freeze-late-friday | answerable | priya | team:ok | team-friday-deploy-freeze | team-friday-deploy-freeze 0.7422 #1; team-incident-rotations 0.6350 #2; team-standup-format 0.6233 #3 | 0.7422 | correct_accept | no | team-friday-deploy-freeze |
+| tr-ans-rotation-ack | answerable | priya | team:ok | team-incident-rotations | team-incident-rotations 0.6876 #1; team-api-timeouts 0.6707 #2; team-ci-runner-hosted 0.5915 #3 | 0.6876 | correct_accept | no | team-incident-rotations, team-api-timeouts |
+| tr-ans-rotation-handoff | answerable | sam | team:ok | team-incident-rotations | team-incident-rotations 0.7755 #1; team-standup-format 0.5946 #2; team-billing-rumor 0.5884 #3 | 0.7755 | correct_accept | no | team-incident-rotations |
+| tr-ans-runway-hires | answerable | sam | team:ok confidential:ok | conf-runway-review | conf-runway-review 0.8778 #1; conf-vendor-renewal 0.5812 #2; team-release-checklist-v2 0.5604 #1 | 0.8778 | correct_accept | no | conf-runway-review |
+| tr-ans-snack-poll | answerable | priya | team:ok | team-office-snacks | team-office-snacks 0.7891 #1; team-incident-rotations 0.4790 #2; team-friday-deploy-freeze 0.4319 #3 | 0.7891 | correct_accept | no | team-office-snacks |
+| tr-ans-standup-deadline | answerable | sam | team:ok | team-standup-format | team-standup-format 0.8114 #1; team-api-timeouts 0.6511 #2; team-friday-deploy-freeze 0.6475 #3 | 0.8114 | correct_accept | no | team-standup-format, team-api-timeouts |
+| tr-ans-timeout-value | answerable | priya | team:ok | team-api-timeouts | team-api-timeouts 0.8931 #1; team-incident-rotations 0.6175 #2; team-friday-deploy-freeze 0.5958 #3 | 0.8931 | correct_accept | no | team-api-timeouts |
+| tr-ans-vendor-cap | answerable | sam | team:ok confidential:ok | conf-vendor-renewal | conf-vendor-renewal 0.8886 #1; conf-api-key-rotation 0.5871 #2; conf-runway-review 0.5727 #3 | 0.8886 | correct_accept | no | conf-vendor-renewal |
+| tr-ans-workforce-options | answerable | maya | team:ok confidential:ok restricted:ok | restr-workforce-planning | restr-workforce-planning 0.8641 #1; conf-runway-review 0.6109 #1; team-release-checklist-v2 0.5747 #1 | 0.8641 | correct_accept | no | restr-workforce-planning |
+| tr-conflict-ci-runners | conflict | sam | team:ok | team-ci-runner-hosted, team-ci-runner-selfhosted | team-ci-runner-hosted 0.8432 #1; team-ci-runner-selfhosted 0.7558 #2; team-release-checklist-v2 0.5746 #3 | 0.8432 | conflict-case | no | team-ci-runner-hosted, team-ci-runner-selfhosted |
+| tr-esc-api-maya | escalation | maya | team:ok confidential:ok restricted:ok | restr-api-breach-postmortem | restr-api-breach-postmortem 0.7561 #1; conf-api-key-rotation 0.6008 #1; team-api-timeouts 0.5952 #1 | 0.7561 | correct_accept | no | restr-api-breach-postmortem |
+| tr-esc-api-priya | escalation | priya | team:ok confidential:out_of_scope restricted:out_of_scope | team-api-timeouts | team-api-timeouts 0.8608 #1; team-incident-rotations 0.6168 #2; team-standup-format 0.5846 #3 | 0.8608 | correct_accept | no | team-api-timeouts |
+| tr-esc-api-sam | escalation | sam | team:ok confidential:ok restricted:out_of_scope | conf-api-key-rotation | conf-api-key-rotation 0.7782 #1; team-api-timeouts 0.6677 #1; team-incident-rotations 0.6189 #2 | 0.7782 | correct_accept | no | team-api-timeouts, conf-api-key-rotation |
+| tr-esc-deny-runway-priya | escalation | priya | team:ok confidential:out_of_scope | abstain | team-ci-runner-hosted 0.5715 #1; team-release-checklist-v2 0.5629 #2; team-friday-deploy-freeze 0.5525 #3 | 0.5715 | correct_abstain | yes (no_evidence) | - |
+| tr-esc-deny-workforce-sam | escalation | sam | team:ok confidential:ok restricted:out_of_scope | abstain | conf-runway-review 0.6109 #1; team-release-checklist-v2 0.5747 #1; team-incident-rotations 0.5741 #2 | 0.6109 | correct_abstain | yes (no_evidence) | - |
+| tr-sup-checklist-august | superseded | priya | team:ok | team-release-checklist-v2 | team-release-checklist-v2 0.7597 #1; team-office-snacks 0.5553 #2; team-friday-deploy-freeze 0.5521 #3 | 0.7597 | correct_accept | no | team-release-checklist-v2 |
+| tr-sup-checklist-current | superseded | sam | team:ok | team-release-checklist-v2 | team-release-checklist-v2 0.8169 #1; team-friday-deploy-freeze 0.5963 #2; team-incident-rotations 0.5705 #3 | 0.8169 | correct_accept | no | team-release-checklist-v2 |
+| tr-unrel-capital | unrelated | priya | team:ok | abstain | team-api-timeouts 0.4561 #1; team-office-snacks 0.4024 #2; team-standup-format 0.3943 #3 | 0.4561 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-k8s-autoscaling | unrelated | maya | team:ok confidential:ok restricted:ok | abstain | team-friday-deploy-freeze 0.6057 #1; conf-api-key-rotation 0.5963 #1; team-api-timeouts 0.5711 #2 | 0.6057 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-nonsense | unrelated | priya | team:ok | abstain | team-standup-format 0.5327 #1; team-friday-deploy-freeze 0.5247 #2; team-billing-rumor 0.4848 #3 | 0.5327 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-parental-leave | unrelated | priya | team:ok | abstain | team-incident-rotations 0.5280 #1; team-ci-runner-hosted 0.5190 #2; team-api-timeouts 0.5179 #3 | 0.5280 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-pasta | unrelated | sam | team:ok | abstain | team-office-snacks 0.5216 #1; team-standup-format 0.4734 #2; team-release-checklist-v2 0.4613 #3 | 0.5216 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-wifi | unrelated | sam | team:ok confidential:ok | abstain | conf-api-key-rotation 0.5696 #1; team-api-timeouts 0.5186 #1; team-incident-rotations 0.5100 #2 | 0.5696 | correct_abstain | yes (no_evidence) | - |
+| tr-unrel-world-cup | unrelated | maya | team:ok confidential:ok restricted:ok | abstain | team-standup-format 0.4076 #1; team-release-checklist-v2 0.3840 #2; conf-runway-review 0.3831 #1 | 0.4076 | correct_abstain | yes (no_evidence) | - |
+| tr-weak-billing-cost | weak_evidence | sam | team:ok | abstain | team-billing-rumor 0.7623 #1; team-api-timeouts 0.5669 #2; team-ci-runner-selfhosted 0.5654 #3 | 0.7623 | false_accept | no | team-billing-rumor |
+| tr-weak-billing-invoice | weak_evidence | priya | team:ok | abstain | team-billing-rumor 0.7618 #1; team-api-timeouts 0.5771 #2; team-ci-runner-selfhosted 0.5731 #3 | 0.7618 | false_accept | no | team-billing-rumor |
+| ho-ans-freeze-cutoff | answerable | sam | team:ok | team-friday-deploy-freeze | team-friday-deploy-freeze 0.7757 #1; team-incident-rotations 0.6853 #2; team-standup-format 0.6329 #3 | 0.7757 | correct_accept | no | team-friday-deploy-freeze, team-incident-rotations |
+| ho-ans-rotation-shadow | answerable | priya | team:ok | team-incident-rotations | team-incident-rotations 0.7718 #1; team-standup-format 0.6094 #2; team-friday-deploy-freeze 0.5754 #3 | 0.7718 | correct_accept | no | team-incident-rotations |
+| ho-ans-runway-contractors | answerable | sam | team:ok confidential:ok | conf-runway-review | conf-runway-review 0.7403 #1; conf-vendor-renewal 0.5986 #2; team-ci-runner-hosted 0.5717 #1 | 0.7403 | correct_accept | no | conf-runway-review |
+| ho-ans-standup-live | answerable | priya | team:ok | team-standup-format | team-standup-format 0.7669 #1; team-incident-rotations 0.5531 #2; team-ci-runner-hosted 0.5083 #3 | 0.7669 | correct_accept | no | team-standup-format |
+| ho-ans-timeout-retries | answerable | sam | team:ok | team-api-timeouts | team-api-timeouts 0.7977 #1; team-incident-rotations 0.6278 #2; team-billing-rumor 0.5911 #3 | 0.7977 | correct_accept | no | team-api-timeouts |
+| ho-ans-vendor-lead | answerable | maya | team:ok confidential:ok | conf-vendor-renewal | conf-vendor-renewal 0.7483 #1; conf-runway-review 0.5823 #2; team-release-checklist-v2 0.5594 #1 | 0.7483 | correct_accept | no | conf-vendor-renewal |
+| ho-ans-workforce-decision | answerable | maya | team:ok confidential:ok restricted:ok | restr-workforce-planning | restr-workforce-planning 0.8555 #1; conf-runway-review 0.6224 #1; team-release-checklist-v2 0.5892 #1 | 0.8555 | correct_accept | no | restr-workforce-planning |
+| ho-conflict-ci-selfhost | conflict | priya | team:ok | team-ci-runner-hosted, team-ci-runner-selfhosted | team-ci-runner-hosted 0.7890 #1; team-ci-runner-selfhosted 0.7632 #2; team-standup-format 0.5389 #3 | 0.7890 | conflict-case | no | team-ci-runner-hosted, team-ci-runner-selfhosted |
+| ho-esc-api-maya | escalation | maya | team:ok confidential:ok restricted:ok | restr-api-breach-postmortem | restr-api-breach-postmortem 0.7895 #1; conf-api-key-rotation 0.6391 #1; team-billing-rumor 0.6156 #1 | 0.7895 | correct_accept | no | restr-api-breach-postmortem |
+| ho-esc-api-priya | escalation | priya | team:ok confidential:out_of_scope restricted:out_of_scope | team-api-timeouts | team-api-timeouts 0.8474 #1; team-standup-format 0.6022 #2; team-friday-deploy-freeze 0.5998 #3 | 0.8474 | correct_accept | no | team-api-timeouts |
+| ho-esc-api-sam | escalation | sam | team:ok confidential:ok restricted:out_of_scope | conf-api-key-rotation | conf-api-key-rotation 0.7866 #1; team-api-timeouts 0.6713 #1; team-incident-rotations 0.6054 #2 | 0.7866 | correct_accept | no | team-api-timeouts, conf-api-key-rotation |
+| ho-esc-deny-breach-sam | escalation | sam | team:ok confidential:ok restricted:out_of_scope | abstain | conf-api-key-rotation 0.6391 #1; team-billing-rumor 0.6156 #1; team-api-timeouts 0.5853 #2 | 0.6391 | correct_abstain | yes (no_evidence) | - |
+| ho-esc-deny-vendor-priya | escalation | priya | team:ok confidential:out_of_scope | abstain | team-api-timeouts 0.5718 #1; team-friday-deploy-freeze 0.5510 #2; team-incident-rotations 0.5456 #3 | 0.5718 | correct_abstain | yes (no_evidence) | - |
+| ho-sup-checklist-green-build | superseded | priya | team:ok | team-release-checklist-v2 | team-release-checklist-v2 0.7475 #1; team-friday-deploy-freeze 0.6240 #2; team-ci-runner-hosted 0.5724 #3 | 0.7475 | correct_accept | no | team-release-checklist-v2 |
+| ho-unrel-equipment-stipend | unrelated | sam | team:ok | abstain | team-incident-rotations 0.5826 #1; team-friday-deploy-freeze 0.5577 #2; team-ci-runner-selfhosted 0.5530 #3 | 0.5826 | correct_abstain | yes (no_evidence) | - |
+| ho-unrel-expenses | unrelated | sam | team:ok confidential:ok | abstain | team-release-checklist-v2 0.5671 #1; conf-runway-review 0.5586 #1; team-incident-rotations 0.5350 #2 | 0.5671 | correct_abstain | yes (no_evidence) | - |
+| ho-unrel-ticker | unrelated | maya | team:ok confidential:ok restricted:ok | abstain | team-billing-rumor 0.4921 #1; conf-api-key-rotation 0.4908 #1; team-release-checklist-v2 0.4858 #2 | 0.4921 | correct_abstain | yes (no_evidence) | - |
+| ho-unrel-translate | unrelated | priya | team:ok | abstain | team-office-snacks 0.4905 #1; team-standup-format 0.4729 #2; team-incident-rotations 0.4691 #3 | 0.4905 | correct_abstain | yes (no_evidence) | - |
+| ho-unrel-weather | unrelated | priya | team:ok | abstain | team-standup-format 0.5250 #1; team-release-checklist-v2 0.4956 #2; team-office-snacks 0.4924 #3 | 0.5250 | correct_abstain | yes (no_evidence) | - |
+| ho-weak-billing-fixed | weak_evidence | maya | team:ok | abstain | team-billing-rumor 0.7909 #1; team-ci-runner-selfhosted 0.6164 #2; team-api-timeouts 0.6077 #3 | 0.7909 | false_accept | no | team-billing-rumor |
+```
 
 ## Result record template
 

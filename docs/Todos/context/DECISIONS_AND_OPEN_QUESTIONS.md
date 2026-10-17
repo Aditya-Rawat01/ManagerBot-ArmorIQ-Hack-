@@ -333,6 +333,14 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
 
 ### D-23 — `MIN_SCORE`, score scale, snippet limits (= U-10)
 
+**RESOLVED 17 Oct 2026 → ADR-033 (E17, P3-08):** `MIN_SCORE=0.65`, the cosine
+similarity of a search hit under `BAAI/bge-small-en-v1.5`, chosen on the E17
+train split (held-out: 1 false accept, 0 false abstains;
+`docs/EXPERIMENTS.md` § E17). It is an API setting (responder); the tool
+server keeps `min_score = None`. Snippets stay ≤ 400 characters. An unset
+`MIN_SCORE` still abstains (`threshold_unset`). Weak-evidence and conflict
+abstention were NOT MET in E17 and are not covered by the threshold.
+
 - Decided by **E17** (P3-08). Until then the responder treats an unset
   `MIN_SCORE` as "abstain unless the test configuration provides a value"
   (fail closed for grounding claims).

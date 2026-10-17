@@ -7,7 +7,7 @@
 | Size | M (3–4 h) |
 | Target window | 16 Oct AM (before the noon freeze) |
 | Gate role | **G6**: required before any grounding or abstention claim; SC-05 |
-| Status | Not started — E17 = NOT RUN |
+| Status | Implemented on `w6/b-p308-e17` (not merged): E17 recorded 2026-10-17 (local DB, not ArmorIQ evidence), `MIN_SCORE=0.65` (ADR-033). Weak-evidence and conflict abstention NOT MET (see `docs/EXPERIMENTS.md` § E17) |
 
 ## 1. Task ID and title
 

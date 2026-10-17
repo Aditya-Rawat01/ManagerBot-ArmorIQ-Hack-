@@ -576,9 +576,12 @@ def test_min_score_reaches_the_api_container() -> None:
 
 
 def test_min_score_is_documented_for_the_api() -> None:
+    """Both examples carry the E17-calibrated value (docs/EXPERIMENTS.md § E17)."""
     api_example = (REPO_ROOT / "apps" / "api" / ".env.example").read_text(encoding="utf-8")
-    assert re.search(r"^# MIN_SCORE=$", api_example, re.M)
+    calibrated = re.findall(r"^MIN_SCORE=(.*)$", api_example, re.M)
+    assert calibrated == ["0.65"]
     root_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert re.findall(r"^MIN_SCORE=(.*)$", root_example, re.M) == calibrated
     before_min_score = root_example.split("\nMIN_SCORE=", 1)[0]
     section_header = before_min_score.rsplit("\n# ---", 1)[1].split("\n", 1)[0]
     assert "tool server only" not in section_header

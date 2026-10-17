@@ -561,6 +561,39 @@ switch diagnostics on; a blank there stays a startup error (tested).
 
 ---
 
+## ADR-033 — `MIN_SCORE` = 0.65: score scale and threshold location (resolves D-23 / U-10)
+
+**Decision.** Recorded by `VTCodeCraft` on 17 Oct 2026 from experiment E17
+(P3-08, #30; `docs/EXPERIMENTS.md` § E17).
+
+- **Score scale:** `KnowledgeSearchHit.score` is the cosine similarity of the
+  returned chunk under `BAAI/bge-small-en-v1.5` (fastembed 0.9.0), as P2-05
+  proposed; `rank` is the RRF order and is never thresholded. A threshold is
+  valid only for this model, chunking (120/20 words) and corpus.
+- **Value:** `MIN_SCORE=0.65`, chosen on the E17 train split only (27 cases;
+  fixed grid 0.30..0.95, cost 2 × false accepts + false abstains, upper
+  median of the minimal-cost values 0.62..0.68). Held-out (20 cases) at 0.65:
+  1 false accept (weak evidence), 0 false abstains.
+- **Location:** the API setting `MIN_SCORE` (responder,
+  `effective_min_score`). The tool server does not filter by score and keeps
+  returning `KnowledgeSearchResult.min_score = None`; if a result ever carries
+  one, the stricter value applies (unchanged P3-03 rule). An unset value still
+  abstains with `threshold_unset`.
+- **Snippet limit:** unchanged, 400 characters (P2-05).
+
+**Configuration.** `MIN_SCORE=0.65` in `apps/api/.env.example` and the root
+`.env.example` (compose passes it to `api`); the Render API service must set
+`MIN_SCORE=0.65` (P5-03). Not a secret.
+
+**Limits (from the E17 record).** Small synthetic corpus; the clean score gap
+is about 0.05 wide, so recalibrate with `scripts/eval_e17_grounding.py`
+whenever the model, the chunking or the corpus changes. The threshold does
+not make weak-evidence or conflicting records abstain (both NOT MET in E17):
+no claim of either until a conflict-link producer and a weak-evidence signal
+exist. E17 is evidence of retrieval behavior, not of factual correctness.
+
+---
+
 ## Unresolved questions (decide before the related phase)
 
 | # | Question | Decided by |
@@ -574,7 +607,7 @@ switch diagnostics on; a blank there stays a startup error (tested).
 | U-7 | Per-tool argument schemas, max plan steps, planner `intent` field | Phase 2 design |
 | U-8 | Manager review queue needs a read tool (backend cannot read `team_notes`); PRD v2 lists none | **Resolved → ADR-023** |
 | U-9 | `knowledge_get_source_{confidential,restricted}` conflict with the one-elevated-call rule after a search | Phase 2 design |
-| U-10 | `MIN_SCORE`, score scale, snippet limits | E17 |
+| U-10 | `MIN_SCORE`, score scale, snippet limits | **Resolved → ADR-033** (E17: `MIN_SCORE=0.65`) |
 | U-11 | Whether approver identity is observable through the pinned SDK | E4 |
 | U-12 | Official submission deadline hour and format | Hackathon organizers |
 | U-13 | Tool module names: `tools_memory/tools_workspace.py` (PRD) vs `tools_access/tools_work.py` (Architecture) | **Resolved → ADR-027** |
