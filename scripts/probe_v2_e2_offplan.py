@@ -6,33 +6,109 @@ expected / observed / enforcing layer / evidence reference). Never claims
 server-side plan binding without evidence; the proxy-shape attempt stays
 `not tested` (no verified direct-proxy request shape exists in-tree).
 
-Usage (operator only, repository root, real values in the environment):
+Usage (operator only, repository root):
     python scripts/probe_v2_e2_offplan.py
 
-Required: ARMORIQ_API_KEY, PERSONA_MAYA_EMAIL, CTX_SECRET. Direct-call group
-additionally needs TOOLSERVER_BASE_URL + TOOLSERVER_BEARER_MEMORY; without
-them that group is reported skipped (never faked). Replay needs a prior
-live jti (from E1); without one it is reported pending.
+Configuration is read the way E1 reads it (`e1.load_settings`: the API
+`Settings`, process environment first, then the repo-root `.env` and
+`apps/api/.env`). Required: ARMORIQ_API_KEY, PERSONA_MAYA_EMAIL, CTX_SECRET
+(must equal the deployed tool server's), TOOLSERVER_BEARER_MEMORY (direct
+calls), and DATABASE_URL_TOOLSERVER (read-only evidence queries, toolserver
+role). The bearer and the DSN are also read from `services/toolserver/.env`.
+Optional: TOOLSERVER_BASE_URL (default DEFAULT_TOOLSERVER_BASE_URL),
+ARMORIQ_AGENT_ID (default `proxylead`). Values are never printed.
 
 Exit codes: 0 the probe ran to completion (any observed outcome); 1 an
-unexpected error stopped it; 2 prerequisites missing (names only, no values).
+unexpected error stopped it; 2 prerequisites missing or unusable (names
+only, never values).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import probe_v2_e1_allowed as e1
 
-REQUIRED_ENV = ("ARMORIQ_API_KEY", "PERSONA_MAYA_EMAIL", "CTX_SECRET")
-DIRECT_ENV = ("TOOLSERVER_BASE_URL", "TOOLSERVER_BEARER_MEMORY")
+# The deployed Render tool server (docs/EXPERIMENTS.md, P1-05 record).
+DEFAULT_TOOLSERVER_BASE_URL = "https://managerbot-armoriq-hack.onrender.com"
+
+EXIT_COMPLETE = 0
+EXIT_ERROR = 1
+EXIT_PREREQUISITES = 2
+
+
+class _DirectSettings(BaseSettings):
+    """TOOLSERVER_BEARER_MEMORY only (the API `Settings` has no such field)."""
+
+    model_config = SettingsConfigDict(env_file_encoding="utf-8", extra="ignore")
+
+    toolserver_bearer_memory: SecretStr | None = None
+
+
+@dataclass(frozen=True)
+class DirectConfig:
+    """Direct-call settings: the memory bearer (never printed) and base URL."""
+
+    bearer: str | None
+    base_url: str
+    base_url_source: str
+    base_url_problem: str | None = None
+
+    def __repr__(self) -> str:  # never show the bearer
+        return f"DirectConfig(base_url={self.base_url!r}, bearer_set={self.bearer is not None})"
+
+
+def _base_url_problem(url: str) -> str | None:
+    parts = urlsplit(url)
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        return "TOOLSERVER_BASE_URL must be an http(s) URL with a host"
+    if parts.username or parts.password:
+        return "TOOLSERVER_BASE_URL must not embed credentials"
+    return None
+
+
+def load_direct_config(settings: Any) -> DirectConfig:
+    """Memory bearer from the environment, else the API's `.env` files, then
+    `services/toolserver/.env` (as `e1.load_ledger_dsn` reads the DSN); base
+    URL from `Settings.toolserver_base_url`, else the documented default."""
+    from apps.api.core.config import Settings
+
+    files = (*e1._env_files(Settings), e1.TOOLSERVER_ENV_FILE)
+    raw = _DirectSettings(_env_file=files).toolserver_bearer_memory  # type: ignore[call-arg]
+    bearer = e1.secret_text(raw).strip() or None
+    configured = (getattr(settings, "toolserver_base_url", None) or "").strip()
+    if configured:
+        url, source = configured.rstrip("/"), "TOOLSERVER_BASE_URL"
+    else:
+        url, source = DEFAULT_TOOLSERVER_BASE_URL, "documented default"
+    problem = _base_url_problem(url)
+    if problem is not None:
+        url = "(unusable)"
+    return DirectConfig(
+        bearer=bearer, base_url=url, base_url_source=source, base_url_problem=problem
+    )
+
+
+def missing_required(settings: Any, direct: DirectConfig, ledger_dsn: str | None) -> list[str]:
+    """Names (never values) of every required setting that is unset or blank."""
+    missing = list(e1.missing_settings(settings))
+    if direct.bearer is None:
+        missing.append("TOOLSERVER_BEARER_MEMORY")
+    if not ledger_dsn:
+        missing.append("DATABASE_URL_TOOLSERVER")
+    return missing
+
 
 # §4 tool-server rejection codes (SHARED_INTERFACES §4): the server speaking
 # for itself. Anything else (HTTP status, transport error) is NOT a layer.
@@ -48,11 +124,6 @@ TOOL_SERVER_CODES = frozenset(
         "internal",
     }
 )
-
-
-def missing_env() -> list[str]:
-    """Names (never values) of required variables that are unset."""
-    return [name for name in REQUIRED_ENV if not os.environ.get(name)]
 
 
 def direct_layer(http_status: int | None, code: str | None) -> str:
@@ -271,12 +342,12 @@ def render_table(rows: list[dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-async def run_probe() -> tuple[int, str]:
+async def run_probe(
+    settings: Any, *, direct: DirectConfig, ledger_dsn: str | None
+) -> tuple[int, str]:
     """Execute all attempt groups; return (exit_code, report_text)."""
-    from apps.api.core.config import Settings
     from services.authorization import armoriq_gateway
 
-    settings = Settings()
     gateway = armoriq_gateway.ArmorIQGateway(settings)
     ctx, plan = e1.build_maya_request(settings)
     handle = await gateway.start_plan(ctx, plan)
@@ -300,22 +371,7 @@ async def run_probe() -> tuple[int, str]:
     rows.extend(await group_off_plan(gateway, handle, ctx))
     rows.extend(await group_tamper(gateway, handle, ctx))
     rows.extend(group_proxy_shape())
-    direct_missing = [v for v in DIRECT_ENV if not os.environ.get(v)]
-    if direct_missing:
-        rows.append(
-            row(
-                group="direct",
-                attempt="direct calls (no _ctx / forged _ctx / replay)",
-                expected="§4 rejection codes",
-                observed=f"skipped (missing: {', '.join(direct_missing)})",
-                layer="unknown",
-                evidence="rerun with TOOLSERVER_BASE_URL + TOOLSERVER_BEARER_MEMORY",
-            )
-        )
-    else:
-        base = os.environ.get("TOOLSERVER_BASE_URL", "")
-        bearer = os.environ.get("TOOLSERVER_BEARER_MEMORY", "")
-        rows.extend(group_direct(base, bearer))
+    rows.extend(group_direct(direct.base_url, direct.bearer or ""))
     report = [
         "### E2 — off-plan and tampered-call enforcement",
         f"- Request: {ctx.request_id} (Maya, team-only plan)",
@@ -329,24 +385,33 @@ async def run_probe() -> tuple[int, str]:
     return 0, "\n".join(report)
 
 
+def _fail(message: str) -> int:
+    print(f"probe_v2_e2_offplan: {message}", file=sys.stderr)
+    return EXIT_PREREQUISITES
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if argv:
-        print("probe_v2_e2_offplan: no arguments accepted", file=sys.stderr)
-        return 2
-    missing = missing_env()
-    if missing:
-        print(
-            "probe_v2_e2_offplan: missing required environment: " + ", ".join(missing),
-            file=sys.stderr,
-        )
-        return 2
+        return _fail("no arguments accepted")
     try:
-        code, report = asyncio.run(run_probe())
+        settings = e1.load_settings()
+        direct = load_direct_config(settings)
+        ledger_dsn = e1.load_ledger_dsn()
+    except Exception as exc:
+        # Type name only: a validation message can echo the offending value.
+        return _fail(f"settings could not be loaded ({type(exc).__name__})")
+    missing = missing_required(settings, direct, ledger_dsn)
+    if missing:
+        return _fail("missing required settings (environment or .env): " + ", ".join(missing))
+    if direct.base_url_problem is not None:
+        return _fail(direct.base_url_problem)
+    try:
+        code, report = asyncio.run(run_probe(settings, direct=direct, ledger_dsn=ledger_dsn))
     except Exception as exc:
         print(f"probe_v2_e2_offplan: probe error ({type(exc).__name__})", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     print(report)
     return code
 

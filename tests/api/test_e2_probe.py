@@ -1,32 +1,224 @@
 """Offline E2 probe tests (no credentials, no network — never E2 evidence).
 
-Covers the harness only: env refusal, evidence-row completeness, redaction,
-and honest layer/outcome presentation from real gateway and dispatch result
-shapes. Enforcement classification itself lives in the gateway, the
-tool server, and their tests — it is used here, never reimplemented.
+Covers the harness only: settings refusal, evidence-row completeness,
+redaction, and honest layer/outcome presentation from real gateway and
+dispatch result shapes. Enforcement classification itself lives in the
+gateway, the tool server, and their tests — it is used here, never
+reimplemented. Every ArmorIQ client, tool server, and ledger here is a fake;
+guard fixtures fail any test that would build the real SDK client, a real
+HTTP client to the tool server, or a real Neon pool, and point `Settings`
+at temporary env files so a developer `.env` can never make a test go live.
 """
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from apps.api.core.config import Settings
 from scripts import probe_v2_e2_offplan as probe
 from services.contracts import ToolName
 
+# Fake values: none of them may ever appear in probe output.
+FAKE_API_KEY = "ak_fake_value_that_must_not_leak"
+FAKE_EMAIL = "maya.fake.person@example.com"
+FAKE_CTX_SECRET = "ctx-fake-secret-that-must-not-leak"
+FAKE_BEARER = "bearer-fake-memory-token-that-must-not-leak"
+FAKE_DSN = "postgresql://fake_role:fake_password@fake-host.invalid:5432/fakedb"
+FAKE_VALUES = (
+    FAKE_API_KEY,
+    FAKE_EMAIL,
+    FAKE_CTX_SECRET,
+    FAKE_BEARER,
+    FAKE_DSN,
+    "fake_password",
+)
+# Every setting the probe reads: a developer shell never leaks into a test.
+PROBE_ENV = (
+    "ARMORIQ_API_KEY",
+    "PERSONA_MAYA_EMAIL",
+    "CTX_SECRET",
+    "TOOLSERVER_BEARER_MEMORY",
+    "DATABASE_URL_TOOLSERVER",
+    "TOOLSERVER_BASE_URL",
+    "ARMORIQ_AGENT_ID",
+)
 
-def test_missing_env_refuses_with_names_only(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    for name in probe.REQUIRED_ENV:
+
+def _use_env_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, content: str | None = None
+) -> Path:
+    """Point `Settings` and the probe at temporary env files (never the real `.env`)."""
+    env_file = tmp_path / ".env"
+    if content is not None:
+        env_file.write_text(content, encoding="utf-8")
+    monkeypatch.setitem(Settings.model_config, "env_file", (env_file,))
+    monkeypatch.setattr(probe.e1, "TOOLSERVER_ENV_FILE", tmp_path / "toolserver.env")
+    return env_file
+
+
+@pytest.fixture(autouse=True)
+def _never_live(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Offline guard: building the real SDK client, a real HTTP client to the
+    tool server, or a real Neon pool fails the test; env files are temporary."""
+
+    def _refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("offline test tried to go live")
+
+    monkeypatch.setattr("services.authorization.armoriq_gateway.ArmorIQClient", _refuse)
+    monkeypatch.setattr(probe, "build_direct_client", _refuse, raising=False)
+    monkeypatch.setattr(probe, "E2EvidenceLookup", _refuse, raising=False)
+    for name in PROBE_ENV:
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("CTX_SECRET", "sekrit-value-that-must-not-leak")
+    _use_env_files(monkeypatch, tmp_path / "isolated")
+
+
+def _assert_no_fake_values(*texts: str) -> None:
+    for text in texts:
+        for value in FAKE_VALUES:
+            assert value not in text
+
+
+def test_no_settings_exit_2_naming_only_missing_variables(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert probe.main([]) == 2
     captured = capsys.readouterr()
-    assert "ARMORIQ_API_KEY" in captured.err
+    assert captured.out == ""
+    for name in (
+        "ARMORIQ_API_KEY",
+        "PERSONA_MAYA_EMAIL",
+        "CTX_SECRET",
+        "TOOLSERVER_BEARER_MEMORY",
+        "DATABASE_URL_TOOLSERVER",
+    ):
+        assert name in captured.err
+    # The base URL has a documented default, so it is never "missing".
+    assert "TOOLSERVER_BASE_URL" not in captured.err
+
+
+def test_missing_settings_refuse_with_names_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_env_files(monkeypatch, tmp_path)
+    monkeypatch.setenv("ARMORIQ_API_KEY", FAKE_API_KEY)
+    monkeypatch.setenv("CTX_SECRET", FAKE_CTX_SECRET)
+    called: list[object] = []
+    monkeypatch.setattr(probe, "run_probe", lambda *a, **k: called.append(a))
+    assert probe.main([]) == 2
+    captured = capsys.readouterr()
     assert "PERSONA_MAYA_EMAIL" in captured.err
-    assert "sekrit-value-that-must-not-leak" not in captured.err
-    assert "sekrit-value-that-must-not-leak" not in captured.out
+    assert "TOOLSERVER_BEARER_MEMORY" in captured.err
+    assert "DATABASE_URL_TOOLSERVER" in captured.err
+    assert "ARMORIQ_API_KEY" not in captured.err
+    assert "CTX_SECRET" not in captured.err
+    assert not called
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def _write_all_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, extra: str = "") -> None:
+    _use_env_files(
+        monkeypatch,
+        tmp_path,
+        f"ARMORIQ_API_KEY={FAKE_API_KEY}\n"
+        f"PERSONA_MAYA_EMAIL={FAKE_EMAIL}\n"
+        f"CTX_SECRET={FAKE_CTX_SECRET}\n"
+        f"TOOLSERVER_BEARER_MEMORY={FAKE_BEARER}\n"
+        f"DATABASE_URL_TOOLSERVER={FAKE_DSN}\n" + extra,
+    )
+
+
+def test_main_reads_required_values_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """I5: values in `.env` (not exported) satisfy the probe, as `Settings` reads them."""
+    _write_all_settings(monkeypatch, tmp_path)
+    seen: dict[str, object] = {}
+
+    async def fake_run_probe(settings: object = None, **kwargs: object) -> tuple[int, str]:
+        seen["settings"] = settings
+        seen.update(kwargs)
+        return 0, "fake record"
+
+    monkeypatch.setattr(probe, "run_probe", fake_run_probe)
+    assert probe.main([]) == 0
+    settings = seen["settings"]
+    assert settings.armoriq_api_key.get_secret_value() == FAKE_API_KEY  # type: ignore[attr-defined]
+    assert settings.persona_maya_email.get_secret_value() == FAKE_EMAIL  # type: ignore[attr-defined]
+    assert settings.ctx_secret.get_secret_value() == FAKE_CTX_SECRET  # type: ignore[attr-defined]
+    direct = seen["direct"]
+    assert direct.bearer == FAKE_BEARER  # type: ignore[attr-defined]
+    assert direct.base_url == probe.DEFAULT_TOOLSERVER_BASE_URL  # type: ignore[attr-defined]
+    assert seen["ledger_dsn"] == FAKE_DSN
+    captured = capsys.readouterr()
+    assert "missing" not in captured.err
+    assert "fake record" in captured.out
+    _assert_no_fake_values(captured.out, captured.err)
+
+
+def test_bearer_and_dsn_from_toolserver_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The tool server's own `.env` supplies the bearer and the DSN (environment wins)."""
+    _use_env_files(monkeypatch, tmp_path, "APP_ENV=test\n")
+    settings = probe.e1.load_settings()
+    assert probe.load_direct_config(settings).bearer is None
+    (tmp_path / "toolserver.env").write_text(
+        f"TOOLSERVER_BEARER_MEMORY={FAKE_BEARER}\nDATABASE_URL_TOOLSERVER={FAKE_DSN}\n",
+        encoding="utf-8",
+    )
+    assert probe.load_direct_config(settings).bearer == FAKE_BEARER
+    assert probe.e1.load_ledger_dsn() == FAKE_DSN
+    monkeypatch.setenv("TOOLSERVER_BEARER_MEMORY", "bearer-from-environment")
+    assert probe.load_direct_config(settings).bearer == "bearer-from-environment"
+
+
+def test_base_url_from_settings_or_documented_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _use_env_files(monkeypatch, tmp_path, "APP_ENV=test\n")
+    default = probe.load_direct_config(probe.e1.load_settings())
+    assert default.base_url == "https://managerbot-armoriq-hack.onrender.com"
+    assert default.base_url_source == "documented default"
+    monkeypatch.setenv("TOOLSERVER_BASE_URL", "https://toolserver.example.invalid/")
+    configured = probe.load_direct_config(probe.e1.load_settings())
+    assert configured.base_url == "https://toolserver.example.invalid"
+    assert configured.base_url_source == "TOOLSERVER_BASE_URL"
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://user:pw@toolserver.example.invalid", "ftp://toolserver.example.invalid", "nonsense"],
+)
+def test_bad_base_url_is_a_prerequisite_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    url: str,
+) -> None:
+    _write_all_settings(monkeypatch, tmp_path, f"TOOLSERVER_BASE_URL={url}\n")
+    monkeypatch.setattr(probe, "run_probe", lambda *a, **k: pytest.fail("must not run"))
+    assert probe.main([]) == 2
+    err = capsys.readouterr().err
+    assert "TOOLSERVER_BASE_URL" in err
+    assert "pw@" not in err
+    _assert_no_fake_values(err)
+
+
+def test_unreadable_settings_print_type_name_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _use_env_files(
+        monkeypatch,
+        tmp_path,
+        f"ARMORIQ_API_KEY={FAKE_API_KEY}\nTOKEN_VALIDITY_S=not-a-number-{FAKE_CTX_SECRET}\n",
+    )
+    assert probe.main([]) == 2
+    captured = capsys.readouterr()
+    assert "(ValidationError)" in captured.err
+    assert "not-a-number" not in captured.err
+    _assert_no_fake_values(captured.out, captured.err)
 
 
 def test_rejects_arguments() -> None:
