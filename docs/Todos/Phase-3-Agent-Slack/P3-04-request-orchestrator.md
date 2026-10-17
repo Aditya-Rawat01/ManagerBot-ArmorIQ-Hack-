@@ -7,7 +7,7 @@
 | Size | L (5–8 h) |
 | Target window | 15 Oct (fakes); real-gateway integration merges after **G1** |
 | Gate role | Implements PRD §7 / Arch §8 |
-| Status | Not started |
+| Status | Implemented on `feat/agent-p3-04-orchestrator` (offline and local-database tests green; not merged). Handoff notes: §15 |
 
 ## 1. Task ID and title
 
@@ -118,6 +118,117 @@ bash scripts/check.sh
 - P3-07: the `RequestOptions.simulate_hijacked_model` hook.
 - P3-09: the shared fakes and scenario helpers.
 - P5-01: what to observe end to end.
+
+### 15.1 Handoff notes (as implemented)
+
+Interfaces: SHARED_INTERFACES §12 (orchestrator, confirmation), §3 (gateway
+`on_hold`), §10 (event mapping), §13 (IDs); D-14 binding details in
+DECISIONS. Module docstring of `apps/api/orchestrator.py` has the step map.
+
+**P3-05 (Slack) and P4-01 (web): calling `handle`**
+
+- Get the singleton from `app.state.orchestrator` (`handle` is also
+  `app.state.orchestrator_handle`, which P3-05 already dispatches to). Both
+  are absent when the API runs without the orchestrator settings: the web
+  route must then answer 503 (`ErrorResponse`), never a fake success.
+- Supply a trusted `RequestContext` built only from server-side identity
+  (Slack user mapping or the signed session): requester exactly as
+  `resolve_slack_user` / `resolve_web_session` return it (it is checked
+  against the member table), the single workspace ID, the entry point, and
+  for Slack the team/channel/thread/event IDs. `request_id` / `trace_id` are
+  provisional: `handle` returns the orchestrator's own `req-<32 hex>`, which
+  is the ID to show and to poll (`request_status`).
+- `handle` returns after `create_request`; the answer arrives later through
+  P3-06 delivery (Slack) or, for web, as a `pending` `web_private` delivery
+  row (the P3-06 answer-storage gap is still open: P4-01's ICR). It raises
+  `RequestRejectedError` (bad context/options: 400/403 class, nothing
+  recorded) or `RequestNotRecordedError` (audit store down: 503).
+- Slack: `handle(ctx, message)` only. A Slack context carrying
+  `RequestOptions` is refused.
+- Web: `handle(ctx, message, RequestOptions(confirmation_token=..., simulate_hijacked_model=...))`.
+  The token comes from the session's stored offer (below), never from the
+  message body text.
+
+**D-14 confirmations (P3-05 follow-up: Slack button; P4-01: web)**
+
+- Register a presenter per entry point:
+  `orchestrator.set_confirmation_presenter(EntryPoint.SLACK_MENTION, fn)` (and
+  `SLACK_DM`, `WEB`). `fn(ctx, offer)` (sync or async) is called after the
+  escalation prompt was delivered, with the ORIGINAL request's context and a
+  `ConfirmationOffer(request_id, escalation_id, requested_tier, expires_at,
+  token)`. Slack: post Confirm / Cancel buttons whose value is the token (no
+  token in message text). Web: keep the offer server-side for the owning
+  session and show Confirm / Cancel. An exception in `fn` revokes the offer.
+- On a click: `await orchestrator.confirm(ctx, token, accept)` with a
+  trusted context for the clicking member, using the SAME entry point and
+  Slack channel as the message that carried the prompt (the confirmation is
+  bound to member, workspace and channel). It returns a new `request_id`;
+  the confirmed lookup runs under that request with a new ArmorIQ plan.
+- Until a presenter is registered the prompt is delivered without a control
+  and the offer simply expires (5 minutes).
+
+**P3-07 (hijacked-model simulation)**
+
+- `RequestOptions.simulate_hijacked_model` exists (default `False`), is
+  accepted for `EntryPoint.WEB` only (refused for Slack contexts) and is
+  inert: `_request_flow` only logs it. P3-07 adds the injection at that
+  point (or around the responder call in `_answer`) and the "simulation"
+  audit marker. Off-plan routing is already in place: every responder
+  `requested_tools` entry goes to `gateway.attempt_off_plan` only, recorded
+  as `authorization_decided` with `off_plan: true`, `executed: false` and
+  the returned label; a PLANNED tool name is refused as `application_rule`
+  without any SDK call (the SDK plan check binds names only, E2, so it would
+  execute). The confirmed honeypot plan is a normal confirmed request.
+
+**P3-09 (integration and injection tests)**
+
+- `tests/api/fakes/`: `ScriptedGateway` (counters; `Allow`, `AllowUnknown`,
+  `Block`, `ToolServerReject`, `Unverified`, `HoldThen` (waits on an
+  `asyncio.Event`, reports the hold from a thread), `HoldPending`, `Raise`;
+  `off_plan_would_execute` must stay empty), `RecordingAudit` (store write
+  API + the store's real event checks, `fail={name: nth}`, `timeline`),
+  `FakeDelivery` (bound to the real P3-06 signatures), `llm`
+  (`FakeModelClient`, `GatedModelClient`, `draft`, `DraftRecorder`),
+  `RecordingSlackSender`, and `scenario` (`orchestrator_settings`,
+  `request_ctx`, `search`, `build_harness`, `Harness.ask/confirm`).
+
+**P5-01 (end to end): what to observe**
+
+- One `plan_proposed` + `plan_minted` per request with the gateway `plan_id`;
+  per step `authorization_decided` (true label) and `tool_executed` with a
+  `jti` and `ledger_entry_id` that match the tool server's ledger row.
+- HOLD: `hold_created` and Maya's `hold_notice` DM while the request waits,
+  then `approval_resolved`; no content before approval; never a second plan.
+- Elevated data (cited or not) → DM / `web_private` only; generic notice in
+  the thread for mentions.
+- Off-plan honeypot attempts: `armoriq_sdk_plan_check` decision events with
+  `executed: false` and no tool-server or ledger trace.
+- Abstentions: `answer_abstained` + an `unanswered_questions` row with only
+  team source IDs.
+- Any failure: an `authorization_decided` event with source `unknown` and
+  `request_outcome: error`, and one generic message.
+
+**Deploy (Render API service), by name only:** `ARMORIQ_API_KEY`,
+`PERSONA_MAYA_EMAIL`, `PERSONA_SAM_EMAIL`, `PERSONA_PRIYA_EMAIL`,
+`CTX_SECRET`, `DATABASE_URL_BACKEND`, `ANTHROPIC_API_KEY` (all required for
+the orchestrator); `MIN_SCORE` (until set, answers abstain
+`threshold_unset`), `LLM_MODEL`, `ARMORIQ_AGENT_ID`, `ARMORIQ_CONSOLE_URL`,
+`TOKEN_VALIDITY_S`, `APPROVAL_TIMEOUT_MS`, and for Slack `SLACK_BOT_TOKEN`,
+`SLACK_APP_TOKEN`, `SLACK_TEAM_ID`, `SLACK_ALLOWED_CHANNELS`,
+`SLACK_USER_{MAYA,SAM,PRIYA}_ID`. One uvicorn worker (D-27; the confirmation
+store is in-process).
+
+**Known limits**
+
+- Real SDK HOLD behaviour is unverified until E4; the orchestrator relies on
+  the gateway's `on_hold` observer (added here, steward review by
+  `samarth-chawla`). A gateway that returns HOLD without waiting is recorded,
+  Maya is notified, and the request ends `interrupted` (no data, ask again).
+- The ERROR outcome has no dedicated event type; it is recorded as an
+  `unknown`-sourced `authorization_decided` (SHARED_INTERFACES §10).
+- `manager_decision_required` / `source_unavailable` abstentions have no
+  producer yet (P3-03 emits neither).
+- In-flight requests are cancelled on shutdown after a 5 s grace period.
 
 ## 16. GitHub issue title, body outline, labels, and dependencies
 
