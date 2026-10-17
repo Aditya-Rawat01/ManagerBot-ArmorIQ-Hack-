@@ -8,7 +8,7 @@ organization and the deployed HTTPS MCP endpoint. Mocks never pass a gate.
 
 | ID | Legacy ID | Question | Status | Evidence |
 |---|---|---|---|---|
-| E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **NOT RUN** (probe ready; live run pending an operator with ArmorIQ access — see §E1 record) | — |
+| E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **PASS** (2026-10-17 06:37 UTC: ArmorIQ allow → Render tool server executed → ledger row #1 correlated) | §E1 record below |
 | E2 | E2 | Off-plan attempt: SDK-side vs hosted-proxy enforcement; underscore-field tampering | **NOT RUN** | — |
 | E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | — |
 | E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | — |
@@ -115,9 +115,12 @@ evidence.
 
 ## E1 record (P1-06, #7)
 
-**Status: NOT RUN.** The probe has never called ArmorIQ, Render, or Neon, so
-there is no E1 evidence and no outcome (PASS / FAIL / BLOCKED ON ACCESS /
-INCONCLUSIVE) yet. When the probe was written (16 Oct 2026), its author did
+**Status: PASS (live run 2026-10-17 06:37 UTC; record under "E1 live run" below).**
+A real planned `knowledge_search_team` call for Maya went through the ArmorIQ
+gateway and proxy to the deployed Render tool server, executed, and wrote
+ledger row #1, which correlates with every identifier of the run.
+
+History: when the probe was written (16 Oct 2026), its author did
 not have the operator values (ArmorIQ API key, Maya's member e-mail, the
 deployed `CTX_SECRET`) and the `memory-mcp` console attach had not been done.
 A local attempt then stopped with "missing required environment" before any
@@ -227,6 +230,66 @@ are visible only in log lines. A gateway ICR (steward of
 summary (exception class + HTTP status) and the jti to `StepOutcome`. It
 could also keep the SDK `status` / `verified` / `metadata` fields, which the
 gateway currently drops.
+
+### E1 live run (2026-10-17): PASS
+
+- Run at (UTC): 2026-10-17T06:37:17Z → 06:37:57Z (record timestamp 06:37:56.96Z)
+- Operator: `VTCodeCraft` (via Claude Code), from PR #72 at `51c9599` (includes #77 and #76),
+  in a clean `python:3.12-slim` container with `pip install -e ".[api]"`. Operator values read
+  from the operator's local git-ignored `.env`; none appear here.
+- Deployed tool-server SHA (Render): `82363f8` (last deploy confirmed by the CP-4/P2-10 probes on
+  16 Oct; `tools/list` on `/memory/mcp` listed the 9 memory tools)
+- SDK version: `armoriq-sdk 0.6.10`
+- Agent / MCP names as registered (console): agent `proxylead`; MCP server `memory-mcp`
+  (registered by Aditya-Rawat01 on 17 Oct, URL below, transport HTTP/SSE, console auth "OAuth 2.0",
+  scan discovered 9 tools). The agent has **no governing policy**, so ArmorIQ allows by org
+  membership (ArmorIQ docs, Policy Evaluation Order).
+- Endpoint URL (no secrets): https://managerbot-armoriq-hack.onrender.com/memory/mcp
+- request_id / trace_id: `e1-20261017T063718Z-d05c49c3` / `e1-20261017T063718Z-d05c49c3-trace`
+- Plan / session IDs: plan_id=`p-b47fad43c1ed4e17` armoriq_plan_id=`af5c79ba-f34c-4fa4-b6fa-a423c910a95e`
+- Requester: Maya, member e-mail masked `w***@g***.com`, `requester_member_id=m-maya`.
+  NOTE: the Setup record above lists the Maya account as `a***@g***.com`. ArmorIQ accepted
+  `w***@g***.com` as an org member, but which account is the Org Admin "Maya" must be confirmed
+  by Aditya-Rawat01 before E3/E4 (persona mapping).
+- jti: `55da5b6839514688abe426732e48e8b7`
+- SDK return: decision `allow`, source `armoriq_policy_decision`, reason "policy allowed the
+  planned call (provisional until E1/E3)". Gateway log: `gateway plan minted ... outcome=allow
+  source=armoriq_issuance`, then `gateway step ok ... step=0 jti=55da5b68... ledger=1`.
+- Tool server request observed? Yes. The deployed tool server itself wrote the attempt row
+  (#15, `accepted`, 06:37:27.20Z) and the ledger row (#1, `executed`, 06:37:27.55Z) for this jti.
+  Render access/log lines: to be appended by Aditya-Rawat01 (Render → Logs around 06:37 UTC:
+  `verified tool call (tool=knowledge_search_team request_id=e1-20261017T063718Z-d05c49c3)` and
+  `executed knowledge_search_team (entry 1)`).
+- Invocation status + error_code: `executed`, error_code `None`, `ledger_entry_id=1`
+- `_meta` present: **yes** (keys `['ledger_entry_id']`): `_meta` survives the ArmorIQ proxy.
+- Ledger row id vs `_meta.ledger_entry_id`: 1 = 1
+- Ledger correlation: **correlated: true; mismatches: none**. Checked with the probe's own
+  `correlate_ledger` (by jti) against the Neon toolserver role: id, jti, request_id, plan_id,
+  trace_id, requester_member_id (`m-maya`), step_index (0), tool (`knowledge_search_team`) all
+  match; `validation_outcome=accepted`, `execution_status=executed`, workspace `workspace-primary`.
+  (The probe's in-run lookup reported `PoolTimeout` because the operator's local
+  `DATABASE_URL_TOOLSERVER` was stale; the correlation was re-run read-only with the current
+  toolserver DSN, without a second live call.)
+- D-05 `_ctx` forwarded: **yes**. The call EXECUTED, which the tool server only allows after
+  verifying `_ctx` (signature, audience, tool, lifetime, jti claim) before the handler.
+- D-06 credential path: `tool_call_attempts.credential_id = toolserver_bearer_memory`; the
+  memory bearer was accepted (ArmorIQ forwards the registered credential as
+  `Authorization: Bearer`). `X-Armoriq-MCP-Auth`: not inspected (not needed: the bearer path works).
+- Result shape: `{_meta: {ledger_entry_id: str}, content: [ {type, text} ], isError: bool}`;
+  the text is the `KnowledgeSearchResult` JSON (`tool, tier, query, hits, min_score`).
+  The gateway keeps only `MCPInvocationResult.result` (SDK `status` / `verified` / `metadata` /
+  `execution_time` are dropped; see the follow-up note below).
+- Probe exit code: 3 at run time (only because the in-run ledger lookup failed: stale local DSN);
+  the read-only re-correlation above gives the PASS-candidate condition (EXECUTED + correlated).
+- **Outcome: PASS**
+- Enforcement layer (DecisionSource): `armoriq_policy_decision` (allow; no governing policy, org
+  membership default). Tool-server layer: `_ctx` verified, argument validation passed, team-tier
+  ceiling passed.
+- Evidence: this record; Neon `tool_execution_ledger` row #1 and `tool_call_attempts` row #15
+  (read by jti, hashes and arguments not shown); gateway stderr lines above. Render log excerpt
+  pending from Aditya-Rawat01.
+- Next: G1 passes with this record → P3-04 real-gateway wiring and E2 (#74) are unblocked.
+  Confirm the Maya account mapping before E3/E4. P1-08 authors the real policy (E5).
 
 ## Result record template
 
