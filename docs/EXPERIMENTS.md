@@ -257,9 +257,15 @@ gateway currently drops.
   source=armoriq_issuance`, then `gateway step ok ... step=0 jti=55da5b68... ledger=1`.
 - Tool server request observed? Yes. The deployed tool server itself wrote the attempt row
   (#15, `accepted`, 06:37:27.20Z) and the ledger row (#1, `executed`, 06:37:27.55Z) for this jti.
-  Render access/log lines: to be appended by Aditya-Rawat01 (Render → Logs around 06:37 UTC:
-  `verified tool call (tool=knowledge_search_team request_id=e1-20261017T063718Z-d05c49c3)` and
-  `executed knowledge_search_team (entry 1)`).
+  Render log (service instance `kmljl`; shown in IST, UTC+5:30), captured by Aditya-Rawat01:
+  ```
+  12:07:25 PM  INFO: 10.29.109.149:0 - "POST /memory/mcp HTTP/1.1" 200 OK
+  12:07:25 PM  INFO: 10.29.109.149:0 - "POST /memory/mcp HTTP/1.1" 200 OK
+  12:07:27 PM  INFO:services.toolserver.security:verified tool call (tool=knowledge_search_team request_id=e1-20261017T063718Z-d05c49c3)
+  12:07:27 PM  INFO:services.toolserver.servers:executed knowledge_search_team (entry 1)
+  ```
+  = 06:37:25–06:37:27 UTC: the ArmorIQ proxy's requests (via Render ingress) reached
+  `/memory/mcp`; the same request_id was verified and executed as ledger entry 1.
 - Invocation status + error_code: `executed`, error_code `None`, `ledger_entry_id=1`
 - `_meta` present: **yes** (keys `['ledger_entry_id']`): `_meta` survives the ArmorIQ proxy.
 - Ledger row id vs `_meta.ledger_entry_id`: 1 = 1
@@ -270,8 +276,8 @@ gateway currently drops.
   (The probe's in-run lookup reported `PoolTimeout` because the operator's local
   `DATABASE_URL_TOOLSERVER` was stale; the correlation was re-run read-only with the current
   toolserver DSN, without a second live call.)
-- D-05 `_ctx` forwarded: **yes**. The call EXECUTED, which the tool server only allows after
-  verifying `_ctx` (signature, audience, tool, lifetime, jti claim) before the handler.
+- D-05 `_ctx` forwarded: **yes**. Render logged `verified tool call (... request_id=e1-20261017T063718Z-d05c49c3)`:
+  the tool server verified `_ctx` (signature, audience, tool, lifetime, jti claim) before the handler.
 - D-06 credential path: `tool_call_attempts.credential_id = toolserver_bearer_memory`; the
   memory bearer was accepted (ArmorIQ forwards the registered credential as
   `Authorization: Bearer`). `X-Armoriq-MCP-Auth`: not inspected (not needed: the bearer path works).
@@ -286,8 +292,8 @@ gateway currently drops.
   membership default). Tool-server layer: `_ctx` verified, argument validation passed, team-tier
   ceiling passed.
 - Evidence: this record; Neon `tool_execution_ledger` row #1 and `tool_call_attempts` row #15
-  (read by jti, hashes and arguments not shown); gateway stderr lines above. Render log excerpt
-  pending from Aditya-Rawat01.
+  (read by jti, hashes and arguments not shown); gateway stderr lines above; the Render log
+  excerpt above (POST /memory/mcp 200, verified tool call, executed entry 1).
 - Next: G1 passes with this record → P3-04 real-gateway wiring and E2 (#74) are unblocked.
   Confirm the Maya account mapping before E3/E4. P1-08 authors the real policy (E5).
 
