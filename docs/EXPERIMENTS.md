@@ -10,9 +10,9 @@ organization and the deployed HTTPS MCP endpoint. Mocks never pass a gate.
 |---|---|---|---|---|
 | E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **PASS** (2026-10-17 06:37 UTC: ArmorIQ allow → Render tool server executed → ledger row #1 correlated) | §E1 record below |
 | E2 | E2 | Off-plan attempt: SDK-side vs hosted-proxy enforcement; underscore-field tampering | **PASS** (2026-10-17 08:46 UTC: probe exit 0, zero unintended executions, Render log lines match). Finding: ArmorIQ does not bind argument values | §E2 record below |
-| E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | — |
-| E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | — |
-| E5 | E12 + E14 | Agent/MCP/tool names, member resolution, policy schema | **NOT RUN** | — |
+| E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | §E3 record below (procedure + template; `scripts/probe_v2_e3_per_user.py`) |
+| E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | §E4 record below (procedure + template; `scripts/probe_v2_e4_hold.py`) |
+| E5 | E12 + E14 | Agent/MCP/tool names, member resolution, policy schema | **NOT RUN** | §E5 record below (procedure + template; `policy/`, `scripts/check_setup.py`, `scripts/probe_v2_e5_setup.py`) |
 | E17 | — | Grounding: threshold, citations, abstention | **PASS** for G6 (2026-10-17 17:26 UTC, local DB, not ArmorIQ evidence): `MIN_SCORE=0.65` chosen on train; held-out 1 false accept (weak evidence), 0 false abstains. Weak-evidence and conflict abstention NOT MET | §E17 record below |
 
 As of the foundation bootstrap (2026-10-14) no ArmorIQ organization, API key,
@@ -881,6 +881,247 @@ Per-case results at 0.65 (`--split all`, harness output verbatim):
 | ho-unrel-translate | unrelated | priya | team:ok | abstain | team-office-snacks 0.4905 #1; team-standup-format 0.4729 #2; team-incident-rotations 0.4691 #3 | 0.4905 | correct_abstain | yes (no_evidence) | - |
 | ho-unrel-weather | unrelated | priya | team:ok | abstain | team-standup-format 0.5250 #1; team-release-checklist-v2 0.4956 #2; team-office-snacks 0.4924 #3 | 0.5250 | correct_abstain | yes (no_evidence) | - |
 | ho-weak-billing-fixed | weak_evidence | maya | team:ok | abstain | team-billing-rumor 0.7909 #1; team-ci-runner-selfhosted 0.6164 #2; team-api-timeouts 0.6077 #3 | 0.7909 | false_accept | no | team-billing-rumor |
+```
+
+## E5 record (P1-08, #9)
+
+**Status: NOT RUN.** The policy file, the console steps and the scripts are
+ready; the live run is the operator's.
+
+Not evidence (AGENT_HANDOFF_PROTOCOL §5): `policy/proxylead-policy.yaml`
+(placeholders only, D-26), `scripts/check_setup.py`,
+`scripts/probe_v2_e5_setup.py` and their offline tests
+(`tests/api/test_check_setup_logic.py`, `tests/api/test_e5_probe.py`: fake SDK
+client, fake tool server, fake ledger).
+
+What the scripts decide (and what they never claim):
+- `check_setup.py`: settings present (names only); `ARMORIQ_AGENT_ID == "proxylead"`;
+  the three persona e-mails configured, lowercase and distinct (never printed);
+  each endpoint's live `tools/list` equals its `TOOL_CATALOG` subset (memory-mcp 12,
+  workspace-mcp 2; missing / extra / duplicated names are listed); one real ALLOW
+  per member on `knowledge_search_team` through `ArmorIQGateway`, counted only with
+  `armoriq_policy_decision`, an ArmorIQ evidence reference (`armoriq_plan_id`),
+  EXECUTED, and exactly one ledger row correlated with the run. Exit `0` = every
+  check passed; `2` = settings missing/unusable; `3` = a check failed.
+- `probe_v2_e5_setup.py`: Maya's planned `knowledge_search_team` with the action
+  ArmorIQ sees renamed at the gateway's SDK-client seam (cases `suffix`
+  `knowledge_search_team_e5`, `qualified` `memory-mcp__knowledge_search_team`,
+  `case` `Knowledge_Search_Team`), at mint and at invoke. Each case must be BLOCK or
+  an error, never ALLOW, with zero executions confirmed from the database. The
+  record names the layer and classes the evidence: **ArmorIQ evidence** (an
+  `armoriq_*` source + evidence reference + no tool-server contact) is kept apart
+  from **fail-closed-only** evidence (`armoriq_sdk_plan_check`, `tool_server_rule`,
+  `application_rule`, `unknown`), which is never cited as the policy applying. Exit
+  `0` = every case fail-closed with a named layer; `3` = otherwise (including an
+  `unknown` layer: read the Render log).
+
+### Operator procedure (live run)
+
+1. **Console** (the Maya account, Org Admin): follow `policy/CONSOLE_STEPS.md`:
+   register `workspace-mcp` (do not touch `memory-mcp`), create
+   `proxylead-team-authority` from the YAML with the real lowercase e-mails
+   substituted **outside** the repository, make it the one active policy for
+   `proxylead`. Record every console message verbatim (e-mails/tokens removed) and
+   the answers to U-6 / U-4: tool names as the console shows them, whether
+   `toolEnforcement` was accepted, whether held tools must be in `allowedTools`,
+   the effective default, quotas. Note: E1/E2 ran with no governing policy; from
+   now on the policy decides.
+2. **Render / Neon**: wake the tool server (`curl -fsS
+   https://managerbot-armoriq-hack.onrender.com/health` until 200); the P2-03 seed
+   must exist; `DATABASE_URL_TOOLSERVER` must be the current toolserver role.
+3. **Local values** (clean `python:3.12-slim`, `python -m pip install -e ".[api]"`;
+   repo-root `.env`, `apps/api/.env` or `services/toolserver/.env`; names only
+   here): `ARMORIQ_API_KEY`, `PERSONA_MAYA_EMAIL`, `PERSONA_SAM_EMAIL`,
+   `PERSONA_PRIYA_EMAIL`, `CTX_SECRET`, `TOOLSERVER_BEARER_MEMORY`,
+   `TOOLSERVER_BEARER_WORKSPACE`, `DATABASE_URL_TOOLSERVER`; optional
+   `ARMORIQ_AGENT_ID`, `TOOLSERVER_BASE_URL`.
+4. **Run**:
+   - `python scripts/check_setup.py > e5-setup.txt 2> e5-setup-stderr.txt; echo "exit=$?"`
+     (expect `0`). Then show it fails closed on a renamed setting, e.g.
+     `ARMORIQ_AGENT_ID=proxylead-typo python scripts/check_setup.py; echo "exit=$?"`
+     (expect `3`, live checks skipped).
+   - `python scripts/probe_v2_e5_setup.py > e5-record.txt 2> e5-stderr.txt; echo "exit=$?"`
+5. **Render log** for the run window: for each check_setup ALLOW `verified tool
+   call` + `executed knowledge_search_team`; for each E5 case **no** tool-server
+   line if the layer is ArmorIQ, or a bare `POST /memory/mcp 200` without
+   `verified tool call` if the proxy forwarded an unknown name (`tool_server_rule`).
+6. **Decide**: PASS needs the active policy (console), `check_setup.py` exit `0`
+   plus the demonstrated non-zero exit, and every E5 case fail-closed with its
+   layer named. Then answer U-6 and file an ICR if the tool-name representation
+   differs from `ToolName`. Fill in `docs/SECURITY.md` § "Policy" (P1-08 §6).
+
+### Record to fill after the live run
+
+```text
+### E5 — setup and policy conformance
+- Run at (UTC):
+- Operator:
+- Deployed tool-server SHA (Render → Events):
+- Policy: name / status / priority / target as shown in the console:
+- Console messages on save (verbatim, e-mails/tokens removed):
+- U-6 tool-name representation (console Tools tabs): bare / qualified (+ exact form):
+- U-4 per-member toolEnforcement accepted: yes / no (+ how entered: YAML / form):
+- Held tools must also be in allowedTools: yes / no / not determined:
+- Effective default for unlisted tools/members:
+- Quotas shown (endpoints / policies / members):
+- workspace-mcp registration: URL, transport, auth method label, tools discovered:
+- check_setup.py output (verbatim) and exit code:
+- check_setup.py with an altered setting (which NAME) and exit code:
+- Policy evidence (check_setup ALLOW lines: source, armoriq_plan_id, ledger #):
+- E5 probe table (verbatim) and exit code:
+- Fail-closed evidence per case (layer; ArmorIQ evidence vs fail-closed only):
+- Render log lines (redacted; IST -> UTC):
+- Outcome: PASS / FAIL / BLOCKED ON ACCESS / INCONCLUSIVE
+- ICR filed (tool-name representation) / docs/SECURITY.md "Policy" updated:
+- Fallback chosen / next action:
+```
+
+## E3 record (P1-09, #10)
+
+**Status: NOT RUN.** Runs after E5 passes (active policy, names verified).
+
+Not evidence: `scripts/probe_v2_e3_per_user.py` and `tests/api/test_e3_probe.py`
+(fake SDK clients, fake tool server, fake ledger).
+
+What the probe decides: Maya, Sam and Priya (one SDK client each, through
+`ArmorIQGateway`) x `knowledge_search_team`, `knowledge_search_confidential`,
+`knowledge_search_restricted`, `send_external_message`, one one-step plan per cell.
+Expected: team ALLOW/ALLOW/ALLOW; confidential ALLOW/HOLD/BLOCK; restricted
+ALLOW/BLOCK/BLOCK; honeypot BLOCK for all. Per cell: observed decision,
+`DecisionSource`, ArmorIQ evidence reference (SDK `PolicyBlockedException` /
+`enforcement_action`, delegation id, `armoriq_plan_id`), tool-server contact
+(read-only ledger / attempt / egress_sink rows by request_id or jti, plus a
+run-window scan for unattributed rows), and the ledger row (ALLOW only). A
+BLOCK/HOLD cell MATCHES only under the ArmorIQ evidence rule; a cell stopped by
+`armoriq_sdk_plan_check`, `tool_server_rule`, `application_rule` or `unknown` is
+FAIL with that layer named. Sam's HOLD: the SDK waits only `--hold-wait-s`
+(default 30 s), the delegation id is printed on stderr at once, and the
+delegation is left pending (reject it in the console if you like; never approve
+in E3: an approved-and-executed cell is FAIL). `--concurrent N` adds 3 x N
+parallel team searches and checks each ledger row's `requester_member_id`. Step 5
+(tool-server tier ceiling: Sam → restricted, Priya → restricted and confidential,
+sent directly with a `_ctx` signed as the gateway signs it) is a separate table,
+never counted in the 12 cells. Exit `0` = 12/12 MATCH, no unattributed rows, no
+attribution error; `3` = otherwise.
+
+### Operator procedure (live run)
+
+1. Preconditions: E5 PASS; `workspace-mcp` registered (the honeypot cells go through
+   it); Render awake; current toolserver DSN; a quiet window (other traffic on these
+   tools makes unattributed rows and blocks exit 0).
+2. Local values: as E5 except `TOOLSERVER_BEARER_WORKSPACE` (not needed).
+3. Run: `python scripts/probe_v2_e3_per_user.py --concurrent 5 > e3-record.txt 2> e3-stderr.txt; echo "exit=$?"`
+   - Permanent rows when everything matches: 5 executed ledger rows (3 team + Maya
+     confidential + Maya restricted) + 15 for `--concurrent 5`, 3 `out_of_scope`
+     rejection rows (step 5), no `egress_sink` row.
+   - Sam's delegation stays pending in Plans Governance; reject it afterwards or let
+     it expire.
+4. Console: check that each plan appears under its own member (attribution) and the
+   HOLD under Sam.
+5. Render log: `verified tool call` + `executed` for each ALLOW cell; **no** line for
+   any BLOCK/HOLD cell; `rejecting knowledge_search_*: out_of_scope` for step 5.
+6. Decide: PASS only with exit `0`, every BLOCK/HOLD cell evidenced, console
+   attribution correct, and no Render line for any BLOCK/HOLD cell. On any mismatch:
+   FAIL, 2-hour diagnosis rule, then the fallback (PRD §14), recorded here. Hand Sam's
+   HOLD reproduction to P1-10 and the observed BLOCK/HOLD shapes to P3-04 / P4-03.
+
+### Record to fill after the live run
+
+```text
+### E3 — per-member outcomes on the same tools
+- Run at (UTC):
+- Operator:
+- Deployed tool-server SHA:
+- Active policy (name, as accepted in E5):
+- Matrix table (probe output, verbatim, 12 cells):
+- Cell details (probe output, verbatim):
+- Cells failing the evidence rule (layer named):
+- Concurrency (runs, executed, attribution errors) + console attribution check:
+- Tool-server tier ceiling table (step 5, verbatim; enforced / NOT enforced):
+- Unattributed rows (probe header):
+- Sam's delegation id and final console state (pending / rejected / expired):
+- Render log lines (redacted; IST -> UTC):
+- Probe exit code:
+- Outcome: PASS / FAIL / BLOCKED ON ACCESS / INCONCLUSIVE
+- ICR (U-4 / §3 BLOCK-HOLD mapping) filed:
+- Fallback chosen / next action:
+```
+
+## E4 record (P1-10, #11)
+
+**Status: NOT RUN.** Runs after E3 shows Sam's HOLD; needs the person holding
+the Maya account at the console during each scenario.
+
+Not evidence: `scripts/probe_v2_e4_hold.py` and `tests/api/test_e4_probe.py`
+(fake SDK client whose HOLD resolves as scripted).
+
+What the probe decides: Sam's `knowledge_search_confidential` through
+`ArmorIQGateway` with waiting; the moment the SDK reports the HOLD it prints on
+stderr a banner with the delegation id, the request id, what to do, where (Plans
+Governance → "Needs you"), when the SDK stops waiting, and when the signed `_ctx`
+(300 s) and the intent token expire. The probe never approves, never retries,
+never re-plans. Scenarios and their PASS candidates (exit `0`; else `3`):
+- `approve`: approval state `approved` with the hold's delegation id; resumed on the
+  same plan and step (the ledger row's plan_id, step 0 and jti are the ones signed
+  before the hold); exactly one executed ledger row; the same `_ctx` replayed
+  directly is deduplicated (`replay`, `original_entry_id` = that row). If nobody
+  approves in time, or the resume does not execute, the verdict is the fallback
+  **"pending, resume unverified"**, never PASS.
+- `reject`: state `rejected`, zero executions, no tool-server rows.
+- `timeout`: state `timeout` after `--wait-s`, zero executions, no new plan.
+- `expiry`: `--token-validity-s` (default 60); approve after the printed token-expiry
+  time; the resume must fail closed (no executed row). The record shows the
+  requested vs granted token lifetime (PRD §7.1).
+
+### Operator procedure (live run)
+
+1. Preconditions: E3 shows Sam's HOLD; the Maya account is Org Admin and Sam's is an
+   Analyst; Render awake; current toolserver DSN. Local values: `ARMORIQ_API_KEY`,
+   `PERSONA_SAM_EMAIL`, `CTX_SECRET`, `TOOLSERVER_BEARER_MEMORY`,
+   `DATABASE_URL_TOOLSERVER` (optional `PERSONA_MAYA_EMAIL`, shown masked).
+2. Run each scenario in its own terminal session, watching stderr for the banner:
+   - `python scripts/probe_v2_e4_hold.py --scenario approve > e4-approve.txt; echo "exit=$?"`
+     → approve in the console **within about 3 minutes** (the duplicate check
+     replays the `_ctx`, which lives 300 s from signing).
+   - `python scripts/probe_v2_e4_hold.py --scenario reject > e4-reject.txt; echo "exit=$?"` → reject.
+   - `python scripts/probe_v2_e4_hold.py --scenario timeout --wait-s 60 > e4-timeout.txt; echo "exit=$?"` → do nothing.
+   - `python scripts/probe_v2_e4_hold.py --scenario expiry --token-validity-s 60 > e4-expiry.txt; echo "exit=$?"`
+     → approve only after the printed token-expiry time.
+   - Maximum token lifetime: re-run `approve` (or `timeout`) with
+     `--token-validity-s 1200` and record the granted lifetime; if 1200 s is not
+     granted, record the accepted value and the lowered `APPROVAL_TIMEOUT_MS` that
+     keeps `TOKEN_VALIDITY_S*1000 > APPROVAL_TIMEOUT_MS + 120000` (ICR).
+3. Self-approval: during a `timeout` run, sign in to the console as Sam and try to
+   approve his own held request; record how the platform refuses it.
+4. Approver observability (U-11): record what the console shows about who approved;
+   the app sees no approver (the gateway's `ApprovalStatus` has no such field).
+5. Render log: `approve` → one `verified tool call` + `executed
+   knowledge_search_confidential`, then `rejecting tool call: replay`; `reject` /
+   `timeout` → no tool-server line; `expiry` → no `executed` line.
+6. Decide: PASS only if `approve`, `reject` and `timeout` (and `expiry`) are PASS
+   candidates with matching console and Render evidence. Otherwise apply the
+   fallback (keep the request pending, show the console link, label resume
+   "unverified"), and record it here and in the demo script (P5-04).
+
+### Record to fill after the live run
+
+```text
+### E4 — HOLD → console approval / rejection → resume; expiry
+- Run at (UTC) per scenario:
+- Operator / person acting as Maya:
+- Deployed tool-server SHA:
+- approve: probe record (verbatim) + exit code; delegation id; same plan/step: yes / no; ledger rows: ; duplicate: replay / other:
+- reject: probe record (verbatim) + exit code:
+- timeout: probe record (verbatim) + exit code:
+- expiry: probe record (verbatim) + exit code; approval time vs printed token expiry:
+- Token lifetime: requested / granted; APPROVAL_TIMEOUT_MS used; startup invariant holds:
+- Console surface (D-22): exact page path, filter and button labels:
+- Approver identity visible (U-11): console yes / no; SDK/app: no:
+- Self-approval attempt (Sam): refused how:
+- Render log lines (redacted; IST -> UTC):
+- Outcome: PASS / FALLBACK ("pending, resume unverified") / FAIL / INCONCLUSIVE
+- ICRs filed (token lifetime / approval timeout / SHARED_INTERFACES §8):
+- Next action (P3-06 link text, P4-04 holds panel, P5-02 SC-04):
 ```
 
 ## Result record template
