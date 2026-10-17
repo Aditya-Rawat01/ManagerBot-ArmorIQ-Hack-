@@ -63,10 +63,10 @@ from services.audit.errors import (
 from services.audit.protocols import AuditCursor, AuditDatabase
 from services.audit.redaction import redact_payload, redact_question
 from services.contracts import (
+    ELEVATED_TIERS,
     ApprovalStatus,
     ArmorIQDecision,
     AuditEvent,
-    ELEVATED_TIERS,
     AuditEventType,
     DataTier,
     DeliveryChannel,

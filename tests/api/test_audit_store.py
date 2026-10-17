@@ -528,8 +528,18 @@ def test_escalation_created_rejects_a_non_elevated_tier(tier: object) -> None:
 
 @pytest.mark.parametrize(
     "escalation_id",
-    ["has space", "esc-1", "esc-" + "A" * 32, "esc-" + "0" * 31, "esc-" + "0" * 33, "ESC-" + "0" * 32,
-     "x-" + "0" * 32, "", None, 7],
+    [
+        "has space",
+        "esc-1",
+        "esc-" + "A" * 32,
+        "esc-" + "0" * 31,
+        "esc-" + "0" * 33,
+        "ESC-" + "0" * 32,
+        "x-" + "0" * 32,
+        "",
+        None,
+        7,
+    ],
 )
 def test_confirmation_event_rejects_a_non_canonical_escalation_id(escalation_id: object) -> None:
     _refused(_created(escalation_id=escalation_id))
