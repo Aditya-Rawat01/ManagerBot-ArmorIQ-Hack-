@@ -518,11 +518,13 @@ def _confirm_note(
     approved_by: str,
 ) -> tuple[int, int]:
     """Confirm exactly `record_id` + `version`: lock the row, check the
-    binding, then mark that version authoritative with Maya's provenance."""
+    binding, then mark that version authoritative with Maya's provenance.
+    Only a CURRENT draft can be confirmed: a superseded draft stays
+    superseded (review I1)."""
     pk = _note_pk(record_id)
     with db.transaction(pool) as conn, conn.cursor() as cur:
         cur.execute(
-            """SELECT version, review_status FROM public.team_notes
+            """SELECT version, review_status, superseded_by_id FROM public.team_notes
                WHERE id = %s AND workspace_id = %s
                FOR UPDATE""",
             (pk, workspace_id),
@@ -534,6 +536,8 @@ def _confirm_note(
             raise PreconditionFailed(f"record {pk} is version {row[0]}, not {version}")
         if row[1] != "draft":
             raise PreconditionFailed(f"record {pk} is already {row[1]}")
+        if row[2] is not None:
+            raise PreconditionFailed(f"record {pk} is superseded")
         cur.execute(
             """UPDATE public.team_notes
                SET review_status = 'authoritative',

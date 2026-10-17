@@ -12,15 +12,25 @@ verified `_ctx`) can confirm or supersede, bound to the exact record+version.
 
 import inspect
 import json
+import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from typing import Any
 
 import psycopg
 import pytest
+from fastapi.testclient import TestClient
 
 from services.contracts import TOOL_CATALOG, ToolKind, ToolName
-from services.toolserver import tools_memory
+from services.toolserver import main, tools_memory
+from services.toolserver.main import create_app
 
+from .conftest import make_settings
 from .test_tool_dispatch import (
+    CTX_SECRET,
+    FAKE_DSN,
     LIVE_DSN,
     NEEDS_DB,
     FakeLedger,
@@ -28,8 +38,19 @@ from .test_tool_dispatch import (
     dev_client,
     fake_ledger_client,
     live_client,
+    live_write_dsn,
     make_ctx,
     result_text,
+)
+
+# The backend DSN reads Maya's metadata-only review queue (ADR-023). Same
+# local-only, opt-in rule as LIVE_DSN; captured at collection time.
+BACKEND_DSN = live_write_dsn(
+    os.environ.get("DATABASE_URL_BACKEND", ""), os.environ.get("PROXYLEAD_DB_WRITE_TESTS")
+)
+NEEDS_BOTH_DSNS = pytest.mark.skipif(
+    not (LIVE_DSN and BACKEND_DSN),
+    reason="needs DATABASE_URL_TOOLSERVER + DATABASE_URL_BACKEND and PROXYLEAD_DB_WRITE_TESTS=1",
 )
 
 MAYA = {
@@ -78,6 +99,39 @@ def ok_json(message: dict) -> dict:
     """The §4 body of a successful (isError False) tool result."""
     assert message["result"]["isError"] is False, message["result"]
     return json.loads(message["result"]["content"][0]["text"])
+
+
+def confirm(
+    client, record_id: str, version: int, *, persona: dict | None = None, **ctx_overrides: Any
+) -> dict:
+    ctx = make_ctx(tool=CONFIRM.value, **{**(persona or MAYA), **ctx_overrides})
+    return call(
+        client, {"record_id": record_id, "version": version, "_ctx": ctx}, tool=CONFIRM.value
+    )
+
+
+def supersede(
+    client,
+    record_id: str,
+    version: int,
+    by_record_id: str,
+    *,
+    reason: str = "replaced",
+    persona: dict | None = None,
+    **ctx_overrides: Any,
+) -> dict:
+    ctx = make_ctx(tool=SUPERSEDE.value, **{**(persona or MAYA), **ctx_overrides})
+    return call(
+        client,
+        {
+            "record_id": record_id,
+            "version": version,
+            "superseded_by_record_id": by_record_id,
+            "reason": reason,
+            "_ctx": ctx,
+        },
+        tool=SUPERSEDE.value,
+    )
 
 
 def note_row(record_id: str) -> dict:
@@ -267,6 +321,221 @@ def test_supersede_preserves_history() -> None:
     assert old_row["provenance"]["superseded_reason"] == "replaced by the current runbook"
     assert old_row["provenance"]["superseded_request_id"] == "req-dispatch"
     assert new_row["superseded_by_id"] is None, "replacement untouched"
+
+
+@NEEDS_DB
+def test_superseded_draft_cannot_be_confirmed(real_model: Any) -> None:
+    """Review I1: a superseded draft is no longer awaiting review. Confirming
+    it is `precondition_failed`; it stays a superseded, unapproved draft."""
+    with live_client() as client:
+        old = ok_json(save_note(client, f"p209 old draft {uuid.uuid4().hex}", **SAM))
+        new = ok_json(save_note(client, f"p209 replacement {uuid.uuid4().hex}", **MAYA))
+        ok_json(confirm(client, new["record_id"], new["version"]))
+        ok_json(supersede(client, old["record_id"], old["version"], new["record_id"]))
+        refused = confirm(client, old["record_id"], old["version"])
+    assert result_text(refused)["code"] == "precondition_failed"
+    row = note_row(old["record_id"])
+    assert row["review_status"] == "draft"
+    assert row["superseded_by_id"] == int(new["record_id"])
+    assert row["approved_by_member_id"] is None and row["approved_at"] is None
+
+
+def review_queue_ids(record_ids: list[str]) -> set[int]:
+    """Record IDs of `record_ids` listed in `draft_review_queue`, read as the
+    backend role (the queue's only reader, ADR-023)."""
+    with psycopg.connect(BACKEND_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT record_id FROM public.draft_review_queue WHERE record_id = ANY(%s)",
+            ([int(record_id) for record_id in record_ids],),
+        )
+        return {int(row[0]) for row in cur.fetchall()}
+
+
+@NEEDS_BOTH_DSNS
+def test_review_queue_lists_only_current_drafts(real_model: Any) -> None:
+    """Review I1 (0013 view): a draft is queued; once confirmed or
+    superseded it leaves Maya's metadata-only queue."""
+    with live_client() as client:
+        old = ok_json(save_note(client, f"p209 queued {uuid.uuid4().hex}", **PRIYA))
+        new = ok_json(save_note(client, f"p209 queued too {uuid.uuid4().hex}", **SAM))
+        ids = [old["record_id"], new["record_id"]]
+        assert review_queue_ids(ids) == {int(old["record_id"]), int(new["record_id"])}
+        ok_json(confirm(client, new["record_id"], new["version"]))
+        ok_json(supersede(client, old["record_id"], old["version"], new["record_id"]))
+    assert review_queue_ids(ids) == set(), "confirmed and superseded drafts leave the queue"
+
+
+# --- offline doubles: every statement, its parameters, its transaction -------
+
+FIXED_NOW = datetime(2026, 10, 17, 12, 0, tzinfo=UTC)
+
+
+def note(pk: int, **values: Any) -> dict[str, Any]:
+    """A scripted team_notes row (column -> value); defaults: a current v1
+    draft by Sam in the default workspace."""
+    row: dict[str, Any] = {
+        "id": pk,
+        "workspace_id": "workspace-primary",
+        "title": None,
+        "content": f"scripted note {pk} content",
+        "content_kind": "note",
+        "author_member_id": "m-sam",
+        "version": 1,
+        "review_status": "draft",
+        "superseded_by_id": None,
+        "approved_by_member_id": None,
+        "approved_at": None,
+    }
+    row.update(values)
+    return row
+
+
+def _columns(clause: str) -> list[str]:
+    return [name.strip() for name in clause.split(",")]
+
+
+class RecordingPool:
+    """`db.transaction`-compatible pool double (offline, CI-visible).
+
+    Records every cursor statement as (normalized SQL, params, in_transaction)
+    and every transaction boundary. SELECTs on `team_notes` /
+    `source_records` answer from the scripted rows WITHOUT evaluating the
+    WHERE clause (filters are asserted on the recorded SQL instead): rows
+    whose `id` / `source_id` appears among the parameters are returned, with
+    the columns the statement names. `... RETURNING` statements return what
+    the real statement would."""
+
+    def __init__(
+        self,
+        notes: list[dict[str, Any]] | None = None,
+        sources: list[dict[str, Any]] | None = None,
+        *,
+        source_conflict: bool = False,
+    ) -> None:
+        self.notes = {row["id"]: row for row in notes or []}
+        self.sources = {row["source_id"]: row for row in sources or []}
+        self.source_conflict = source_conflict
+        self.statements: list[tuple[str, tuple, bool]] = []
+        self.events: list[str] = []
+        self.in_transaction = False
+
+    @contextmanager
+    def connection(self) -> Iterator["_RecordingConn"]:
+        yield _RecordingConn(self)
+
+    def close(self) -> None:
+        pass
+
+    def matching(self, prefix: str) -> list[tuple[str, tuple, bool]]:
+        return [entry for entry in self.statements if entry[0].startswith(prefix)]
+
+    def writes(self) -> list[tuple[str, tuple, bool]]:
+        verbs = ("INSERT", "UPDATE", "DELETE")
+        return [entry for entry in self.statements if entry[0].startswith(verbs)]
+
+    def respond(self, query: str, params: tuple) -> list[tuple]:
+        if query.startswith("SELECT ") and " FROM public.team_notes " in query:
+            columns = _columns(query[len("SELECT ") : query.index(" FROM public.team_notes ")])
+            ids = [value for value in params if type(value) is int]
+            return [
+                tuple(row[name] for name in columns)
+                for pk, row in sorted(self.notes.items())
+                if pk in ids
+            ]
+        if query.startswith("SELECT ") and " FROM public.source_records " in query:
+            columns = _columns(query[len("SELECT ") : query.index(" FROM public.source_records ")])
+            return [
+                tuple(row[name] for name in columns)
+                for source_id, row in self.sources.items()
+                if source_id in params
+            ]
+        if " RETURNING " not in query:
+            return []
+        returning = _columns(query.rsplit(" RETURNING ", 1)[1])
+        if query.startswith("INSERT INTO public.team_notes"):
+            return [(41, 1)]
+        if query.startswith("INSERT INTO public.source_records"):
+            return [] if self.source_conflict else [(901,)]
+        if query.startswith("UPDATE public.team_notes"):
+            pk = next(value for value in params if type(value) is int and value in self.notes)
+            current = {**self.notes[pk], "approved_at": FIXED_NOW}
+            return [tuple(current[name] for name in returning)]
+        return []
+
+
+class _RecordingConn:
+    def __init__(self, pool: RecordingPool) -> None:
+        self.pool = pool
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        self.pool.events.append("begin")
+        self.pool.in_transaction = True
+        try:
+            yield
+        except BaseException:
+            self.pool.events.append("rollback")
+            raise
+        else:
+            self.pool.events.append("commit")
+        finally:
+            self.pool.in_transaction = False
+
+    def execute(self, query: Any, params: Any = None) -> None:
+        # Only db.transaction's `SET LOCAL statement_timeout` (a Composed).
+        self.pool.events.append("set_local")
+
+    def cursor(self) -> "_RecordingCursor":
+        return _RecordingCursor(self.pool)
+
+
+class _RecordingCursor:
+    def __init__(self, pool: RecordingPool) -> None:
+        self.pool = pool
+        self._rows: list[tuple] = []
+        self.rowcount = 0
+
+    def __enter__(self) -> "_RecordingCursor":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def execute(self, query: str, params: tuple = ()) -> None:
+        normalized = " ".join(str(query).split())
+        values = tuple(params)
+        self.pool.statements.append((normalized, values, self.pool.in_transaction))
+        self.pool.events.append(normalized.split(" ", 1)[0])
+        self._rows = self.pool.respond(normalized, values)
+        self.rowcount = len(self._rows)
+
+    def fetchone(self) -> tuple | None:
+        return self._rows[0] if self._rows else None
+
+    def fetchall(self) -> list[tuple]:
+        return list(self._rows)
+
+
+def recording_client(
+    monkeypatch: pytest.MonkeyPatch, pool: RecordingPool, ledger: FakeLedger | None = None
+) -> TestClient:
+    """The real app and guarded dispatcher, with `pool` as its database and an
+    in-memory ledger."""
+    ledger = ledger if ledger is not None else FakeLedger()
+    monkeypatch.setattr(main.db, "create_pool", lambda dsn, **kwargs: pool)
+    monkeypatch.setattr(main, "Ledger", lambda pool: ledger)
+    app = create_app(make_settings(ctx_secret=CTX_SECRET, database_url_toolserver=FAKE_DSN))
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_confirm_refuses_a_superseded_draft_offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review I1 (CI-visible): the locked row's `superseded_by_id` is read and
+    a superseded draft is `precondition_failed` with no write at all."""
+    pool = RecordingPool([note(5, superseded_by_id=6), note(6, review_status="authoritative")])
+    with recording_client(monkeypatch, pool) as client:
+        message = confirm(client, "5", 1)
+    assert result_text(message)["code"] == "precondition_failed"
+    assert pool.writes() == []
 
 
 # --- denial and argument paths (no database needed) -------------------------
