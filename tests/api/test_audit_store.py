@@ -387,8 +387,11 @@ def test_append_event_rejects_naive_timestamps() -> None:
 
 # --- confirmation lifecycle events (P3-04 ICR, issue #25) -------------------
 
-# Obviously-fake, token-shaped value: never a real secret.
+# Obviously-fake, token-shaped values: never real secrets.
 _FAKE_CONFIRMATION_TOKEN = "fake_confirm_9Fk2Lm4Qp7Rt1Vx5Za8Bc3De6Gh0Jk"
+_FAKE_URLSAFE_TOKEN = "fAkE-c0nf1rm_T0k3n-9Fk2Lm4Qp7Rt1Vx5Za8Bc3De6Gh"
+_ESC_ID = "esc-" + "3f2a9c" + "0" * 26  # f"esc-{uuid.uuid4().hex}" shape
+_DIGEST = "ab" * 32  # hashlib.sha256(...).hexdigest() shape
 
 
 def _confirmation_event(event_type: AuditEventType, payload: dict[str, object]) -> AuditEvent:
@@ -402,17 +405,35 @@ def _confirmation_event(event_type: AuditEventType, payload: dict[str, object]) 
     )
 
 
-def test_escalation_created_valid_payload_is_recorded() -> None:
+def _created(**overrides: object) -> AuditEvent:
+    payload: dict[str, object] = {
+        "escalation_id": _ESC_ID,
+        "requested_tier": "confidential",
+        "plan_digest": _DIGEST,
+    }
+    payload.update(overrides)
+    return _confirmation_event(AuditEventType.ESCALATION_CREATED, payload)
+
+
+def _resolved(payload: dict[str, object]) -> AuditEvent:
+    return _confirmation_event(AuditEventType.CONFIRMATION_RESOLVED, payload)
+
+
+def _refused(event: AuditEvent) -> None:
+    """The write is refused and nothing reaches the database."""
     db = FakeDatabase()
-    append_event(
-        db,
-        event=_confirmation_event(
-            AuditEventType.ESCALATION_CREATED,
-            {"escalation_id": "esc-1", "requested_tier": "confidential", "plan_digest": "a" * 64},
-        ),
-    )
+    with pytest.raises(AuditStoreError):
+        append_event(db, event=event)
+    assert db.committed == []
+    assert "INSERT" not in _all_sql(db)
+
+
+@pytest.mark.parametrize("tier", ["confidential", "restricted"])
+def test_escalation_created_valid_payload_is_recorded(tier: str) -> None:
+    db = FakeDatabase()
+    append_event(db, event=_created(requested_tier=tier))
     assert "INSERT INTO request_events" in _all_sql(db)
-    assert "esc-1" in _all_text(db) and "confidential" in _all_text(db)
+    assert _ESC_ID in _all_text(db) and tier in _all_text(db) and _DIGEST in _all_text(db)
 
 
 @pytest.mark.parametrize(
@@ -420,24 +441,27 @@ def test_escalation_created_valid_payload_is_recorded() -> None:
 )
 def test_confirmation_resolved_accepts_known_states(state: str) -> None:
     db = FakeDatabase()
-    append_event(
-        db,
-        event=_confirmation_event(
-            AuditEventType.CONFIRMATION_RESOLVED,
-            {"escalation_id": "esc-1", "confirmation_state": state},
-        ),
-    )
+    append_event(db, event=_resolved({"escalation_id": _ESC_ID, "confirmation_state": state}))
     assert "INSERT INTO request_events" in _all_sql(db)
 
 
+@pytest.mark.parametrize("state", ["invalid", "unbound"])
+def test_unidentified_states_need_no_escalation_id(state: str) -> None:
+    """No stored confirmation was found, so there is no escalation to name
+    (and nothing tempts the caller to fill the ID with the token)."""
+    db = FakeDatabase()
+    append_event(db, event=_resolved({"confirmation_state": state}))
+    assert "INSERT INTO request_events" in _all_sql(db)
+
+
+@pytest.mark.parametrize("state", ["accepted", "rejected", "expired", "replayed", "mismatch"])
+def test_identified_states_require_the_escalation_id(state: str) -> None:
+    _refused(_resolved({"confirmation_state": state}))
+
+
 def test_confirmation_event_rejects_unknown_payload_key() -> None:
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.ESCALATION_CREATED, {"escalation_id": "esc-1", "note": "x"}
-            ),
-        )
+    _refused(_created(note="x"))
+    _refused(_resolved({"escalation_id": _ESC_ID, "confirmation_state": "accepted", "x": 1}))
 
 
 def test_confirmation_event_rejects_raw_token_and_writes_nothing() -> None:
@@ -445,72 +469,71 @@ def test_confirmation_event_rejects_raw_token_and_writes_nothing() -> None:
     with pytest.raises(AuditStoreError):
         append_event(
             db,
-            event=_confirmation_event(
-                AuditEventType.CONFIRMATION_RESOLVED,
+            event=_resolved(
                 {
-                    "escalation_id": "esc-1",
+                    "escalation_id": _ESC_ID,
                     "confirmation_state": "accepted",
                     "confirmation_token": _FAKE_CONFIRMATION_TOKEN,
-                },
+                }
             ),
         )
     assert _FAKE_CONFIRMATION_TOKEN not in _all_text(db)
     assert db.committed == []
 
 
+@pytest.mark.parametrize("token", [_FAKE_CONFIRMATION_TOKEN, _FAKE_URLSAFE_TOKEN])
+def test_a_token_passed_as_an_allowed_field_is_refused(token: str) -> None:
+    """The ID and digest shapes are exact, so a token can't ride in an
+    allowed key either (a caller bug, not just a hostile key name)."""
+    _refused(_created(escalation_id=token))
+    _refused(_created(plan_digest=token))
+    _refused(_resolved({"escalation_id": token, "confirmation_state": "invalid"}))
+
+
 def test_confirmation_event_rejects_missing_fields() -> None:
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(AuditEventType.ESCALATION_CREATED, {}),
+    _refused(_confirmation_event(AuditEventType.ESCALATION_CREATED, {}))
+    _refused(_confirmation_event(AuditEventType.ESCALATION_CREATED, {"escalation_id": _ESC_ID}))
+    _refused(
+        _confirmation_event(
+            AuditEventType.ESCALATION_CREATED,
+            {"escalation_id": _ESC_ID, "requested_tier": "confidential"},
         )
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.CONFIRMATION_RESOLVED, {"escalation_id": "esc-1"}
-            ),
+    )
+    _refused(
+        _confirmation_event(
+            AuditEventType.ESCALATION_CREATED,
+            {"escalation_id": _ESC_ID, "plan_digest": _DIGEST},
         )
+    )
+    _refused(_resolved({"escalation_id": _ESC_ID}))
 
 
-def test_confirmation_event_rejects_unknown_state() -> None:
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.CONFIRMATION_RESOLVED,
-                {"escalation_id": "esc-1", "confirmation_state": "maybe"},
-            ),
-        )
+@pytest.mark.parametrize("state", ["maybe", "", None, ["accepted"], {"s": "accepted"}, 1])
+def test_confirmation_event_rejects_unknown_state(state: object) -> None:
+    _refused(_resolved({"escalation_id": _ESC_ID, "confirmation_state": state}))
 
 
-def test_escalation_created_rejects_bad_digest_and_tier() -> None:
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.ESCALATION_CREATED,
-                {"escalation_id": "esc-1", "plan_digest": "nope!"},
-            ),
-        )
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.ESCALATION_CREATED,
-                {"escalation_id": "esc-1", "requested_tier": "secret"},
-            ),
-        )
+@pytest.mark.parametrize(
+    "digest", ["nope!", "AB" * 32, "ab" * 16, "ab" * 33, "", None, ["ab" * 32]]
+)
+def test_escalation_created_rejects_a_non_sha256_digest(digest: object) -> None:
+    _refused(_created(plan_digest=digest))
 
 
-def test_confirmation_event_rejects_unbounded_escalation_id() -> None:
-    with pytest.raises(AuditStoreError):
-        append_event(
-            FakeDatabase(),
-            event=_confirmation_event(
-                AuditEventType.ESCALATION_CREATED, {"escalation_id": "has space"}
-            ),
-        )
+@pytest.mark.parametrize("tier", ["team", "secret", "", None, ["confidential"], 1])
+def test_escalation_created_rejects_a_non_elevated_tier(tier: object) -> None:
+    """Only confidential / restricted can be escalated to; `team` never needs it."""
+    _refused(_created(requested_tier=tier))
+
+
+@pytest.mark.parametrize(
+    "escalation_id",
+    ["has space", "esc-1", "esc-" + "A" * 32, "esc-" + "0" * 31, "esc-" + "0" * 33, "ESC-" + "0" * 32,
+     "x-" + "0" * 32, "", None, 7],
+)
+def test_confirmation_event_rejects_a_non_canonical_escalation_id(escalation_id: object) -> None:
+    _refused(_created(escalation_id=escalation_id))
+    _refused(_resolved({"escalation_id": escalation_id, "confirmation_state": "accepted"}))
 
 
 # --- read API ---------------------------------------------------------------

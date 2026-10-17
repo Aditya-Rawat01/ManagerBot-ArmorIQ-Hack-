@@ -66,6 +66,7 @@ from services.contracts import (
     ApprovalStatus,
     ArmorIQDecision,
     AuditEvent,
+    ELEVATED_TIERS,
     AuditEventType,
     DataTier,
     DeliveryChannel,
@@ -98,19 +99,24 @@ _MAX_SAFE_REFS = 20
 _MAX_REF_CHARS = 200
 
 # User-confirmation lifecycle events (P3-04 ICR, issue #25; SHARED_INTERFACES
-# §10). Payloads are metadata only: an opaque escalation ID (never the token),
-# plus the escalated tier, the plan digest, and the resolution state. The
-# opaque ID and the token↔ID mapping live in P3-04's in-process store, so a
-# raw confirmation token has no field to travel in. The key allowlists below
-# are exhaustive, so a token cannot be smuggled under an unexpected key.
+# §10). Payloads are metadata only: a server-generated escalation ID (never
+# the token, never derived from it), plus the escalated tier, the plan
+# digest, and the resolution state. The token↔ID mapping lives in P3-04's
+# in-process store. The key allowlists below are exhaustive, and the ID and
+# digest shapes are exact, so a token cannot be recorded under any key: a
+# `secrets.token_urlsafe` value matches neither `esc-<32 hex>` nor a
+# lowercase sha256 digest.
 _ESCALATION_CREATED_KEYS = frozenset({"escalation_id", "requested_tier", "plan_digest"})
 _CONFIRMATION_RESOLVED_KEYS = frozenset({"escalation_id", "confirmation_state"})
 _CONFIRMATION_STATES = frozenset(
     {"accepted", "rejected", "expired", "invalid", "replayed", "mismatch", "unbound"}
 )
-_ESCALATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}")
-# sha256 hex (P3-02 `plan_digest`); never secret, just a binding reference.
-_PLAN_DIGEST_RE = re.compile(r"[A-Fa-f0-9]{32,128}")
+# States reached without finding a stored confirmation: there is no
+# escalation to name, so the ID is optional (never filled with the token).
+_UNIDENTIFIED_CONFIRMATION_STATES = frozenset({"invalid", "unbound"})
+_ESCALATION_ID_RE = re.compile(r"esc-[0-9a-f]{32}")  # f"esc-{uuid.uuid4().hex}"
+# P3-02 `plan_digest`: hashlib.sha256(...).hexdigest(); a binding reference.
+_PLAN_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
 # Slack event/team/channel IDs (``Ev…``, ``T…``, ``C…``/``D…``): short and
 # printable, the same shape as plan IDs; never free text.
@@ -949,10 +955,13 @@ def _check_confirmation_event(event: AuditEvent) -> None:
     payload = dict(event.payload)
     if kind is AuditEventType.ESCALATION_CREATED:
         allowed = _ESCALATION_CREATED_KEYS
-        required = {"escalation_id"}
+        required = set(_ESCALATION_CREATED_KEYS)
     else:
         allowed = _CONFIRMATION_RESOLVED_KEYS
-        required = {"escalation_id", "confirmation_state"}
+        required = {"confirmation_state"}
+        state = payload.get("confirmation_state")
+        if not (isinstance(state, str) and state in _UNIDENTIFIED_CONFIRMATION_STATES):
+            required.add("escalation_id")
 
     if any(marker in key.lower() for key in payload for marker in _CONFIRMATION_CREDENTIAL_MARKERS):
         raise AuditStoreError(f"{kind.value} payload must never carry a token or credential")
@@ -963,21 +972,22 @@ def _check_confirmation_event(event: AuditEvent) -> None:
     if missing:
         raise AuditStoreError(f"{kind.value} payload is missing keys: {sorted(missing)}")
 
-    escalation_id = payload["escalation_id"]
-    if not isinstance(escalation_id, str) or not _ESCALATION_ID_RE.fullmatch(escalation_id):
-        raise AuditStoreError("escalation_id must be a bounded opaque identifier")
+    if "escalation_id" in payload:
+        escalation_id = payload["escalation_id"]
+        if not isinstance(escalation_id, str) or not _ESCALATION_ID_RE.fullmatch(escalation_id):
+            raise AuditStoreError(
+                "escalation_id must be a server-generated id: esc-<32 lowercase hex>"
+            )
     if kind is AuditEventType.ESCALATION_CREATED:
-        digest = payload.get("plan_digest")
-        if digest is not None and (
-            not isinstance(digest, str) or not _PLAN_DIGEST_RE.fullmatch(digest)
-        ):
-            raise AuditStoreError("plan_digest must be a hex digest")
-        tier = payload.get("requested_tier")
-        if tier is not None and tier not in {member.value for member in DataTier}:
-            raise AuditStoreError("requested_tier must be a DataTier value")
+        digest = payload["plan_digest"]
+        if not isinstance(digest, str) or not _PLAN_DIGEST_RE.fullmatch(digest):
+            raise AuditStoreError("plan_digest must be a lowercase sha256 hex digest")
+        tier = payload["requested_tier"]
+        if not isinstance(tier, str) or tier not in {member.value for member in ELEVATED_TIERS}:
+            raise AuditStoreError("requested_tier must be an elevated DataTier value")
     else:
-        state = payload.get("confirmation_state")
-        if state not in _CONFIRMATION_STATES:
+        state = payload["confirmation_state"]
+        if not isinstance(state, str) or state not in _CONFIRMATION_STATES:
             raise AuditStoreError(
                 "confirmation_state must be one of " + ", ".join(sorted(_CONFIRMATION_STATES))
             )
