@@ -1111,13 +1111,13 @@ def group_direct(
     team = "knowledge_search_team"
     args = {"query": "quokka", "limit": 3}
     now = time.time()
-    wrong_secret, _ = mint_ctx(
+    wrong_secret, wrong_jti = mint_ctx(
         secrets.token_hex(32), tool=team, request_id=f"{request_id}-ws", iat=now, exp=now + 300
     )
-    cross_tool, _ = mint_ctx(
+    cross_tool, cross_jti = mint_ctx(
         ctx_secret, tool=team, request_id=f"{request_id}-ct", iat=now, exp=now + 300
     )
-    expired, _ = mint_ctx(
+    expired, expired_jti = mint_ctx(
         ctx_secret,
         tool=team,
         request_id=f"{request_id}-ex",
@@ -1141,12 +1141,325 @@ def group_direct(
         ("direct-expired", "direct call, expired `_ctx` (exp 400 s ago, lifetime 300 s)",
          "context_expired", bearer, team, {**args, "_ctx": expired}),
     )  # fmt: skip
+    minted = {
+        "direct-wrong-secret": wrong_jti,
+        "direct-cross-tool": cross_jti,
+        "direct-expired": expired_jti,
+    }
     rows = []
     for case, attempt, expected, key, tool, arguments in calls:
         reply, window = observed_call(observer, client, key, tool, arguments, case)
-        rows.append({**direct_row(case, attempt, expected, reply), "window": window})
+        rows.append(
+            {
+                **direct_row(case, attempt, expected, reply),
+                "window": window,
+                "tool": tool,
+                "minted_jti": minted.get(case),
+            }
+        )
         time.sleep(spacing_s)
     return rows
+
+
+# --- zero-execution evidence (I3): ledger, attempts, egress sink -------------------
+
+E2_TOOLS = ("knowledge_search_team", "knowledge_search_confidential", "send_external_message")
+DB_SKEW_S = 5.0  # local clock vs Neon `now()` / `clock_timestamp()`
+# Column lists are allow-listed: `arguments_sha256` is read for a local
+# comparison only (never printed); no message, arguments, or hash-chain column.
+_LEDGER_WINDOW_SQL = (
+    "SELECT id, jti, request_id, trace_id, plan_id, step_index, tool_name, "
+    "requester_member_id, validation_outcome, execution_status, arguments_sha256, "
+    "created_at FROM public.tool_execution_ledger "
+    "WHERE created_at BETWEEN %s AND %s AND tool_name = ANY(%s) ORDER BY id LIMIT 500"
+)
+_ATTEMPTS_WINDOW_SQL = (
+    "SELECT id, credential_id, mcp_endpoint, tool_name, outcome, jti, request_id, "
+    "original_entry_id, created_at FROM public.tool_call_attempts "
+    "WHERE created_at BETWEEN %s AND %s AND tool_name = ANY(%s) ORDER BY id LIMIT 500"
+)
+_EGRESS_WINDOW_SQL = (
+    "SELECT id, request_id, tool_name, created_at FROM public.egress_sink "
+    "WHERE created_at BETWEEN %s AND %s ORDER BY id LIMIT 100"
+)
+# `jti` exists since migration 0012 (P2-10 follow-up).
+_EGRESS_BY_ID_SQL = (
+    "SELECT id, request_id, tool_name, jti, created_at FROM public.egress_sink "
+    "WHERE request_id = ANY(%s) OR jti = ANY(%s) ORDER BY id LIMIT 100"
+)
+# Codes the tool server records as its own ledger row (post-verification).
+_LEDGER_REJECTION_CODES = frozenset({"invalid_arguments", "out_of_scope", "precondition_failed"})
+# Cases allowed to execute: the planned baseline, the argument-binding
+# question, and the forged `_`-key cases (which must execute AS PLANNED).
+EXECUTION_ALLOWED = frozenset(
+    {
+        "planned-baseline",
+        "tamper-query",
+        "inject-_approvals",
+        "inject-_delegation_id",
+        "inject-_policy_context",
+    }
+)
+
+
+class E2EvidenceLookup(e1.NeonLedgerLookup):
+    """Read-only window queries over one private toolserver-role pool."""
+
+    def ping(self) -> None:
+        self._rows("SELECT 1 AS ok", ())
+
+    def ledger_window(self, start: datetime, end: datetime, tools: list[str]) -> list[dict]:
+        return self._rows(_LEDGER_WINDOW_SQL, (start, end, tools))
+
+    def attempts_window(self, start: datetime, end: datetime, tools: list[str]) -> list[dict]:
+        return self._rows(_ATTEMPTS_WINDOW_SQL, (start, end, tools))
+
+    def egress_window(self, start: datetime, end: datetime) -> list[dict]:
+        return self._rows(_EGRESS_WINDOW_SQL, (start, end))
+
+    def egress_for(self, request_ids: list[str], jtis: list[str]) -> list[dict]:
+        return self._rows(_EGRESS_BY_ID_SQL, (request_ids, jtis))
+
+
+def _parse_utc(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def collect_db_evidence(
+    dsn: str | None,
+    *,
+    started_at: str,
+    ended_at: str,
+    request_ids: list[str],
+    jtis: list[str],
+    lookup_factory: Callable[[str], Any] | None = None,
+) -> dict[str, Any]:
+    """Run the read-only evidence queries for the run window (+- DB_SKEW_S).
+
+    Errors are reported by class name only, with driver logs muted
+    (`e1.quiet_db_logs`): never the DSN, host, or role.
+    """
+    from datetime import timedelta
+
+    start = _parse_utc(started_at) - timedelta(seconds=DB_SKEW_S)
+    end = _parse_utc(ended_at) + timedelta(seconds=DB_SKEW_S)
+    report: dict[str, Any] = {
+        "status": "not started",
+        "window": (start.isoformat(), end.isoformat()),
+        "ledger": [],
+        "attempts": [],
+        "egress_window": [],
+        "egress_ids": [],
+        "notes": [],
+    }
+    if not dsn:
+        report["status"] = "unavailable (no DATABASE_URL_TOOLSERVER)"
+        return report
+    with e1.quiet_db_logs():
+        try:
+            lookup = (lookup_factory or E2EvidenceLookup)(dsn)
+        except Exception as exc:
+            report["status"] = f"lookup error ({type(exc).__name__})"
+            return report
+        try:
+            try:
+                report["ledger"] = lookup.ledger_window(start, end, list(E2_TOOLS))
+                report["attempts"] = lookup.attempts_window(start, end, list(E2_TOOLS))
+                report["egress_window"] = lookup.egress_window(start, end)
+                report["status"] = "ok"
+            except Exception as exc:
+                report["status"] = f"lookup error ({type(exc).__name__})"
+                return report
+            try:
+                report["egress_ids"] = lookup.egress_for(request_ids, jtis)
+            except Exception as exc:
+                # Without migration 0012 the sink has no jti column.
+                report["notes"].append(f"egress_sink by request_id/jti: {type(exc).__name__}")
+        finally:
+            with contextlib.suppress(Exception):
+                lookup.close()
+    return report
+
+
+def _business_hash(arguments: Mapping[str, Any]) -> str:
+    from services.toolserver.ledger import arguments_sha256
+
+    return arguments_sha256(arguments)
+
+
+def _attempt_text(row_: Mapping[str, Any]) -> str:
+    jti = row_.get("jti")
+    text = (
+        f"attempt row #{row_.get('id')} ({row_.get('tool_name')}, {row_.get('outcome')}, "
+        + (f"jti {jti}" if jti else "jti NULL")
+        + ")"
+    )
+    if row_.get("original_entry_id") is not None:
+        text += f" original_entry_id={row_['original_entry_id']}"
+    return text
+
+
+def _ledger_text(row_: Mapping[str, Any]) -> str:
+    return (
+        f"ledger row #{row_.get('id')} ({row_.get('tool_name')}, "
+        f"validation_outcome={row_.get('validation_outcome')}, "
+        f"execution_status={row_.get('execution_status')})"
+    )
+
+
+def _row_jtis(item: Mapping[str, Any]) -> list[str]:
+    window: Window | None = item.get("window")
+    jtis = [entry.jti for entry in window.signed] if window else []
+    for key in ("jti", "minted_jti"):
+        if item.get(key) and item[key] not in jtis:
+            jtis.append(str(item[key]))
+    return jtis
+
+
+def apply_db_evidence(rows: list[dict[str, Any]], db: Mapping[str, Any]) -> dict[str, Any]:
+    """Attribute every ledger / attempt / egress row of the window to an
+    attempt and corroborate what each attempt reported.
+
+    Ledger rows and verified attempt rows (`accepted`, `replay`) carry the
+    jti; rejected attempts (`invalid_context`, `context_expired`) carry NULL
+    identity (0008), so they are matched by (tool, outcome) in run order.
+    Sets ``db_ok`` / ``db_lines`` per row; returns the run summary with the
+    unattributed rows and every reason zero execution is not confirmed.
+    """
+    summary: dict[str, Any] = {"status": db.get("status"), "unintended": [], "unattributed": []}
+    if db.get("status") != "ok":
+        summary["unintended"].append(f"DB evidence {db.get('status')}")
+        return summary
+    ledger = list(db["ledger"])
+    attempts = list(db["attempts"])
+    used_attempts: set[Any] = set()
+    used_ledger: set[Any] = set()
+
+    def take_attempt(tool: str, outcome: str, jti: str | None) -> dict | None:
+        for candidate in attempts:
+            if candidate.get("id") in used_attempts:
+                continue
+            if candidate.get("tool_name") != tool or candidate.get("outcome") != outcome:
+                continue
+            if (candidate.get("jti") or None) != jti:
+                continue
+            used_attempts.add(candidate.get("id"))
+            return candidate
+        return None
+
+    def expect_attempt(lines: list[str], tool: str, outcome: str, jti: str | None) -> dict | None:
+        found = take_attempt(tool, outcome, jti)
+        lines.append(_attempt_text(found) if found else f"expected {outcome} attempt row not found")
+        return found
+
+    for number, item in enumerate(rows, start=1):
+        lines: list[str] = item.setdefault("db_lines", [])
+        case = str(item.get("case"))
+        tool = str(item.get("tool") or E2_TOOL)
+        jtis = _row_jtis(item)
+        own_ledger = [entry for entry in ledger if entry.get("jti") in jtis]
+        status, code = item.get("status"), item.get("code") or item.get("error_code")
+        ok = True
+        if case == "direct-replay" or (status == "rejected_by_tool_server" and code == "replay"):
+            found = expect_attempt(lines, tool, "replay", str(item.get("jti")))
+            ok = found is not None and str(found.get("original_entry_id")) == str(
+                item.get("original_entry_id")
+            )
+            # The replayed jti's only ledger row is the original call's.
+            own_ledger = [
+                entry
+                for entry in own_ledger
+                if str(entry.get("id")) != str(item.get("original_entry_id"))
+            ]
+            ok = ok and not own_ledger
+        elif code in ("invalid_context", "context_expired"):
+            ok = expect_attempt(lines, tool, str(code), None) is not None and not own_ledger
+        elif item.get("group") == "direct":
+            if code in BEARER_GUARD_CODES:
+                lines.append("no attempt row (the bearer guard answers before verification)")
+            else:
+                ok = False
+                lines.append(f"no corroboration rule for this reply (code {code})")
+            ok = ok and not own_ledger
+        elif status in ("executed", "rejected_by_tool_server"):
+            found = expect_attempt(lines, tool, "accepted", str(item.get("jti")))
+            entry = next(
+                (
+                    row_
+                    for row_ in own_ledger
+                    if str(row_.get("id")) == str(item["ledger_entry_id"])
+                ),
+                None,
+            )
+            lines.append(_ledger_text(entry) if entry else "ledger row for this jti not found")
+            ok = found is not None and entry is not None
+            if entry is not None and status == "executed":
+                ok = ok and entry.get("execution_status") == "executed"
+                expected = item.get("business_arguments")
+                if expected is not None:
+                    which = "tampered" if case == "tamper-query" else "planned"
+                    match = entry.get("arguments_sha256") == _business_hash(expected)
+                    item["hash_match"] = match
+                    lines.append(
+                        f"business-argument hash = {which} arguments: {'yes' if match else 'NO'}"
+                    )
+                    ok = ok and match
+            elif entry is not None:
+                ok = ok and (
+                    code in _LEDGER_REJECTION_CODES
+                    and entry.get("validation_outcome") == code
+                    and entry.get("execution_status") == "rejected_by_tool_server"
+                )
+        elif item.get("gateway_label") is not None:
+            # Not reached (pre-network or ArmorIQ block): no row may carry its jti.
+            own_attempts = [entry for entry in attempts if entry.get("jti") in jtis]
+            ok = not own_ledger and not own_attempts
+            lines.append(
+                "no ledger or attempt row for its jti(s)"
+                if ok
+                else "rows found for a call reported as not reaching the tool server"
+            )
+        used_ledger.update(entry.get("id") for entry in own_ledger)
+        if own_ledger and item.get("group") == "direct":
+            lines.extend(_ledger_text(entry) for entry in own_ledger)
+        item["db_ok"] = ok
+        if case not in EXECUTION_ALLOWED:
+            for entry in own_ledger:
+                if entry.get("execution_status") == "executed":
+                    summary["unintended"].append(f"#{number} {case} executed")
+    stray_ledger = [entry for entry in ledger if entry.get("id") not in used_ledger]
+    stray_attempts = [entry for entry in attempts if entry.get("id") not in used_attempts]
+    summary["unattributed"] = [_ledger_text(entry) for entry in stray_ledger] + [
+        _attempt_text(entry) for entry in stray_attempts
+    ]
+    for entry in stray_ledger:
+        if entry.get("execution_status") == "executed":
+            summary["unintended"].append(
+                f"unattributed executed ledger row #{entry.get('id')} ({entry.get('tool_name')})"
+            )
+    egress, egress_ids = len(db["egress_window"]), len(db["egress_ids"])
+    if egress:
+        summary["unintended"].append(f"{egress} egress_sink row(s) in the window")
+    if egress_ids:
+        summary["unintended"].append(f"{egress_ids} egress_sink row(s) carry this run's ids")
+    for item in rows:
+        if item.get("group") != "off-plan":
+            continue
+        tool = str(item.get("tool"))
+        stray = [entry for entry in stray_ledger + stray_attempts if entry.get("tool_name") == tool]
+        sink = tool == "send_external_message" and bool(egress or egress_ids)
+        item["db_ok"] = not stray and not sink
+        item["db_lines"] = [
+            f"no ledger, attempt, or egress_sink row for {tool} outside attributed cases"
+            if item["db_ok"]
+            else f"{len(stray)} unattributed row(s) for {tool}"
+            + ("; egress_sink rows present" if sink else "")
+        ]
+    summary["counts"] = (
+        f"ledger rows: {len(ledger)}; attempt rows: {len(attempts)}; "
+        f"egress_sink rows: {egress} in the window, {egress_ids} by request_id/jti"
+    )
+    return summary
 
 
 def _cell(value: Any) -> str:
@@ -1238,6 +1551,8 @@ def render_details(rows: list[dict[str, Any]]) -> str:
                 )
         if item.get("source"):
             lines.append(f"  - tool server reply: {item['observed']}")
+        if item.get("db_lines"):
+            lines.append("  - DB: " + "; ".join(item["db_lines"]))
         lines.extend(f"  - FLAG: {flag}" for flag in item.get("flags", []))
     return "\n".join(lines)
 
@@ -1330,18 +1645,21 @@ async def run_probe(
     sdk_client_factory: Callable[[str], Any] | None = None,
     direct_client: Any = None,
     ctx_signer_inner: Any = None,
+    lookup_factory: Callable[[str], Any] | None = None,
     spacing_s: float = 1.0,
 ) -> tuple[int, str]:
     """Execute all attempt groups; return (exit_code, report_text).
 
-    ``sdk_client_factory``, ``direct_client`` and ``ctx_signer_inner`` are
-    seams for offline tests only; the operator path builds the gateway's own
-    SDK client, a real HTTP client for the base URL, and the real signer.
-    Either way the SDK client is wrapped (`RecordingClient`) through the
-    gateway's `client_factory` seam, so every label is checked on the wire.
+    ``sdk_client_factory``, ``direct_client``, ``ctx_signer_inner`` and
+    ``lookup_factory`` are seams for offline tests only; the operator path
+    builds the gateway's own SDK client, a real HTTP client for the base
+    URL, the real signer, and the Neon evidence lookup. Either way the SDK
+    client is wrapped (`RecordingClient`) through the gateway's
+    `client_factory` seam, so every label is checked on the wire.
     """
     from services.authorization import armoriq_gateway
 
+    run_started = utc_now()
     capture = CtxCapture(ctx_signer_inner)
     recorder = SdkRecorder()
     observer = Observer(recorder, capture)
@@ -1380,17 +1698,37 @@ async def run_probe(
     rows.extend(await group_off_plan(gateway, settings, observer))
     rows.extend(group_proxy_shape())
     rows.extend(await group_tamper(gateway, settings, observer))
+    run_ended = utc_now()
     for item in rows:
         check_wire(item)
+    request_ids = sorted({str(item["request_id"]) for item in rows if item.get("request_id")})
+    jtis = sorted({jti for item in rows for jti in _row_jtis(item)})
+    db = await asyncio.to_thread(
+        collect_db_evidence,
+        ledger_dsn,
+        started_at=run_started,
+        ended_at=run_ended,
+        request_ids=request_ids,
+        jtis=jtis,
+        lookup_factory=lookup_factory,
+    )
+    summary = apply_db_evidence(rows, db)
     flagged = [item for item in rows if item.get("flags")]
+    unintended = summary["unintended"]
     report = [
         "### E2 — off-plan and tampered-call enforcement",
+        f"- Run window (UTC): {run_started} → {run_ended}",
         "- Requester: Maya (team-only one-step plans; a fresh plan per invoked case)",
-        "- Server-side zero-execution proof: operator correlates each "
-        "request_id/jti via Render log + Ledger.get_by_jti + tool_call_attempts; "
-        "this probe asserts no local execution only.",
         "- Server-side plan binding: tool names: not tested (no verified direct-proxy "
         "shape; the SDK stops unplanned names client-side); " + argument_binding_verdict(rows),
+        f"- DB evidence (read-only, toolserver role): {db['status']}; window "
+        f"{db['window'][0]} → {db['window'][1]} (run window +- {DB_SKEW_S:.0f} s); "
+        f"tools {list(E2_TOOLS)}"
+        + (f"; {summary['counts']}" if summary.get("counts") else "")
+        + (f"; notes: {db['notes']}" if db["notes"] else ""),
+        "- DB unattributed rows: " + ("; ".join(summary["unattributed"]) or "none"),
+        "- Zero unintended executions: "
+        + ("CONFIRMED" if not unintended else "NOT CONFIRMED (" + "; ".join(unintended) + ")"),
         f"- {GATEWAY_ICR_NOTE}",
         "- Flags: "
         + (", ".join(f"#{rows.index(item) + 1} {item['case']}" for item in flagged) or "none"),
@@ -1399,7 +1737,8 @@ async def run_probe(
         "",
         render_details(rows),
     ]
-    return (EXIT_NOT_COMPLETE if flagged else EXIT_COMPLETE), "\n".join(report)
+    complete = not flagged and not unintended
+    return (EXIT_COMPLETE if complete else EXIT_NOT_COMPLETE), "\n".join(report)
 
 
 def _fail(message: str) -> int:

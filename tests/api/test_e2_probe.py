@@ -272,9 +272,17 @@ class _OfflineToolServer__offline_fake:
     (`verify_and_record`) and REAL argument models over in-memory rows shaped
     like `tool_execution_ledger`, `tool_call_attempts` and `egress_sink`."""
 
-    def __init__(self, secret: str = FAKE_CTX_SECRET, bearer: str = FAKE_BEARER) -> None:
+    def __init__(
+        self,
+        secret: str = FAKE_CTX_SECRET,
+        bearer: str = FAKE_BEARER,
+        *,
+        strict_arguments: bool = True,
+    ) -> None:
         self.secret = secret
         self.bearer = bearer
+        # False emulates a broken deployment that skips the strict schema.
+        self.strict_arguments = strict_arguments
         self.claimed: set[str] = set()
         self.ledger_rows: list[dict[str, object]] = []
         self.attempt_rows: list[dict[str, object]] = []
@@ -383,7 +391,8 @@ class _OfflineToolServer__offline_fake:
         except CtxRejection as rejection:
             return self._error(rejection.code)
         try:
-            tool_args.validate_arguments(ToolName(tool), dict(verified.business_arguments))
+            if self.strict_arguments:
+                tool_args.validate_arguments(ToolName(tool), dict(verified.business_arguments))
         except ValidationError:
             entry = self._append(verified, "invalid_arguments", "rejected_by_tool_server")
             return self._error("invalid_arguments", ledger_entry_id=entry)
@@ -575,6 +584,48 @@ def _offline_settings() -> Settings:
     )
 
 
+class _OfflineEvidenceLookup__offline_fake:
+    """Fake read-only evidence lookup over the fake tool server's rows (the
+    window queries of `E2EvidenceLookup`, no Neon)."""
+
+    def __init__(self, server: _OfflineToolServer__offline_fake) -> None:
+        self.server = server
+        self.calls: list[str] = []
+        self.closed = False
+
+    def ping(self) -> None:
+        self.calls.append("ping")
+
+    @staticmethod
+    def _within(rows: list[dict[str, object]], start: object, end: object) -> list[dict]:
+        return [dict(row) for row in rows if start <= row["created_at"] <= end]  # type: ignore[operator]
+
+    def ledger_window(self, start: object, end: object, tools: list[str]) -> list[dict]:
+        self.calls.append("ledger_window")
+        rows = self._within(self.server.ledger_rows, start, end)
+        return [row for row in rows if row["tool_name"] in tools]
+
+    def attempts_window(self, start: object, end: object, tools: list[str]) -> list[dict]:
+        self.calls.append("attempts_window")
+        rows = self._within(self.server.attempt_rows, start, end)
+        return [row for row in rows if row["tool_name"] in tools]
+
+    def egress_window(self, start: object, end: object) -> list[dict]:
+        self.calls.append("egress_window")
+        return self._within(self.server.egress_rows, start, end)
+
+    def egress_for(self, request_ids: list[str], jtis: list[str]) -> list[dict]:
+        self.calls.append("egress_for")
+        return [
+            dict(row)
+            for row in self.server.egress_rows
+            if row["request_id"] in request_ids or row["jti"] in jtis
+        ]
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def _offline_run(
     *,
     server: _OfflineToolServer__offline_fake | None = None,
@@ -592,6 +643,7 @@ def _offline_run(
         policy_block=policy_block,
         expose_http_client=expose_http_client,
     )
+    kwargs.setdefault("lookup_factory", lambda dsn: _OfflineEvidenceLookup__offline_fake(server))
     direct = probe.DirectConfig(
         bearer=FAKE_BEARER, base_url=OFFLINE_BASE_URL, base_url_source="offline test"
     )
@@ -895,3 +947,151 @@ def test_main_shows_gateway_log_lines_on_stderr__offline_fake_sdk(
     assert "[gateway INFO] gateway off-plan blocked" in captured.err
     assert gateway_logger.handlers == handlers
     _assert_no_fake_values(captured.out, captured.err)
+
+
+# --- I3: zero-execution evidence from the ledger, attempts and egress sink ----------
+
+
+def test_zero_executions_are_confirmed_from_window_queries__offline_fake_ledger() -> None:
+    """I3: read-only window queries (ledger + attempts by time window and
+    tool_name, egress_sink by window and by request_id/jti) attribute every
+    row to an attempt; nothing unattributed executed."""
+    _, record, server, _ = _offline_run()
+    assert "- DB evidence (read-only, toolserver role): ok" in record
+    assert "Zero unintended executions: CONFIRMED" in record
+    assert f"ledger rows: {len(server.ledger_rows)}" in record
+    assert f"attempt rows: {len(server.attempt_rows)}" in record
+    assert "egress_sink rows: 0 in the window, 0 by request_id/jti" in record
+    assert "unattributed rows: none" in record
+    block = _details(record, "offplan-honeypot")
+    assert "DB: no ledger, attempt, or egress_sink row for send_external_message" in block
+
+
+def test_rejected_attempts_are_attributed_without_jti__offline_fake_ledger() -> None:
+    """Rejected `tool_call_attempts` rows carry NULL jti/request_id; they are
+    attributed by (tool, outcome) in run order, never by jti."""
+    _, record, server, _ = _offline_run()
+    for case, tool, outcome in (
+        ("direct-no-ctx", "knowledge_search_team", "invalid_context"),
+        ("direct-forged-ctx", "knowledge_search_team", "invalid_context"),
+        ("direct-wrong-secret", "knowledge_search_team", "invalid_context"),
+        ("direct-cross-tool", "knowledge_search_confidential", "invalid_context"),
+        ("direct-expired", "knowledge_search_team", "context_expired"),
+    ):
+        block = _details(record, case)
+        assert "DB: attempt row #" in block, case
+        assert f"({tool}, {outcome}, jti NULL)" in block, case
+    baseline = server.ledger_rows[0]
+    replay = _details(record, "direct-replay")
+    assert f"(knowledge_search_team, replay, jti {baseline['jti']}" in replay
+    assert f"original_entry_id={baseline['id']}" in replay
+    assert "DB: no attempt row (the bearer guard answers before verification)" in _details(
+        record, "direct-no-bearer"
+    )
+
+
+def test_strip_and_tamper_evidence_from_the_business_argument_hash__offline_fake_ledger() -> None:
+    """The ledger's `arguments_sha256` (never printed) is compared with the
+    hash of the expected business arguments: the forged `_` keys were
+    stripped, and the changed query is what executed."""
+    import re
+
+    _, record, _, _ = _offline_run()
+    for case in ("inject-_approvals", "inject-_delegation_id", "inject-_policy_context"):
+        assert "business-argument hash = planned arguments: yes" in _details(record, case)
+    assert "business-argument hash = tampered arguments: yes" in _details(record, "tamper-query")
+    assert "ledger row #" in _details(record, "inject-tier")
+    assert "validation_outcome=invalid_arguments" in _details(record, "inject-tier")
+    assert not re.search(r"\b[0-9a-f]{64}\b", record)
+
+
+def test_unintended_execution_is_not_confirmed__offline_fake_ledger() -> None:
+    """A deployment without the strict schema executes the injected `tier`:
+    the ledger shows it, zero executions is NOT confirmed, exit 3."""
+    code, record, _, _ = _offline_run(
+        server=_OfflineToolServer__offline_fake(strict_arguments=False)
+    )
+    assert "Zero unintended executions: NOT CONFIRMED" in record
+    assert "#14 inject-tier executed" in record
+    assert code == 3
+
+
+def test_foreign_rows_in_the_window_block_confirmation__offline_fake_ledger() -> None:
+    from datetime import UTC, datetime
+
+    server = _OfflineToolServer__offline_fake()
+    server.ledger_rows.append(
+        {
+            "id": 900,
+            "jti": "someone-else",
+            "request_id": "other-traffic",
+            "tool_name": "knowledge_search_confidential",
+            "validation_outcome": "accepted",
+            "execution_status": "executed",
+            "arguments_sha256": "0" * 64,
+            "created_at": datetime.now(UTC),
+        }
+    )
+    server.egress_rows.append(
+        {
+            "id": 5,
+            "request_id": "other-traffic",
+            "tool_name": "send_external_message",
+            "jti": "someone-else",
+            "created_at": datetime.now(UTC),
+        }
+    )
+    code, record, _, _ = _offline_run(server=server)
+    assert "Zero unintended executions: NOT CONFIRMED" in record
+    assert "unattributed executed ledger row #900 (knowledge_search_confidential)" in record
+    assert "1 egress_sink row(s) in the window" in record
+    assert code == 3
+
+
+def test_db_lookup_error_reports_the_class_only__offline_fake_ledger() -> None:
+    def boom(dsn: str) -> object:
+        raise ConnectionError(f"db down at {dsn}")
+
+    code, record, _, _ = _offline_run(lookup_factory=boom)
+    assert "- DB evidence (read-only, toolserver role): lookup error (ConnectionError)" in record
+    assert "Zero unintended executions: NOT CONFIRMED" in record
+    assert code == 3
+    _assert_no_fake_values(record)
+
+
+def test_without_a_dsn_zero_executions_is_never_confirmed__offline_fake_sdk() -> None:
+    code, record, _, _ = _offline_run(ledger_dsn=None)
+    assert "unavailable (no DATABASE_URL_TOOLSERVER)" in record
+    assert "Zero unintended executions: NOT CONFIRMED" in record
+    assert code == 3
+
+
+def test_db_lookup_mutes_driver_logs__offline_fake_ledger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pool/driver warnings (they quote the Neon host and role) never print."""
+    import logging
+
+    leak = "connection to server at fake-host.invalid failed for user fake_role"
+
+    class Noisy(_OfflineEvidenceLookup__offline_fake):
+        def ledger_window(self, *args: object) -> list[dict]:
+            logging.getLogger("psycopg.pool").warning("error connecting: %s", leak)
+            return super().ledger_window(*args)  # type: ignore[arg-type]
+
+    server = _OfflineToolServer__offline_fake()
+    with caplog.at_level(logging.DEBUG):
+        _offline_run(server=server, lookup_factory=lambda dsn: Noisy(server))
+    assert leak not in caplog.text
+
+
+def test_evidence_queries_select_no_content_columns() -> None:
+    for sql in (
+        probe._LEDGER_WINDOW_SQL,
+        probe._ATTEMPTS_WINDOW_SQL,
+        probe._EGRESS_WINDOW_SQL,
+        probe._EGRESS_BY_ID_SQL,
+    ):
+        assert sql.lstrip().upper().startswith("SELECT ")
+        for column in ("message", "arguments,", "prev_hash", "entry_hash", "destination"):
+            assert column not in sql
