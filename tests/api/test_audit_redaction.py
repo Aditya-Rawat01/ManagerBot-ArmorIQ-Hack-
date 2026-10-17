@@ -147,8 +147,9 @@ def test_sensitive_key_names_case_insensitive(key: str) -> None:
 
 
 # --- P3-01 follow-up: redaction gaps -------------------------------------------
-# Fake, structurally realistic credentials (never real): Slack, ArmorIQ- and
-# Anthropic-style keys, a JWT, HTTP Basic, and credential URLs on any scheme.
+# Fake, structurally realistic credentials (never real): Slack, ArmorIQ-,
+# `sk-`-style and Google API (Gemini, ADR-032) keys, a JWT, HTTP Basic, and
+# credential URLs on any scheme.
 
 _BARE_SECRETS = [
     "xoxb-1234567890-0987654321-AbCdEfGhIjKlMnOp",
@@ -159,6 +160,7 @@ _BARE_SECRETS = [
     "sk_live_0123456789abcdefABCDEF",
     "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv",
     "sk-0123456789abcdefghijklmnop",
+    "AIzaSyFAKE0123456789abcdefghijklmnopqrs",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJtLXNhbSJ9.c2lnbmF0dXJlLWZha2U",
 ]
 

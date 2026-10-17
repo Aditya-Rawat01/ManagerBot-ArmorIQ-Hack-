@@ -20,7 +20,8 @@ names are normalized first: camelCase is split, ``-`` and spaces become
   trusted identity envelopes and SDK metadata — never evidence);
 - anywhere in string values, dict KEYS, or error text: email addresses,
   ``Bearer``/``Basic`` credentials, bare Slack tokens (``xox?-``,
-  ``xapp-``), ``ak_live_``/``sk_live_``-style and ``sk-`` API keys, JWTs
+  ``xapp-``), ``ak_live_``/``sk_live_``-style, ``sk-`` and Google (``AIza``)
+  API keys, JWTs
   (``eyJ…​.…​.…``), any ``scheme://user:password@host`` URL (any scheme, any
   host, TLD or not), and database/broker connection strings
   (``postgres://``, ``redis://``, …).
@@ -90,6 +91,8 @@ _CONN_RE = re.compile(
 _SLACK_TOKEN_RE = re.compile(r"\b(?:xox[a-z](?:\.xox[a-z])?|xapp)-[A-Za-z0-9-]{6,}")
 _PREFIXED_KEY_RE = re.compile(r"\b(?:ak|sk|pk|rk)_(?:live|test|prod)_[A-Za-z0-9_\-]{6,}")
 _SK_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}")
+# Google API keys (`GEMINI_API_KEY`, ADR-032): "AIza" + 35 URL-safe characters.
+_GOOGLE_KEY_RE = re.compile(r"\bAIza[A-Za-z0-9_\-]{30,}")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*")
 
 # Order matters: URL credentials before emails (user:pw@host looks like an
@@ -103,6 +106,7 @@ _VALUE_PATTERNS = (
     _SLACK_TOKEN_RE,
     _PREFIXED_KEY_RE,
     _SK_KEY_RE,
+    _GOOGLE_KEY_RE,
     _JWT_RE,
 )
 
