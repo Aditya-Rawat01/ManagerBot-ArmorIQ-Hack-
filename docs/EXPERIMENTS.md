@@ -31,6 +31,12 @@ or deployed MCP endpoint has been used from this repository.
   | Sam (senior) | `s***@g***.com` (`samarth-chawla`) | Analyst | Active |
   | Priya (junior) | `p***@g***.com` (`parthgoyal26-03-2005`) | Analyst | Active |
 
+  **Update 17 Oct 2026 (VTCodeCraft):** the Maya persona is the ArmorIQ account
+  `w***@g***.com` (VTCodeCraft's work account), not `a***@g***.com`. The E1 live run used it
+  and ArmorIQ accepted it as an org member. Its console role must be confirmed as **Org Admin**
+  (outranking the Sam and Priya Analyst accounts) before E3/E4; whoever holds this account is
+  the console approver for HOLDs. `PERSONA_MAYA_EMAIL` must hold this account's e-mail everywhere.
+
   Persona-to-account mapping decided by the team on 15 Oct 2026 (D-25):
   Sam = `samarth-chawla`, Priya = `parthgoyal26-03-2005`. The matching
   `PERSONA_SAM_EMAIL` / `PERSONA_PRIYA_EMAIL` values are set privately (never here).
@@ -248,7 +254,9 @@ gateway currently drops.
 - request_id / trace_id: `e1-20261017T063718Z-d05c49c3` / `e1-20261017T063718Z-d05c49c3-trace`
 - Plan / session IDs: plan_id=`p-b47fad43c1ed4e17` armoriq_plan_id=`af5c79ba-f34c-4fa4-b6fa-a423c910a95e`
 - Requester: Maya, member e-mail masked `w***@g***.com`, `requester_member_id=m-maya`.
-  NOTE: the Setup record above lists the Maya account as `a***@g***.com`. ArmorIQ accepted
+  RESOLVED 17 Oct 2026: VTCodeCraft confirmed `w***@g***.com` is the Maya persona (Setup record
+  updated); its Org Admin role is still to be confirmed in the console before E3/E4.
+  Original note: the Setup record above listed the Maya account as `a***@g***.com`. ArmorIQ accepted
   `w***@g***.com` as an org member, but which account is the Org Admin "Maya" must be confirmed
   by Aditya-Rawat01 before E3/E4 (persona mapping).
 - jti: `55da5b6839514688abe426732e48e8b7`
