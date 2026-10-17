@@ -85,7 +85,7 @@ Pydantic model or TypeScript type).
 ## 5. Tests and evidence
 
 - Every task ships tests for its acceptance criteria (§11 of the task file).
-- Offline tests that fake ArmorIQ, Slack, Anthropic, or Neon must say so in the
+- Offline tests that fake ArmorIQ, Slack, Gemini, or Neon must say so in the
   test name or docstring, for example `test_gateway_maps_hold__offline_fake_sdk`.
 - **Never claim a security control works, or a gate passed, unless the real test
   ran against the required real integration** (real ArmorIQ org, deployed HTTPS

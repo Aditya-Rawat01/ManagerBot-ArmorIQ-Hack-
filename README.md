@@ -39,7 +39,7 @@ flowchart LR
 |---|---|
 | Language | Python 3.12 (`apps/api`, `services/*`); TypeScript 6.0 (`apps/web`) |
 | API | FastAPI 0.143, pydantic-settings, Uvicorn |
-| LLM | Anthropic Claude via the official `anthropic` SDK (1.13, not called yet) |
+| LLM | Google Gemini (`gemini-2.5-flash`, Gemini Developer API) via the official `google-genai` SDK 2.31.0 (ADR-032) |
 | Authorization | `armoriq-sdk==0.6.10` (pinned; not called yet) |
 | Chat | Slack Bolt for Python 1.30, Socket Mode (not wired yet) |
 | Tools | Model Context Protocol, official `mcp` SDK 2.3.0 |

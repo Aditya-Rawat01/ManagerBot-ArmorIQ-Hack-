@@ -430,6 +430,16 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
   submission). Confirm.
 - Decider: team. Blocking: **start** for issue assignment only.
 
+### D-31 — LLM provider for the planner and responder
+
+**RESOLVED 17 Oct 2026 by `VTCodeCraft` (project lead) → ADR-032:** Google Gemini through the Gemini Developer API (`GEMINI_API_KEY`, a Google AI Studio key), default `LLM_MODEL=gemini-2.5-flash` (`gemini-3.8-flash` if Google refuses 2.5 for the key). Claude is removed entirely: no fallback, no `anthropic` dependency, no `ANTHROPIC_API_KEY`.
+
+- PRD v2 §12 / Arch §17 named `ANTHROPIC_API_KEY` and `LLM_MODEL=claude-opus-5-5`;
+  ADR-032 amends both (the documents themselves are not edited, ADR-001).
+- Contracts are unchanged: same planner plan JSON and gates, same responder
+  draft, citation validation and abstain reasons; every Gemini failure fails
+  closed (`Failed` / abstain `error` → ERROR).
+
 ## 4. Scaffold versus documents (supporting infrastructure, not conflicts)
 
 | ID | Observation | Handling |

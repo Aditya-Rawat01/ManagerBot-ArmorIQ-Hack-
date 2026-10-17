@@ -210,7 +210,7 @@ DECISIONS. Module docstring of `apps/api/orchestrator.py` has the step map.
 
 **Deploy (Render API service), by name only:** `ARMORIQ_API_KEY`,
 `PERSONA_MAYA_EMAIL`, `PERSONA_SAM_EMAIL`, `PERSONA_PRIYA_EMAIL`,
-`CTX_SECRET`, `DATABASE_URL_BACKEND`, `ANTHROPIC_API_KEY` (all required for
+`CTX_SECRET`, `DATABASE_URL_BACKEND`, `GEMINI_API_KEY` (ADR-032; all required for
 the orchestrator); `MIN_SCORE` (until set, answers abstain
 `threshold_unset`), `LLM_MODEL`, `ARMORIQ_AGENT_ID`, `ARMORIQ_CONSOLE_URL`,
 `TOKEN_VALIDITY_S`, `APPROVAL_TIMEOUT_MS`, and for Slack `SLACK_BOT_TOKEN`,

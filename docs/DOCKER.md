@@ -74,7 +74,7 @@ every container:
 | `CORS_ALLOWED_ORIGINS` | ✔ | — | — | — | — | — |
 | `ARMORIQ_*`, `TOKEN_VALIDITY_S`, `APPROVAL_TIMEOUT_MS` | ✔ only | — | — | — | — | — |
 | `PERSONA_*_EMAIL`, `SLACK_USER_*_ID`, `SLACK_*` tokens and IDs | ✔ only | — | — | — | — | — |
-| `ANTHROPIC_API_KEY`, `LLM_MODEL`, `TOOLSERVER_BASE_URL` | ✔ only | — | — | — | — | — |
+| `GEMINI_API_KEY`, `LLM_MODEL` (ADR-032), `TOOLSERVER_BASE_URL` | ✔ only | — | — | — | — | — |
 | `TOOLSERVER_BEARER_MEMORY` / `_WORKSPACE` | — | ✔ | — | — | — | — |
 | `MCP_ALLOWED_HOSTS` (fixed in compose: `toolserver:8100`, `localhost:8100`, `127.0.0.1:8100`) | — | ✔ | — | — | — | — |
 | `MCP_ENABLE_DIAGNOSTIC_TOOLS` (compose opts in with `true`; the image default is `false`) | — | ✔ | — | — | — | — |

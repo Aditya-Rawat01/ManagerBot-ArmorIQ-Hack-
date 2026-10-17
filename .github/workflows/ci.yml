@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 # Ordinary CI needs no secrets. Nothing here talks to ArmorIQ, Slack,
-# Anthropic, or Neon; unit tests never count as live experiment evidence.
+# Google Gemini, or Neon; unit tests never count as live experiment evidence.
 # Layout: ProxyLead_PRD_v2.md §3.1 / ProxyLead_Architecture_v2.1.md §11.
 env:
   APP_ENV: test
@@ -63,7 +63,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      # Only the toolserver extra: no armoriq-sdk / anthropic / slack-bolt installed.
+      # Only the toolserver extra: no armoriq-sdk / google-genai / slack-bolt installed.
       - run: python -m pip install -e ".[toolserver,dev]"
       - run: python -m pip check
       - run: python -m pytest tests/toolserver

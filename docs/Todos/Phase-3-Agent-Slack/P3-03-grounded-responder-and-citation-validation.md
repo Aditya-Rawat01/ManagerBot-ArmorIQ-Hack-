@@ -61,7 +61,7 @@ requested tools to the off-plan path; they are never executed here.
    - conflicting authoritative decisions → abstain (`conflict`) with safe context;
    - only superseded evidence → abstain or answer with an explicit supersession note, never as current truth;
    - drafts are labeled per D-09.
-3. **Generation.** Anthropic call with structured output: `answer_text`, `citations: [source_id]`, `requested_tools: [{tool, arguments}]`.
+3. **Generation.** LLM call (Google Gemini since ADR-032; originally Anthropic) with structured output: `answer_text`, `citations: [source_id]`, `requested_tools: [{tool, arguments}]`.
 4. **Citation validation.** Every cited `source_id` must be in the set returned by tool calls **in this request** (passed in by the orchestrator). Any unknown ID → strip the claim and abstain, or regenerate once; never forward an unvalidated citation. Record the validated IDs.
 5. **Requested tools.** Return them as data. The responder never calls the gateway or a tool.
 6. **No leakage.** The answer must not mention sources the requester was not given. Output text is checked for source titles from other tiers present in the request (defense in depth).

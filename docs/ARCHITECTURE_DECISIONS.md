@@ -107,7 +107,8 @@ format documentation, keeping the same endpoint paths and tool contracts.
 | uvicorn[standard] | 0.54.0 | apps/api, services/toolserver |
 | pydantic | 2.14.1 | services/contracts, apps/api, services/toolserver |
 | pydantic-settings | 2.15.0 | apps/api, services/toolserver |
-| anthropic | 1.13.0 | apps/api (not yet called) |
+| ~~anthropic~~ | ~~1.13.0~~ | removed by ADR-032 (17 Oct 2026) |
+| google-genai | 2.31.0 | apps/api only, imported only by `apps/api/llm.py` (ADR-032) |
 | armoriq-sdk | **0.6.10** (required pin) | apps/api (not yet called) |
 | slack-bolt | 1.30.0 | apps/api (not yet used) |
 | mcp | 2.3.0 | services/toolserver |
@@ -204,8 +205,9 @@ generated JSON Schema (`services/contracts/schemas/`), never Python.
 
 **Python packaging.** One root `pyproject.toml` (project `proxylead`) packages
 `apps*` and `services*`. The two separately deployed services keep isolated
-dependency sets through extras: `.[api]` (anthropic, armoriq-sdk, slack-bolt)
-and `.[toolserver]` (mcp); shared pins are in the base dependencies. CI installs
+dependency sets through extras: `.[api]` (google-genai since ADR-032,
+armoriq-sdk, slack-bolt) and `.[toolserver]` (mcp); shared pins are in the base
+dependencies. CI installs
 each extra on its own to prove the isolation. Tests live under one `tests/`
 tree with a subfolder per component (the documents list example test files
 flat under `tests/`; new cross-cutting tests can go there directly).
@@ -461,6 +463,101 @@ file (no inherited default privileges).
 **Flags.** `HttpOnly; SameSite=Lax; Path=/`; `Secure` everywhere except `development`/`test` (local plain-HTTP dev). Works unchanged through the ADR-030 same-origin rewrite; do not switch to `SameSite=None`.
 
 **Known limitations (accepted).** No rate limiting on sign-in beyond a constant-time passcode compare — brute force against the public demo passcode is possible; the passcode protects demo access only, never authorization (every protected read still goes through ArmorIQ per requester). No server-side session revocation list; cookie expiry (12 h) is the only invalidation.
+
+---
+
+## ADR-032 — LLM provider: Google Gemini (`gemini-2.5-flash`) replaces Claude
+
+**Decision.** Decided by the project lead `VTCodeCraft` on 17 Oct 2026
+(DECISIONS D-31). The planner and responder LLM is Google Gemini through the
+**Gemini Developer API** (a Google AI Studio key, not Vertex AI), default
+model `gemini-2.5-flash`. Claude is removed entirely: no switchable fallback,
+no `anthropic` dependency, no `ANTHROPIC_API_KEY`.
+
+**Supersedes** every Claude-specific statement: the `anthropic 1.13.0` pin
+(ADR-007), `ANTHROPIC_API_KEY` and `LLM_MODEL=claude-opus-5-5` in PRD v2 §12
+and Architecture v2.1 §17, and the Claude notes in the legacy PRD (forced
+`tool_choice`, `output_config.effort`). Those documents are not edited
+(ADR-001); this ADR amends them. Historical records (EXPERIMENTS entries,
+earlier verification tables) stay as written.
+
+**Configuration (names only).**
+- `GEMINI_API_KEY`: secret, required for the orchestrator
+  (`apps.api.orchestrator.REQUIRED_SETTINGS`). Replaces `ANTHROPIC_API_KEY`.
+- `LLM_MODEL`: optional, default `gemini-2.5-flash`. Google limits the 2.5
+  models to accounts that used them before; if the API refuses the model for
+  this key, set `LLM_MODEL=gemini-3.8-flash` (configuration only, no code
+  change).
+- Dependency: `google-genai==2.31.0` in the `api` extra only, never the tool
+  server.
+
+**Implementation** (each SDK call checked against the installed google-genai
+2.31.0 source and driven offline through `httpx.MockTransport`; no live call):
+- `apps/api/llm.py` is the only module that imports `google.genai`, and only
+  inside functions, so importing the API never loads the SDK (guardrail tests).
+- Client: `genai.Client(vertexai=False, api_key=..., http_options=HttpOptions(timeout=60000, retry_options=HttpRetryOptions(attempts=2)))`.
+  The timeout is in milliseconds per attempt; the SDK retries only
+  408/429/5xx and connect/timeout errors (one retry). `vertexai=False` is
+  explicit, so `GOOGLE_GENAI_USE_VERTEXAI` cannot redirect the key. Requests
+  go to `https://generativelanguage.googleapis.com/v1beta/models/<LLM_MODEL>:generateContent`
+  with the key only in the `x-goog-api-key` header, never in the URL.
+  Construction makes no network call.
+- One call per request: `client.aio.models.generate_content(model=LLM_MODEL, contents=[one user Content], config=GenerateContentConfig(system_instruction=..., response_mime_type="application/json", response_json_schema=<closed schema>, max_output_tokens=16000, thinking_config=ThinkingConfig(thinking_budget=2048), automatic_function_calling=AutomaticFunctionCallingConfig(disable=True)))`.
+  No tools. Temperature stays at the model default. Gemini 2.5 counts thinking
+  tokens against `max_output_tokens`.
+- Structured output: the planner sends `PLAN_OUTPUT_SCHEMA` (one closed
+  `anyOf` arm per planner tool), the responder `_DRAFT_SCHEMA`. Both use only
+  `type`, string `enum`, `properties`, `required`, `additionalProperties`,
+  `items` and `anyOf`, all in the documented `response_json_schema` subset.
+  The strict parsers stay authoritative: `planner._parse_wire` plus every
+  P3-02 gate (D-13, D-14, D-15, D-30), and `responder.parse_draft` plus the
+  P3-03 citation validation.
+- Prompt hygiene is unchanged: the planner sends the trusted context and tool
+  catalog as `system_instruction` and the message as one HTML-escaped,
+  nonce-delimited `QUESTION_<nonce>` block; the responder sends its
+  untrusted-data system prompt and the escaped evidence and question blocks.
+
+**Fail closed.** Never a partial plan or answer:
+
+| Gemini outcome | Planner (`plan`) | Responder (`respond`) |
+|---|---|---|
+| `ClientError` (4xx), `ServerError` (5xx), other `APIError` | `Failed` (retry message) | abstain `error` → P3-04 ERROR |
+| Timeout or transport error (`httpx` / `TimeoutError`) | `Failed` | abstain `error` |
+| Prompt blocked (`prompt_feedback.block_reason` set) | `Failed` | abstain `error` |
+| No candidate, or `finish_reason` other than `STOP` (`MAX_TOKENS` truncation, `SAFETY`, `RECITATION`, `PROHIBITED_CONTENT`, `OTHER`, missing, ...) | `Failed` | abstain `error` |
+| No answer text (thought parts are never used) | `Failed` | abstain `error` |
+| Unparsable JSON or a shape outside the schema | `Failed` | abstain `error` |
+| Well-formed output that fails trusted validation | gate result (`Rejected`, `Escalation`, ...) as before | citation validation as before (`withheld`, `no_evidence`, ...) |
+
+Logs carry the request ID and the exception class only. Error messages carry
+enum labels only, never prompt or response text and never the key. The audit
+redaction also masks Google API keys (`AIza…`).
+
+**Related hardening (same change).** The API settings set
+`env_ignore_empty=True`: a blank variable (for example `TOKEN_VALIDITY_S=` in
+the Render dashboard, which crashed startup) means unset, so defaults apply and
+secrets stay None. A blank `APP_ENV` therefore means `development` and a blank
+`CORS_ALLOWED_ORIGINS` the local dev origin, so Render sets `APP_ENV=production`
+explicitly. The tool server deliberately keeps the old behaviour: its
+`MCP_ENABLE_DIAGNOSTIC_TOOLS` default is `True`, so ignoring a blank would
+switch diagnostics on; a blank there stays a startup error (tested).
+
+**Risks and follow-ups (not verified live).**
+- Model access: the 2.5 limit may refuse the key; the fallback is
+  `LLM_MODEL=gemini-3.8-flash`. Gemini 3 models use `thinking_level` natively
+  and are documented by Google to accept `thinking_budget` for backward
+  compatibility; confirm on the first live call with that model.
+- Schema acceptance is server-side: a schema the SDK passes through can still
+  be rejected (for example for complexity). That fails closed as `ClientError`
+  → ERROR; the first live planner and responder calls (P3-09 / P5) must
+  confirm both schemas are accepted.
+- Safety filters can block legitimate synthetic content; that is an ERROR the
+  user retries, never a partial answer.
+- Free-tier rate limits (429) get one retry, then ERROR.
+- Data: prompts carry synthetic evidence only (PRD §0.9), including
+  elevated-tier evidence for elevated answers. On Google's unpaid tier, prompts
+  and responses may be used to improve Google's products, which is acceptable
+  only because all data is synthetic.
 
 ---
 
