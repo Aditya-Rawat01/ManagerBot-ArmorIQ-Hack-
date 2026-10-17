@@ -60,8 +60,11 @@ from services.toolserver.schemas import (
     INVALID_ARGUMENTS,
     NOT_FOUND,
     OUT_OF_SCOPE,
+    PRECONDITION_FAILED,
     InvalidArguments,
     NotFound,
+    OutOfScope,
+    PreconditionFailed,
     error_result,
     ok_result,
     parse_tool_arguments,
@@ -96,10 +99,6 @@ class ToolRuntime:
     ctx_secret: str | None = field(repr=False)
     credential_id: str
     dev_guard: InMemoryReplayGuard
-
-
-class OutOfScope(Exception):
-    """Member tier-ceiling denial (`out_of_scope`); raised before the handler."""
 
 
 _ROLE_CEILING: dict[AppRole, DataTier] = {
@@ -339,6 +338,8 @@ class GuardedDispatch(Extension):
                 spec.check_arguments(args)
         except InvalidArguments:
             return await self._reject(runtime, verified, INVALID_ARGUMENTS)
+        except PreconditionFailed:
+            return await self._reject(runtime, verified, PRECONDITION_FAILED)
         # 1.3 member tier ceiling.
         try:
             check_tier_ceiling(tool, verified)
@@ -350,6 +351,13 @@ class GuardedDispatch(Extension):
         # 1.4 handler.
         try:
             result_model = await spec.handler(verified, args, runtime)
+        except (OutOfScope, PreconditionFailed) as denial:
+            # Handler-side denial (P2-09: role checks and version/state
+            # preconditions live in the handler for tier-less tools). Recorded
+            # as a rejection like step 1.2/1.3; the exception text is never
+            # sent to the client.
+            code = OUT_OF_SCOPE if isinstance(denial, OutOfScope) else PRECONDITION_FAILED
+            return await self._reject(runtime, verified, code)
         except NotFound:
             # Authorized lookup, nothing visible: an executed empty lookup
             # (SHARED_INTERFACES §4: the gateway maps it to EXECUTED with no

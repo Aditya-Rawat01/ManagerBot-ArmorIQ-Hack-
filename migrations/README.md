@@ -20,6 +20,7 @@ running services (PRD v2 §8.1).
 | `0010_seed_keys.sql` | Nullable `seed_key` + unique `(workspace_id, seed_key)` index on `decisions`, `manager_guidance`, `team_notes` (P2-03 keyed seed upserts; runtime rows keep NULL). Additive; 0005 grants restated, backend still denied |
 | `0011_approved_views.sql` | `company_projects` (unique `(workspace_id, project_key)`) + per-tier `approved_company_data_{team,confidential,restricted}` views (P2-08 read tools; D-11, view names final). Schema and grants only: the synthetic rows come from `seed/company_projects.json` via the seed ingest (after the workspace exists). Toolserver SELECT on the views only (views run with their owner's privileges; no runtime role on the base table); backend denied on all four |
 | `0012_egress_sink_correlation.sql` | P2-10 follow-up (spec §9.1): nullable `jti` + `requester_member_id` on `egress_sink` (filled from the verified `_ctx` by the honeypot handler), partial unique index on `jti`. Additive; sink grants restated (toolserver SELECT + INSERT only, backend denied). Least privilege on `tasks`: toolserver `UPDATE`/`DELETE` revoked (its only writer, `create_followup_task`, inserts and selects) |
+| `0013_team_notes_authority.sql` | P2-09 (claimed as 0012 on #24, renumbered; amended by the PR #79 review fixes): `team_notes` gains `tier` (`CHECK (tier IN ('team'))`, D-10), `provenance`, `approved_by_member_id` (FK `members`), `approved_at`. `CHECK (superseded_by_id IS DISTINCT FROM id)` (`team_notes_not_self_superseded`), added `NOT VALID` and validated only when no existing row violates it (the migration never fails; validate later by hand if it stayed `NOT VALID`). `draft_review_queue` re-defined with the same 0006 columns, now `WHERE review_status = 'draft' AND superseded_by_id IS NULL`; its 0006 grants restated (backend SELECT; toolserver and PUBLIC revoked). Least privilege: toolserver `DELETE` on `team_notes` revoked, `UPDATE` only on `review_status`, `approved_by_member_id`, `approved_at`, `superseded_by_id`, `provenance`, `updated_at`; backend still denied. No new tables; no `source_records`/`knowledge_chunks` grant change (confirmed notes use the 0005 toolserver grants) |
 
 ## Rules (binding)
 
@@ -90,7 +91,8 @@ still verify numbering, grants, and enum parity.
 | `workspaces`, `members` | SELECT | — (denied) |
 | `slack_events`, `topic_access_rules`, `plans`, `plan_steps`, `approval_requests`, `unanswered_questions` | full CRUD (UPDATE on approvals required for resolution) | — (denied) |
 | `request_events`, `decision_events`, `delivery_events` | SELECT + INSERT (append-only; `plan_id` FKs are `ON DELETE RESTRICT` since 0009, so deleting a plan cannot cascade into them) | — (denied) |
-| `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance`, `team_notes` | — (denied) | full CRUD |
+| `source_records`, `knowledge_chunks`, `decisions`, `manager_guidance` | — (denied) | full CRUD |
+| `team_notes` | — (denied) | SELECT + INSERT; UPDATE only on `review_status`, `approved_by_member_id`, `approved_at`, `superseded_by_id`, `provenance`, `updated_at`; DELETE revoked (0013) |
 | `tool_execution_ledger` | — (denied; PROPOSED backend SELECT unconfirmed) | SELECT + INSERT (append-only) |
 | `tool_jti_claims` (0007) | — (denied) | SELECT + INSERT (append-only) |
 | `tool_call_attempts` (0008) | — (denied, incl. INSERT) | SELECT + INSERT (append-only) |

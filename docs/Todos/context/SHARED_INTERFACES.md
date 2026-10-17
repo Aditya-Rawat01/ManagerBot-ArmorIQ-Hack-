@@ -145,7 +145,8 @@ the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`
 {"content": [{"type": "text", "text": "{\"code\": \"<§4 code>\", \"message\": \"<fixed text>\"}"}],
  "isError": true,
  "_meta": {"ledger_entry_id": "<id>"}}      // only when THIS call has its own row:
-                                             // invalid_arguments / out_of_scope
+                                             // invalid_arguments / out_of_scope /
+                                             // precondition_failed
                                              // (rejected_by_tool_server) or a handler
                                              // failure (code internal, execution_status=error)
 // replay: "_meta": {"original_entry_id": "<id>"} when the original call's row exists
@@ -193,7 +194,17 @@ why nothing was found.
   recorded rejection, dispatch step 1.2): a NUL character in any string
   argument (PostgreSQL text cannot hold it; never a driver `internal`), and
   each tool's own argument policy (`read_source_*`: a foreign `view`,
-  `include_superseded=true`; §7).
+  `include_superseded=true`; §7; P2-09: a `record_id` /
+  `superseded_by_record_id` that is not `^[1-9][0-9]{0,18}$`, or a record
+  superseding itself).
+- `precondition_failed` (P2-09 confirm / supersede) is a recorded rejection
+  with its own row (`rejected_by_tool_server`, `_meta.ledger_entry_id`), like
+  `invalid_arguments` / `out_of_scope`. It carries ONE fixed message for every
+  unmet state (missing record, another workspace, stale version, already
+  confirmed or superseded, replacement not the current authoritative record,
+  note changed while being confirmed). A per-condition message is not
+  required and must not be added: the response never reveals which condition
+  failed (to non-managers or anyone); the reason stays in server code only.
 - `tools/list` advertises the enforced argument model (`model_json_schema()`:
   limits, `additionalProperties: false`) plus `patternProperties: {"^_": {}}`,
   so `_ctx` and the SDK's `_policy_context` are admitted but never declared (D-05).
@@ -245,6 +256,50 @@ they live in `provenance` (`version` int, `review_status` ∈ `ReviewStatus`,
 next to `recorded_at`, `embed_model`, `embed_tool` (model version), `embed_dim`,
 and `ingest_digest`; `created_at`/`updated_at` = the record's synthetic date.
 `knowledge_chunks.tier` always equals its source's `tier`.
+
+Confirmed team notes (P2-09, D-09 rule 2 as clarified 17 Oct 2026,
+`services/toolserver/tools_memory.py`): when Maya confirms a draft, the same
+transaction that flips it to `authoritative` writes the source
+`note-<team_notes.id>` (the `note-` prefix is reserved: the seed refuses it
+and never reads, rewrites or deletes such sources). Row: workspace from the
+verified `_ctx`, `tier='team'`, `status='active'`, `source_type='team_note'`,
+`title` = the note's title with control/format characters removed (else
+`Team note <id>` / `Team summary <id>`), `author` = the note's
+`author_member_id`, `content_hash` = sha256 of the content, `created_at` =
+`updated_at` = the approval time. `provenance`: `origin='team_note'`,
+`note_id`, `content_kind`, `version`, `review_status='authoritative'`,
+`superseded_by=null`, `approved_by_member_id`, `approved_at`, `request_id`,
+`jti`, `embed_model`, `embed_tool`, `embed_dim`, `chunk_words`,
+`chunk_overlap` (no `recorded_at`: citations use `created_at`). Chunks use the
+seed layout exactly (title-prefixed text, 120-word windows / 20 overlap,
+`content_hash = sha256("<source_id>:<chunk text>")`, bge-small 384-dim,
+embedded with the model loaded at startup before the write transaction
+opens). Superseding the note sets that source's `status='superseded'` and
+merges `superseded_by` (the replacement's `note-<id>` when it has an active
+source, else `null`), so it leaves search and `get_source`. Drafts are never
+chunked.
+
+> **OPEN FOLLOW-UP — P4-04 ICR required (P2-09 review I4; not implemented).**
+> Maya cannot yet see what she confirms or supersedes:
+> - **Draft content is unreadable.** `draft_review_queue` (ADR-023) is
+>   metadata only (no title, no content), and `knowledge_get_source_*`
+>   returns only `active` + `authoritative` sources, so a draft answers
+>   `not_found`; ADR-023's "open the content through
+>   `knowledge_get_source_team`" path does not work for drafts.
+> - **No listing of current authoritative notes** exists for choosing a
+>   supersede target or replacement (`record_id` + `version`).
+>
+> Since confirmation now publishes the note as team-tier evidence that every
+> member can retrieve (D-09 rule 2), confirming blind could publish text
+> Maya never read (for example a note saved in a DM about a confidential
+> topic: D-10 rule 4 is not implemented yet). The console must not ship the
+> confirm/supersede actions until an ICR (P4-04 with the P2-09 owner and the
+> DB steward) defines, for example: (a) a manager-only draft preview,
+> labelled draft and never evidence (never cited, never search-visible,
+> outside the responder's evidence path), and (b) a metadata-only view of
+> current authoritative notes (record ID, version, author member ID,
+> approval time, content kind; no content), granted to the backend like
+> `draft_review_queue`.
 
 Search ordering and score (P2-05, `services/knowledge/retrieval.py`,
 **PROPOSED**; the threshold value stays D-23/E17's): `knowledge_search_*`

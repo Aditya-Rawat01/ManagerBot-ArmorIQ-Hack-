@@ -30,7 +30,7 @@ from services.contracts import (
     ToolName,
     tool_spec,
 )
-from services.toolserver import main
+from services.toolserver import main, tools_memory
 from services.toolserver.ledger import (
     DuplicateJti,
     LedgerEntry,
@@ -261,6 +261,9 @@ def test_all_product_tools_registered_via_guard() -> None:
         ToolName.READ_SOURCE_TEAM,
         ToolName.READ_SOURCE_CONFIDENTIAL,
         ToolName.READ_SOURCE_RESTRICTED,
+        ToolName.KNOWLEDGE_SAVE_TEAM_NOTE,
+        ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION,
+        ToolName.KNOWLEDGE_MARK_SUPERSEDED,
     }
     with dev_client() as client:
         # No _ctx: rejected by the dispatcher before any handler runs.
@@ -292,6 +295,17 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
             arguments = {"view": view, "limit": 1}
         elif "get_source" in tool.value:
             arguments = {"source_ref": "team-friday-deploy-freeze"}
+        elif tool is ToolName.KNOWLEDGE_SAVE_TEAM_NOTE:
+            arguments = {"content": "deploy notes", "content_kind": "note"}
+        elif tool is ToolName.KNOWLEDGE_CONFIRM_MAYA_DECISION:
+            arguments = {"record_id": "1", "version": 1}
+        elif tool is ToolName.KNOWLEDGE_MARK_SUPERSEDED:
+            arguments = {
+                "record_id": "1",
+                "version": 1,
+                "superseded_by_record_id": "2",
+                "reason": "newer note",
+            }
         elif tool.value == "send_external_message":
             arguments = {"destination": "synthetic_sink", "message": "x"}
         elif tool.value == "create_followup_task":
@@ -316,11 +330,10 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
     """A ToolName registered on the server outside PRODUCT_TOOLS (e.g. a
     future `server.tool(...)` line) must never run unguarded.
 
-    NOTE for P2-09: `knowledge_save_team_note` stands in for a fake
-    UNREGISTERED tool here only because it has no guarded handler yet. When
-    P2-09 adds it to PRODUCT_TOOLS, switch this test to a ToolName that is
-    still unimplemented (e.g. a workspace tool before P2-10), or it stops
-    testing the unregistered path."""
+    P2-09 implements every memory-maintenance tool, so the stand-in is a
+    ToolName dropped from the live PRODUCT_TOOLS registry: dispatch_table()
+    merges that registry on every call, so a removed entry reproduces the
+    "listed but unregistered" state no committed ToolName is in anymore."""
     ran: list[str] = []
     real_build = main.build_server
 
@@ -331,11 +344,19 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
             ran.append(endpoint.value)
             return "leaked"
 
-        # A memory tool with no guarded handler (P2-09 owns it later).
         server.add_tool(rogue, name=ToolName.KNOWLEDGE_SAVE_TEAM_NOTE.value)
         return server
 
     monkeypatch.setattr(main, "build_server", build_with_rogue_tool)
+    # dispatch_table() merges tools_memory.PRODUCT_TOOLS live on every call
+    # (never a copy in servers.py), so dropping the entry at the module
+    # reproduces "listed on the server but unregistered in dispatch".
+    remaining = {
+        k: v
+        for k, v in tools_memory.PRODUCT_TOOLS.items()
+        if k is not ToolName.KNOWLEDGE_SAVE_TEAM_NOTE
+    }
+    monkeypatch.setattr(tools_memory, "PRODUCT_TOOLS", remaining)
     ledger = FakeLedger()
     with fake_ledger_client(monkeypatch, ledger) as client:
         message = call(

@@ -7,7 +7,7 @@
 | Size | M (2–4 h) |
 | Target window | 15 Oct |
 | Gate role | Required for G2 (registry complete) |
-| Status | Not started |
+| Status | Implemented (P2-09, PR #79, plus review fixes); D-09 rule 2 clarified 17 Oct 2026 (VTCodeCraft, #24); D-10 pending samarth-chawla's visible confirmation on #24 |
 
 ## 1. Task ID and title
 
@@ -116,3 +116,49 @@ bash scripts/check.sh
 ## 17. Definition of done
 
 Merged, deployed, tests green; handoff posted to P3-05, P4-04, and P1-08.
+
+## 18. Implementation notes (PR #79 review fixes, 17 Oct 2026)
+
+- **Step 9.1 ingestion: on confirmation, never for a draft.** A saved note
+  stays a draft that is never chunked or searchable. When Maya confirms it,
+  `knowledge_confirm_maya_decision` ingests it in the same transaction as
+  the flip to `authoritative`: team-tier source `note-<id>` plus chunks in
+  the P2-03 seed layout, embedded with the model loaded at startup BEFORE
+  the write transaction opens (no model → `internal`, nothing written). The
+  note is then found by `knowledge_search_team` / `knowledge_get_source_team`
+  like any authoritative seed source (D-09 rule 2, clarified by VTCodeCraft
+  on #24). Layout: SHARED_INTERFACES §7 "Confirmed team notes".
+- **Supersession** links only to the current authoritative record (a draft
+  or an already superseded record cannot replace anything, so cycles are
+  impossible) and marks the old note's source `superseded`, which takes it
+  out of search; both notes and both sources are kept.
+- **Only a current draft can be confirmed** (a superseded draft cannot), and
+  `draft_review_queue` lists only current drafts (0013).
+- **Record ids** are canonical decimal primary keys
+  (`^[1-9][0-9]{0,18}$`); any other spelling is `invalid_arguments`.
+
+### Open follow-ups (not implemented here)
+
+- **I4 — Maya confirms blind (P4-04 ICR required before the console ships
+  confirm/supersede).** She cannot read a draft's content (the review queue
+  is metadata only and `knowledge_get_source_team` answers `not_found` for
+  drafts), and there is no listing of current authoritative notes to pick a
+  supersede target or replacement from. Because a confirmed note is now
+  team-tier evidence for everyone, the ICR must come first: for example a
+  manager-only draft preview labelled draft/never-evidence, plus a
+  metadata-only view of current authoritative notes. Details:
+  SHARED_INTERFACES §7 "OPEN FOLLOW-UP".
+- **D-10 rule 4 — unowned.** The backend must refuse `store this`
+  (`knowledge_save_team_note`) in a thread where above-team-tier evidence
+  was delivered (tier purity at the planner, not the tool server). No task
+  owns it yet: P3-04 (orchestrator, knows the thread's delivered tiers) /
+  P3-05 (`store this` entry point) must pick it up.
+- **M3 — state before ledger.** The confirm/supersede transaction commits
+  before the dispatcher appends the ledger row (existing dispatcher
+  property, all tools): if that append fails, the change stands and the
+  caller gets `internal`. A retry with a new `jti` is `precondition_failed`.
+- **M5 — re-seed rewrites a seeded note.** `_upsert_notes` can rewrite the
+  content/title of a seeded note that Maya already confirmed without bumping
+  its version, and its `note-<id>` source keeps the confirmed text (P2-03
+  follow-up: freeze seeded notes once confirmed, or bump the version and
+  re-ingest).

@@ -4,8 +4,9 @@ Usage (operator only, repository root):
     DATABASE_URL_BACKEND='<backend DSN>' DATABASE_URL_TOOLSERVER='<toolserver DSN>' \\
         python scripts/verify_db_grants.py
 
-Connects as each runtime login user and checks the 0005/0007/0008/0009/0011
-grant matrix: backend SELECT on every protected table/view must fail with
+Connects as each runtime login user and checks the
+0005/0007/0008/0009/0011/0012/0013 grant matrix: backend SELECT on every
+protected table/view must fail with
 permission denied (0011: the toolserver may SELECT the three approved views
 but never their base table ``company_projects``, which no runtime role reads
 or writes; the backend gets neither); allowed tables must work; neither
@@ -19,6 +20,9 @@ in the catalog and, when a seeded member exists, by a backend DELETE inside
 a rolled-back transaction). The P2-10 workspace tables (0005/0012): the
 backend can neither SELECT nor INSERT ``tasks`` or ``egress_sink``; the
 toolserver can SELECT and INSERT both but never UPDATE or DELETE either.
+P2-09 (0013): the toolserver can never DELETE ``team_notes`` and may UPDATE
+only its lifecycle columns (review status, approval, supersession,
+provenance, ``updated_at``), never content, author, workspace or tier.
 Each check runs in its own transaction with the
 toolserver db helper's ``SET LOCAL statement_timeout``. Prints table names
 and results only — DSNs are never printed or logged.
@@ -79,6 +83,26 @@ APPROVED_VIEWS = (
     "approved_company_data_team",
     "approved_company_data_confidential",
     "approved_company_data_restricted",
+)
+# 0013 (P2-09 review M2): the only team_notes columns the toolserver may
+# UPDATE (confirm + supersede), and columns it must never rewrite.
+TEAM_NOTES_LIFECYCLE_COLUMNS = (
+    "review_status",
+    "approved_by_member_id",
+    "approved_at",
+    "superseded_by_id",
+    "provenance",
+    "updated_at",
+)
+TEAM_NOTES_IMMUTABLE_COLUMNS = (
+    "content",
+    "title",
+    "content_kind",
+    "author_member_id",
+    "workspace_id",
+    "tier",
+    "version",
+    "content_hash",
 )
 
 
@@ -222,6 +246,36 @@ def _check_workspace_tables(report: Report, conn: object, ts_conn: object) -> No
             f"toolserver DELETE {table}",
             f"DELETE FROM public.{table} WHERE id = -1",  # noqa: S608 -- table from module allowlist, never user input,
         )
+
+
+def _check_team_notes_least_privilege(report: Report, ts_conn: object) -> None:
+    """0013 (P2-09 review M2): the toolserver never deletes notes and may
+    UPDATE only the lifecycle columns; content/identity columns are
+    immutable for it. No row matches `id = -1`, and every check rolls back.
+    `RETURNING id` lets a too-broad grant report "query succeeded"."""
+    _expect_denied(
+        report,
+        ts_conn,
+        "toolserver DELETE team_notes",
+        "DELETE FROM public.team_notes WHERE id = -1 RETURNING id",
+    )
+    for column in TEAM_NOTES_IMMUTABLE_COLUMNS:
+        _expect_denied(
+            report,
+            ts_conn,
+            f"toolserver UPDATE team_notes.{column}",
+            f"UPDATE public.team_notes SET {column} = {column} WHERE id = -1 RETURNING id",  # noqa: S608 -- column from module allowlist, never user input
+        )
+    assignments = ", ".join(f"{column} = {column}" for column in TEAM_NOTES_LIFECYCLE_COLUMNS)
+    _expect_allowed(
+        report,
+        ts_conn,
+        "toolserver UPDATE team_notes lifecycle columns",
+        f"UPDATE public.team_notes SET {assignments} WHERE id = -1 RETURNING id",  # noqa: S608 -- columns from module allowlist, never user input
+    )
+    _expect_privilege(
+        report, ts_conn, "toolserver INSERT team_notes", "public.team_notes", "INSERT"
+    )
 
 
 def _check_plan_delete_keeps_events(report: Report, conn: object) -> None:
@@ -369,6 +423,7 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
             _check_event_fks_restrict(report, conn)
             _check_plan_delete_keeps_events(report, conn)
             _check_workspace_tables(report, conn, ts_conn)
+            _check_team_notes_least_privilege(report, ts_conn)
             for table in KNOWLEDGE_TABLES:
                 _expect_allowed(
                     report,

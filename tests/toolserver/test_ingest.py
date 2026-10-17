@@ -471,6 +471,9 @@ def test_metadata_complete() -> None:
         {**GOOD_SOURCE, "provenance": {"case": "x"}},
         {**GOOD_SOURCE, "provenance": {"superseded_by": "s2"}},
         {**GOOD_SOURCE, "provenance": {"ingest_digest": "0" * 64}},
+        # `note-` is reserved for runtime team-note sources (P2-09).
+        {**GOOD_SOURCE, "source_id": "note-7"},
+        {**GOOD_SOURCE, "source_id": "note-release-plan"},
     )
     for broken in broken_records:
         assert validate(broken) != [], broken
@@ -569,6 +572,43 @@ def test_fresh_ingest_then_rerun_changes_nothing(fake: FakeDB) -> None:
     assert _all_zero(second), second
     assert fake.tables() == before
     assert len(fake.embedded) == embedded
+
+
+def test_reseed_never_touches_runtime_note_sources(fake: FakeDB) -> None:
+    """P2-09 / D-09 rule 2: a source the tool server wrote when Maya confirmed
+    a note (`note-<id>`, plus its chunks) survives every (re-)seed exactly as
+    written — never read back, rewritten, re-chunked, superseded or deleted:
+    the ingest only touches the source_ids `seed/sources/` lists."""
+    ingest.run(SEED_DIR, "fake-dsn", EMAILS)
+    source_pk, chunk_pk = next(fake.ids), next(fake.ids)
+    fake.sources[source_pk] = {
+        "source_id": "note-7",
+        "workspace_id": WS,
+        "source_type": "team_note",
+        "title": "Pager rota",
+        "author": "m-sam",
+        "reference": "",
+        "tier": "team",
+        "status": "active",
+        "content_hash": "a" * 64,
+        "provenance": {"origin": "team_note", "review_status": "authoritative", "version": 1},
+        "created_at": datetime(2026, 10, 17, tzinfo=UTC),
+        "updated_at": datetime(2026, 10, 17, tzinfo=UTC),
+    }
+    fake.chunks[chunk_pk] = {
+        "source_id": source_pk,
+        "workspace_id": WS,
+        "tier": "team",
+        "chunk_text": "Pager rota\n\nRotate the pager.",
+        "content_hash": "b" * 64,
+    }
+    before = fake.tables()
+    already = len(fake.statements)
+    assert _all_zero(ingest.run(SEED_DIR, "fake-dsn", EMAILS))
+    assert fake.tables() == before
+    issued = fake.statements[already:]
+    assert not any("note-7" in params for _, params in issued)
+    assert not any(query.startswith("DELETE") and source_pk in params for query, params in issued)
 
 
 def test_metadata_only_change_updates_rows_without_reembedding(

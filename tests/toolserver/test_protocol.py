@@ -59,6 +59,9 @@ def test_tools_list_exposes_only_this_endpoints_diagnostic_tool(
                 "read_source_team",
                 "read_source_confidential",
                 "read_source_restricted",
+                "knowledge_save_team_note",
+                "knowledge_confirm_maya_decision",
+                "knowledge_mark_superseded",
             ]
         )
     else:
@@ -117,6 +120,9 @@ def test_diagnostic_tools_can_be_disabled() -> None:
             "read_source_team",
             "read_source_confidential",
             "read_source_restricted",
+            "knowledge_save_team_note",
+            "knowledge_confirm_maya_decision",
+            "knowledge_mark_superseded",
         ]
 
 

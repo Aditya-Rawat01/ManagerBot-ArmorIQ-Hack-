@@ -11,6 +11,7 @@ import os
 import pytest
 from psycopg import errors
 
+from scripts import verify_db_grants as verify_script
 from services.toolserver import db
 
 BACKEND_DSN = os.environ.get("DATABASE_URL_BACKEND")
@@ -206,3 +207,35 @@ def test_toolserver_workspace_tables_are_insert_only(toolserver_conn, table: str
     toolserver_conn.rollback()
     with pytest.raises(errors.InsufficientPrivilege):
         db.execute(toolserver_conn, f"DELETE FROM public.{table} WHERE id = -1")  # noqa: S608
+
+
+@NEEDS_DB
+def test_toolserver_never_deletes_notes(toolserver_conn) -> None:
+    """0013 (P2-09 review M2): history is never deleted by the runtime role."""
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(toolserver_conn, "DELETE FROM public.team_notes WHERE id = -1")
+
+
+@NEEDS_DB
+@pytest.mark.parametrize("column", verify_script.TEAM_NOTES_IMMUTABLE_COLUMNS)
+def test_toolserver_cannot_rewrite_note_content(toolserver_conn, column: str) -> None:
+    """0013 (M2): content, author, workspace, tier, version and hashes are
+    immutable for the toolserver."""
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(
+            toolserver_conn,
+            f"UPDATE public.team_notes SET {column} = {column} WHERE id = -1",  # noqa: S608
+        )
+
+
+@NEEDS_DB
+def test_toolserver_updates_only_note_lifecycle_columns(toolserver_conn) -> None:
+    """0013 (M2): exactly the columns confirm/supersede write stay updatable,
+    and `FOR UPDATE` keeps working with the column-level UPDATE grant."""
+    columns = verify_script.TEAM_NOTES_LIFECYCLE_COLUMNS
+    assignments = ", ".join(f"{column} = {column}" for column in columns)
+    query = f"UPDATE public.team_notes SET {assignments} WHERE id = -1"  # noqa: S608
+    assert db.execute(toolserver_conn, query) == 0
+    lock = "SELECT id FROM public.team_notes WHERE id = -1 FOR UPDATE"
+    assert db.fetch_all(toolserver_conn, lock) == []
+    toolserver_conn.rollback()

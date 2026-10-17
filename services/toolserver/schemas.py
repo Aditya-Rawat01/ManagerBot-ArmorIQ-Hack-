@@ -8,7 +8,8 @@ Canonical shape (what the gateway, P1-02, parses):
 - Rejection or failure: ``CallToolResult(isError=true)`` with one text block
   carrying ``{"code", "message"}`` (codes from SHARED_INTERFACES §4).
   ``_meta.ledger_entry_id`` is present when this call has its own ledger row
-  (``invalid_arguments``, ``out_of_scope``, handler errors, ``not_found``);
+  (``invalid_arguments``, ``out_of_scope``, ``precondition_failed``, handler
+  errors, ``not_found``);
   ``_meta.original_entry_id`` is present on ``replay`` when the original
   call's ledger row exists.
 - ``not_found`` is the one ``isError`` result that is NOT a rejection: the
@@ -38,6 +39,7 @@ INTERNAL = "internal"
 INVALID_ARGUMENTS = "invalid_arguments"
 NOT_FOUND = "not_found"
 OUT_OF_SCOPE = "out_of_scope"
+PRECONDITION_FAILED = "precondition_failed"
 
 _ERROR_MESSAGE: dict[str, str] = {
     INVALID_CONTEXT: "The call was rejected: invalid context.",
@@ -46,6 +48,7 @@ _ERROR_MESSAGE: dict[str, str] = {
     INVALID_ARGUMENTS: "The call was rejected: invalid arguments.",
     NOT_FOUND: "No matching source found.",
     OUT_OF_SCOPE: "The call was rejected: out of scope.",
+    PRECONDITION_FAILED: "The call was rejected: a version precondition failed.",
     INTERNAL: "The tool call could not be completed.",
 }
 
@@ -90,6 +93,18 @@ def ok_result(model: BaseModel, *, ledger_entry_id: LedgerEntryId) -> CallToolRe
 
 class InvalidArguments(Exception):
     """Business-argument validation failed (maps to `invalid_arguments`)."""
+
+
+class OutOfScope(Exception):
+    """Member tier-ceiling or role denial (maps to `out_of_scope`)."""
+
+
+class PreconditionFailed(Exception):
+    """Version/state precondition failed (maps to `precondition_failed`).
+
+    Recorded as a rejection like `invalid_arguments`; the exception text is
+    never sent to the client.
+    """
 
 
 class NotFound(Exception):

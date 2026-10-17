@@ -153,21 +153,76 @@ def test_enum_values_match_contracts() -> None:
             assert f"'{member.value}'" in text, f"{enum.__name__}.{member.name} missing in SQL"
 
 
+def _view_definitions(text: str, view: str) -> list[str]:
+    """Every `CREATE OR REPLACE VIEW <view> AS ...;` body, in migration order."""
+    marker = f"CREATE OR REPLACE VIEW {view} AS"
+    bodies = []
+    start = text.find(marker)
+    while start != -1:
+        bodies.append(text[start:].split(";", 1)[0].lower())
+        start = text.find(marker, start + 1)
+    return bodies
+
+
 def test_metadata_view_exposes_no_content() -> None:
+    """Every definition (0006, and 0013's re-definition) keeps the ADR-023
+    allowlist: no title, no content."""
+    definitions = _view_definitions(_sql_text(), "public.draft_review_queue")
+    assert len(definitions) >= 2, "0006 and 0013 both define the view"
+    for view_sql in definitions:
+        for forbidden in ("title", "chunk_text", "content_text", "message"):
+            assert forbidden not in view_sql, f"metadata view leaks {forbidden}"
+        for required in (
+            "record_id",
+            "version",
+            "author_member_id",
+            "created_at",
+            "review_status",
+            "content_kind",
+        ):
+            assert required in view_sql, f"metadata view missing {required}"
+
+
+def test_review_queue_hides_superseded_drafts() -> None:
+    """Review I1 (0013): the current queue definition lists only drafts that
+    are not superseded, and its grants are restated after it."""
     text = _sql_text()
-    start = text.index("CREATE OR REPLACE VIEW public.draft_review_queue AS")
-    view_sql = text[start:].split(";", 1)[0].lower()
-    for forbidden in ("title", "chunk_text", "content_text", "message"):
-        assert forbidden not in view_sql, f"metadata view leaks {forbidden}"
-    for required in (
-        "record_id",
-        "version",
-        "author_member_id",
-        "created_at",
-        "review_status",
-        "content_kind",
-    ):
-        assert required in view_sql, f"metadata view missing {required}"
+    current = _view_definitions(text, "public.draft_review_queue")[-1]
+    assert "where review_status = 'draft'" in current
+    assert "and superseded_by_id is null" in current
+    tail = text[text.rindex("CREATE OR REPLACE VIEW public.draft_review_queue AS") :]
+    assert "GRANT SELECT ON public.draft_review_queue TO proxylead_backend;" in tail
+    assert "REVOKE ALL ON public.draft_review_queue FROM proxylead_toolserver;" in tail
+    assert "REVOKE ALL ON public.draft_review_queue FROM PUBLIC;" in tail
+
+
+def test_team_notes_cannot_supersede_themselves() -> None:
+    """Review I2 (0013): a schema-level guard against self-supersession,
+    validated when existing rows allow it (never failing the migration)."""
+    text = _sql_text()
+    assert "CHECK (superseded_by_id IS DISTINCT FROM id) NOT VALID" in text
+    assert "VALIDATE CONSTRAINT team_notes_not_self_superseded" in text
+
+
+def test_team_notes_least_privilege_for_the_toolserver() -> None:
+    """Review M2 (0013): no DELETE, UPDATE only on the lifecycle columns (in
+    that order: the table-level revoke would drop a column grant made
+    before it), and the grant check covers both."""
+    text = _sql_text()
+    revoke_update = text.rindex("REVOKE UPDATE ON public.team_notes FROM proxylead_toolserver;")
+    column_grant = text.rindex("GRANT UPDATE (review_status, approved_by_member_id, approved_at,")
+    assert "REVOKE DELETE ON public.team_notes FROM proxylead_toolserver;" in text
+    assert revoke_update < column_grant
+    assert column_grant > text.rindex(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON public.team_notes TO proxylead_toolserver"
+    )
+    granted = text[column_grant : text.index(")", column_grant)]
+    assert set(verify_script.TEAM_NOTES_LIFECYCLE_COLUMNS) == set(
+        re.findall(r"[a-z_]+", granted.split("(", 1)[1])
+    )
+    assert not set(verify_script.TEAM_NOTES_IMMUTABLE_COLUMNS) & set(
+        verify_script.TEAM_NOTES_LIFECYCLE_COLUMNS
+    )
 
 
 def test_backend_can_read_metadata_view() -> None:
