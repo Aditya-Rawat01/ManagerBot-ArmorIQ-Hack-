@@ -3,6 +3,11 @@
 Every secret is optional so the app can be imported, started, and unit-tested
 without live credentials. Features that need a secret must check for it and
 fail closed when it is missing.
+
+A blank variable (`TOKEN_VALIDITY_S=`, as a hosting dashboard or compose
+`${VAR:-}` produces) means unset (`env_ignore_empty`), in the environment and
+in `.env` alike: the field takes its default, and a secret stays None. A blank
+value never crashes startup and never becomes an empty-string setting.
 """
 
 import math
@@ -30,6 +35,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(REPO_ROOT / ".env", API_DIR / ".env"),
         env_file_encoding="utf-8",
+        env_ignore_empty=True,
         extra="ignore",
     )
 
@@ -92,7 +98,8 @@ class Settings(BaseSettings):
     @field_validator("armoriq_observability", mode="before")
     @classmethod
     def _blank_observability(cls, value: object) -> object:
-        # An empty `ARMORIQ_OBSERVABILITY=` means unset: keep telemetry off.
+        # A blank value means unset: keep telemetry off. Blank environment
+        # values never get here (env_ignore_empty); this covers explicit ones.
         if isinstance(value, str) and not value.strip():
             return False
         return value
@@ -101,6 +108,8 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_min_score(cls, value: object) -> object:
         # `.env.example` ships `MIN_SCORE=` (empty) until E17 calibrates it.
+        # env_ignore_empty already drops a blank environment value; this also
+        # covers explicit (constructor) and whitespace-only values.
         if isinstance(value, str) and not value.strip():
             return None
         return value

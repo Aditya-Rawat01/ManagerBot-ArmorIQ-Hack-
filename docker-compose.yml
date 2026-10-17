@@ -79,7 +79,8 @@ services:
       DEMO_PASSCODE: ${DEMO_PASSCODE:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       # ArmorIQ gateway settings: the API is the only service that gets them.
-      # Defaults mirror apps/api/core/config.py; an empty value would override them.
+      # Defaults mirror apps/api/core/config.py. An empty value means unset
+      # there (env_ignore_empty), so the app default applies.
       ARMORIQ_API_KEY: ${ARMORIQ_API_KEY:-}
       ARMORIQ_AGENT_ID: ${ARMORIQ_AGENT_ID:-proxylead}
       ARMORIQ_CONSOLE_URL: ${ARMORIQ_CONSOLE_URL:-https://platform.armoriq.ai}

@@ -47,6 +47,20 @@ def test_embed_model_must_be_the_local_model(monkeypatch: pytest.MonkeyPatch) ->
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_blank_diagnostic_switch_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blank MCP_ENABLE_DIAGNOSTIC_TOOLS stays a startup error (fail closed).
+
+    Unlike the API settings, the tool server deliberately does NOT set
+    `env_ignore_empty`: the field default is True, so treating a blank as unset
+    would switch the diagnostic tools ON in a Render service whose image sets
+    `false` (docs/ARCHITECTURE_DECISIONS.md ADR-032).
+    """
+    monkeypatch.setenv("MCP_ENABLE_DIAGNOSTIC_TOOLS", "")
+    with pytest.raises(ValidationError, match="mcp_enable_diagnostic_tools"):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+    assert Settings.model_config.get("env_ignore_empty") is not True
+
+
 def test_tokens_are_not_exposed_in_repr() -> None:
     assert "test-memory-token" not in repr(make_settings())
 
