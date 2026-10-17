@@ -561,7 +561,8 @@ def note_source_title(title: str | None, content_kind: str, pk: int) -> str:
 
 @dataclass(frozen=True)
 class _Note:
-    """The `team_notes` columns confirmation reads (`_NOTE_COLUMNS` order)."""
+    """The `team_notes` columns confirmation reads, in the order both
+    `_confirm_note` SELECTs name them."""
 
     title: str | None
     content: str
