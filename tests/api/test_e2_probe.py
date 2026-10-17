@@ -485,9 +485,11 @@ class _FakeSdkClient__offline_fake_sdk:
         policy_block: Callable[[dict], str | None] | None = None,
         expose_http_client: bool = True,
         mint_block: str | None = None,
+        proxy_transform: Callable[[dict], dict] | None = None,
     ) -> None:
         self.server = server
         self.proxy_refuse = proxy_refuse
+        self.proxy_transform = proxy_transform
         self.policy_block = policy_block
         self.mint_block = mint_block
         self.goals: list[str] = []
@@ -580,7 +582,10 @@ class _FakeSdkClient__offline_fake_sdk:
             return httpx.Response(
                 200, json={"enforcement": {"action": "block", "reason": reason}, "message": "m"}
             )
-        result = self.server.call(body["action"], dict(body["params"]))
+        params = dict(body["params"])
+        if self.proxy_transform is not None:
+            params = self.proxy_transform(params)
+        result = self.server.call(body["action"], params)
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": result})
 
 
@@ -646,6 +651,7 @@ def _offline_run(
     direct_handler: Callable[[httpx.Request], httpx.Response] | None = None,
     sdk_client_factory: Callable[[str], object] | None = None,
     mint_block: str | None = None,
+    proxy_transform: Callable[[dict], dict] | None = None,
     **kwargs: object,
 ) -> tuple[int, str, _FakeToolServer__offline_fake, _FakeSdkClient__offline_fake_sdk]:
     """`probe.run_probe` over the real gateway with the offline fakes."""
@@ -656,6 +662,7 @@ def _offline_run(
         policy_block=policy_block,
         expose_http_client=expose_http_client,
         mint_block=mint_block,
+        proxy_transform=proxy_transform,
     )
     kwargs.setdefault(
         "lookup_factory", lambda dsn: _FakeEvidenceLookup__offline_fake_ledger(server)
@@ -1310,3 +1317,59 @@ def test_plan_failure_rows_use_step_outcome_with_a_masked_reason__offline_fake_s
     assert not server.ledger_rows
     assert code == 3
     _assert_no_fake_values(record)
+
+
+def _drop_user_email(params: dict) -> dict:
+    """Live E2 (2026-10-17): the ArmorIQ proxy forwarded the call without
+    the injected `user_email` (sent on the wire, absent from the executed
+    arguments by the ledger hash)."""
+    return {key: value for key, value in params.items() if key != "user_email"}
+
+
+def test_business_key_dropped_by_the_proxy_is_evidenced__offline_fake_sdk() -> None:
+    """An injected `user_email` that the proxy removes executes exactly as
+    planned: layer `armoriq_proxy`, evidenced by the wire (key sent) and the
+    ledger hash (planned arguments), and not an unintended execution."""
+    code, record, server, _ = _offline_run(proxy_transform=_drop_user_email)
+    line = _rows_by_case(record)["inject-user_email"]
+    assert "armoriq_proxy (dropped `user_email` before the tool server)" in line
+    assert "evidenced: proxy request on the wire" in line
+    details = _details(record, "inject-user_email")
+    assert "`user_email` sent as injected: yes" in details
+    assert "business-argument hash = planned arguments: yes" in details
+    assert "`user_email` never reached the tool server" in details
+    planned = {"query": probe.E2_QUERY, "limit": probe.E2_LIMIT}
+    team_runs = [args for tool, args in server.executions if tool == "knowledge_search_team"]
+    assert not any("user_email" in args for args in team_runs)
+    assert team_runs.count(planned) >= 5  # baseline + user_email + three forged fields
+    assert "Zero unintended executions: CONFIRMED" in record
+    assert code == probe.EXIT_COMPLETE
+
+
+def test_dropped_key_with_changed_arguments_is_unintended__offline_fake_sdk() -> None:
+    """If the call that lost the injected key ran with any other change, the
+    hash matches neither shape: not evidenced, and an unintended execution."""
+
+    def drop_and_change(params: dict) -> dict:
+        changed = _drop_user_email(params)
+        if "user_email" in params:
+            changed["query"] = "changed by the proxy"
+        return changed
+
+    code, record, _, _ = _offline_run(proxy_transform=drop_and_change)
+    line = _rows_by_case(record)["inject-user_email"]
+    assert "armoriq_proxy" not in line
+    assert "NOT evidenced" in line
+    assert "#16 inject-user_email executed" in record
+    assert "Zero unintended executions: NOT CONFIRMED" in record
+    assert code == probe.EXIT_NOT_COMPLETE
+
+
+def test_dropped_key_without_wire_hooks_stays_unevidenced__offline_fake_sdk() -> None:
+    """Without wire hooks nobody can say who removed the key: no layer is
+    claimed, the row stays unevidenced and the run cannot exit 0."""
+    code, record, _, _ = _offline_run(proxy_transform=_drop_user_email, expose_http_client=False)
+    line = _rows_by_case(record)["inject-user_email"]
+    assert "armoriq_proxy" not in line
+    assert "NOT evidenced" in line
+    assert code != probe.EXIT_COMPLETE

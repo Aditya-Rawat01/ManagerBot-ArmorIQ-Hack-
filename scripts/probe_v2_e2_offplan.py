@@ -588,7 +588,10 @@ TAMPER_INJECTIONS: tuple[tuple[str, Any], ...] = (
 )
 _TAMPER_EXPECTED = {
     "tier": "tool server `invalid_arguments` (strict schema), rejected row, no execution",
-    "user_email": "tool server `invalid_arguments` (strict schema), rejected row, no execution",
+    "user_email": (
+        "tool server `invalid_arguments` (strict schema), or the key is removed before the "
+        "tool server (executes exactly as planned); never executed with the key"
+    ),
     "_approvals": "stripped by the tool server (no effect): executes exactly as planned",
     "_delegation_id": "stripped by the tool server (no effect): executes exactly as planned",
     "_policy_context": (
@@ -881,6 +884,7 @@ async def run_tampered_invoke(
     arguments: Mapping[str, Any],
     strips: bool,
     watch: Mapping[str, Any] | None = None,
+    injected_key: str | None = None,
     observer: Observer | None = None,
 ) -> dict[str, Any]:
     """Invoke step 0 of a fresh valid plan with ``arguments`` swapped in
@@ -907,6 +911,7 @@ async def run_tampered_invoke(
         error_code=described["error_code"],
         ledger_entry_id=described["ledger_entry_id"],
         business_arguments={k: v for k, v in arguments.items() if not k.startswith("_")},
+        injected_key=injected_key,
         window=window,
         **gateway_facts(outcome.decision),
     )
@@ -949,6 +954,7 @@ async def group_tamper(
                 arguments={**planned_arguments(), key: value},
                 strips=key.startswith("_"),
                 watch={key: value},
+                injected_key=key,
                 observer=observer,
             )
         )
@@ -1387,6 +1393,34 @@ def collect_db_evidence(
     return report
 
 
+def _dropped_before_tool_server(item: Mapping[str, Any], actual_hash: object) -> str | None:
+    """Layer that removed an injected business key, or None.
+
+    Only when the executed ledger row hashes to the planned arguments
+    WITHOUT the injected key (so the tool server never saw it). The wire
+    says who removed it: sent to the proxy `/invoke` means the ArmorIQ
+    proxy; not sent means the SDK. No wire hooks: undetermined (None).
+    """
+    key = item.get("injected_key")
+    expected = item.get("business_arguments")
+    if not key or str(key).startswith("_") or not isinstance(expected, Mapping):
+        return None
+    if key not in expected:
+        return None
+    planned = {name: value for name, value in expected.items() if name != key}
+    if actual_hash != _business_hash(planned):
+        return None
+    window: Window | None = item.get("window")
+    if window is None or not window.hooked:
+        return None
+    invokes = [event for event in window.wire if event.is_invoke]
+    if not invokes:
+        return None
+    if any(event.injected_sent.get(key) for event in invokes):
+        return f"armoriq_proxy (dropped `{key}` before the tool server)"
+    return f"armoriq_sdk (dropped `{key}` before sending)"
+
+
 def _business_hash(arguments: Mapping[str, Any]) -> str:
     from services.toolserver.ledger import arguments_sha256
 
@@ -1504,11 +1538,22 @@ def apply_db_evidence(rows: list[dict[str, Any]], db: Mapping[str, Any]) -> dict
                 expected = item.get("business_arguments")
                 if expected is not None:
                     which = "tampered" if case == "tamper-query" else "planned"
-                    match = entry.get("arguments_sha256") == _business_hash(expected)
+                    actual = entry.get("arguments_sha256")
+                    match = actual == _business_hash(expected)
+                    dropped = _dropped_before_tool_server(item, actual)
+                    if dropped is not None:
+                        match = True
+                        item["layer"] = dropped
+                        item["dropped_before_tool_server"] = True
                     item["hash_match"] = match
                     lines.append(
                         f"business-argument hash = {which} arguments: {'yes' if match else 'NO'}"
                     )
+                    if dropped is not None:
+                        lines.append(
+                            f"`{item['injected_key']}` never reached the tool server (sent on "
+                            "the wire, absent from the executed arguments)"
+                        )
                     ok = ok and match
             elif entry is not None:
                 ok = ok and (
@@ -1539,7 +1584,9 @@ def apply_db_evidence(rows: list[dict[str, Any]], db: Mapping[str, Any]) -> dict
         if own_ledger and item.get("group") == "direct":
             lines.extend(_ledger_text(entry) for entry in own_ledger)
         item["db_ok"] = ok
-        if case not in EXECUTION_ALLOWED:
+        # An injected key removed before the tool server left a call that
+        # executed exactly as planned (hash-checked above): no effect.
+        if case not in EXECUTION_ALLOWED and not item.get("dropped_before_tool_server"):
             for entry in own_ledger:
                 if entry.get("execution_status") == "executed":
                     summary["unintended"].append(f"#{number} {case} executed")
