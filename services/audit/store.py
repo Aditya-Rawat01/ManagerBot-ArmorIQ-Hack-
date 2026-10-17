@@ -97,6 +97,21 @@ _SLACK_REJECTION_REASONS: tuple[str, ...] = get_args(SlackRejectionReason)
 _MAX_SAFE_REFS = 20
 _MAX_REF_CHARS = 200
 
+# User-confirmation lifecycle events (P3-04 ICR, issue #25; SHARED_INTERFACES
+# §10). Payloads are metadata only: an opaque escalation ID (never the token),
+# plus the escalated tier, the plan digest, and the resolution state. The
+# opaque ID and the token↔ID mapping live in P3-04's in-process store, so a
+# raw confirmation token has no field to travel in. The key allowlists below
+# are exhaustive, so a token cannot be smuggled under an unexpected key.
+_ESCALATION_CREATED_KEYS = frozenset({"escalation_id", "requested_tier", "plan_digest"})
+_CONFIRMATION_RESOLVED_KEYS = frozenset({"escalation_id", "confirmation_state"})
+_CONFIRMATION_STATES = frozenset(
+    {"accepted", "rejected", "expired", "invalid", "replayed", "mismatch", "unbound"}
+)
+_ESCALATION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}")
+# sha256 hex (P3-02 `plan_digest`); never secret, just a binding reference.
+_PLAN_DIGEST_RE = re.compile(r"[A-Fa-f0-9]{32,128}")
+
 # Slack event/team/channel IDs (``Ev…``, ``T…``, ``C…``/``D…``): short and
 # printable, the same shape as plan IDs; never free text.
 _SLACK_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,127}")
@@ -912,9 +927,67 @@ def record_slack_event_rejected(
     return key
 
 
+_CONFIRMATION_CREDENTIAL_MARKERS = (
+    "token",
+    "secret",
+    "credential",
+    "password",
+    "bearer",
+    "api_key",
+    "apikey",
+    "authorization",
+)
+
+
+def _check_confirmation_event(event: AuditEvent) -> None:
+    """Validate a P3-04 confirmation-lifecycle payload (issue #25 ICR).
+
+    Exhaustive key allowlists plus typed fields: a raw confirmation token or
+    any other credential can never be recorded, under any key.
+    """
+    kind = event.event_type
+    payload = dict(event.payload)
+    if kind is AuditEventType.ESCALATION_CREATED:
+        allowed = _ESCALATION_CREATED_KEYS
+        required = {"escalation_id"}
+    else:
+        allowed = _CONFIRMATION_RESOLVED_KEYS
+        required = {"escalation_id", "confirmation_state"}
+
+    if any(marker in key.lower() for key in payload for marker in _CONFIRMATION_CREDENTIAL_MARKERS):
+        raise AuditStoreError(f"{kind.value} payload must never carry a token or credential")
+    extra = set(payload) - allowed
+    if extra:
+        raise AuditStoreError(f"{kind.value} has unsupported payload keys: {sorted(extra)}")
+    missing = required - set(payload)
+    if missing:
+        raise AuditStoreError(f"{kind.value} payload is missing keys: {sorted(missing)}")
+
+    escalation_id = payload["escalation_id"]
+    if not isinstance(escalation_id, str) or not _ESCALATION_ID_RE.fullmatch(escalation_id):
+        raise AuditStoreError("escalation_id must be a bounded opaque identifier")
+    if kind is AuditEventType.ESCALATION_CREATED:
+        digest = payload.get("plan_digest")
+        if digest is not None and (
+            not isinstance(digest, str) or not _PLAN_DIGEST_RE.fullmatch(digest)
+        ):
+            raise AuditStoreError("plan_digest must be a hex digest")
+        tier = payload.get("requested_tier")
+        if tier is not None and tier not in {member.value for member in DataTier}:
+            raise AuditStoreError("requested_tier must be a DataTier value")
+    else:
+        state = payload.get("confirmation_state")
+        if state not in _CONFIRMATION_STATES:
+            raise AuditStoreError(
+                "confirmation_state must be one of " + ", ".join(sorted(_CONFIRMATION_STATES))
+            )
+
+
 def _check_generic_event(event: AuditEvent) -> None:
     """Apply the typed writers' evidence rules to :func:`append_event`."""
     kind = event.event_type
+    if kind in (AuditEventType.ESCALATION_CREATED, AuditEventType.CONFIRMATION_RESOLVED):
+        _check_confirmation_event(event)
     if kind is AuditEventType.REQUEST_RECEIVED:
         raise AuditStoreError(
             "request_received is written only by create_request (trusted RequestContext)"

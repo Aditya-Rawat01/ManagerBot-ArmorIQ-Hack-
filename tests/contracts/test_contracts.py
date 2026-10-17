@@ -10,6 +10,7 @@ from services.contracts import (
     ApprovalState,
     ApprovalStatus,
     ArmorIQDecision,
+    AuditEventType,
     AuthenticatedUser,
     DataTier,
     DecisionOutcome,
@@ -28,6 +29,7 @@ from services.contracts import (
     ToolInvocationResult,
     ToolName,
 )
+from services.contracts.schema_export import build_schema
 from services.contracts.schema_export import main as schema_main
 
 NOW = datetime(2026, 10, 14, 12, 0, tzinfo=UTC)
@@ -288,3 +290,12 @@ def test_naive_datetimes_are_rejected() -> None:
 
 def test_committed_json_schema_is_up_to_date() -> None:
     assert schema_main(["--check"]) == 0
+
+
+def test_confirmation_event_types_are_declared() -> None:
+    # P3-04 ICR, issue #25 (SHARED_INTERFACES §10).
+    assert AuditEventType.ESCALATION_CREATED.value == "escalation_created"
+    assert AuditEventType.CONFIRMATION_RESOLVED.value == "confirmation_resolved"
+    enum = build_schema()["$defs"]["AuditEventType"]["enum"]
+    assert "escalation_created" in enum
+    assert "confirmation_resolved" in enum

@@ -385,6 +385,134 @@ def test_append_event_rejects_naive_timestamps() -> None:
         )
 
 
+# --- confirmation lifecycle events (P3-04 ICR, issue #25) -------------------
+
+# Obviously-fake, token-shaped value: never a real secret.
+_FAKE_CONFIRMATION_TOKEN = "fake_confirm_9Fk2Lm4Qp7Rt1Vx5Za8Bc3De6Gh0Jk"
+
+
+def _confirmation_event(event_type: AuditEventType, payload: dict[str, object]) -> AuditEvent:
+    return AuditEvent(
+        event_id="ev-conf-1",
+        occurred_at=NOW,
+        event_type=event_type,
+        request_id="req-1",
+        trace_id="trace-1",
+        payload=payload,
+    )
+
+
+def test_escalation_created_valid_payload_is_recorded() -> None:
+    db = FakeDatabase()
+    append_event(
+        db,
+        event=_confirmation_event(
+            AuditEventType.ESCALATION_CREATED,
+            {"escalation_id": "esc-1", "requested_tier": "confidential", "plan_digest": "a" * 64},
+        ),
+    )
+    assert "INSERT INTO request_events" in _all_sql(db)
+    assert "esc-1" in _all_text(db) and "confidential" in _all_text(db)
+
+
+@pytest.mark.parametrize(
+    "state", ["accepted", "rejected", "expired", "invalid", "replayed", "mismatch", "unbound"]
+)
+def test_confirmation_resolved_accepts_known_states(state: str) -> None:
+    db = FakeDatabase()
+    append_event(
+        db,
+        event=_confirmation_event(
+            AuditEventType.CONFIRMATION_RESOLVED,
+            {"escalation_id": "esc-1", "confirmation_state": state},
+        ),
+    )
+    assert "INSERT INTO request_events" in _all_sql(db)
+
+
+def test_confirmation_event_rejects_unknown_payload_key() -> None:
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.ESCALATION_CREATED, {"escalation_id": "esc-1", "note": "x"}
+            ),
+        )
+
+
+def test_confirmation_event_rejects_raw_token_and_writes_nothing() -> None:
+    db = FakeDatabase()
+    with pytest.raises(AuditStoreError):
+        append_event(
+            db,
+            event=_confirmation_event(
+                AuditEventType.CONFIRMATION_RESOLVED,
+                {
+                    "escalation_id": "esc-1",
+                    "confirmation_state": "accepted",
+                    "confirmation_token": _FAKE_CONFIRMATION_TOKEN,
+                },
+            ),
+        )
+    assert _FAKE_CONFIRMATION_TOKEN not in _all_text(db)
+    assert db.committed == []
+
+
+def test_confirmation_event_rejects_missing_fields() -> None:
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(AuditEventType.ESCALATION_CREATED, {}),
+        )
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.CONFIRMATION_RESOLVED, {"escalation_id": "esc-1"}
+            ),
+        )
+
+
+def test_confirmation_event_rejects_unknown_state() -> None:
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.CONFIRMATION_RESOLVED,
+                {"escalation_id": "esc-1", "confirmation_state": "maybe"},
+            ),
+        )
+
+
+def test_escalation_created_rejects_bad_digest_and_tier() -> None:
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.ESCALATION_CREATED,
+                {"escalation_id": "esc-1", "plan_digest": "nope!"},
+            ),
+        )
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.ESCALATION_CREATED,
+                {"escalation_id": "esc-1", "requested_tier": "secret"},
+            ),
+        )
+
+
+def test_confirmation_event_rejects_unbounded_escalation_id() -> None:
+    with pytest.raises(AuditStoreError):
+        append_event(
+            FakeDatabase(),
+            event=_confirmation_event(
+                AuditEventType.ESCALATION_CREATED, {"escalation_id": "has space"}
+            ),
+        )
+
+
 # --- read API ---------------------------------------------------------------
 
 
