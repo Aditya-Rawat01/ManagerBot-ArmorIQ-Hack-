@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup/shutdown hooks: the orchestrator (P3-04), then Slack (P3-05).
 
-    The orchestrator singletons (real ``ArmorIQGateway``, Anthropic planner
+    The orchestrator singletons (real ``ArmorIQGateway``, Gemini planner
     and responder clients, backend audit database, D-14 confirmation store)
     are built only when every required setting exists (names in
     ``apps.api.orchestrator.REQUIRED_SETTINGS``); they then set

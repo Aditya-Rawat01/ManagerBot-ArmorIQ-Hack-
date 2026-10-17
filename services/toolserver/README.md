@@ -41,7 +41,7 @@ python -m venv .venv
 ```
 
 A deployment installs only `pip install ".[toolserver]"` (no `armoriq-sdk`,
-`anthropic`, or `slack-bolt`).
+`google-genai`, or `slack-bolt`).
 
 Set at least the bearer tokens in the root `.env` (see `../.env.example`).
 

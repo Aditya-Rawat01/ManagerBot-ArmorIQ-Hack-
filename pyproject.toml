@@ -22,7 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 # apps/api (FastAPI backend):           pip install -e ".[api]"
 api = [
-  "anthropic==1.13.0",    # planner/responder (not called yet)
+  "google-genai==2.31.0", # planner/responder LLM (Gemini Developer API, ADR-032); imported only by apps/api/llm.py
   "armoriq-sdk==0.6.10",  # required pin; imported only by services/authorization/armoriq_gateway.py
   "slack-bolt==1.30.0",   # Socket Mode bot (not wired yet)
   "psycopg[binary,pool]==3.3.6",  # Neon/local PostgreSQL driver + pool (P2-01)

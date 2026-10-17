@@ -38,8 +38,9 @@ What the Dockerfile does (`deploy/toolserver/Dockerfile`):
 - `FROM python:3.12-slim` (R-81: pinned Python 3.12).
 - Three cache-friendly layers: (1) `pyproject.toml` only, then
   `pip install --no-cache-dir ".[toolserver]"` — the toolserver extra only,
-  matching the CI `toolserver` job isolation (`armoriq-sdk`, `anthropic`,
-  `slack-bolt` are **not** installed; verified in §4); (2) the FastEmbed model
+  matching the CI `toolserver` job isolation (`armoriq-sdk`, `google-genai`,
+  `slack-bolt` are **not** installed; verified in §4, which predates ADR-032
+  and checked the LLM SDK used then); (2) the FastEmbed model
   (see below); (3) `services/` (no API or web source). A source change
   rebuilds only layer 3.
 - `USER appuser` (non-root, ADR-029). `EXPOSE 8100` (documentation only).

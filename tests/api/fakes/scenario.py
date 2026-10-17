@@ -56,7 +56,7 @@ SLACK_IDS = {
 FAKE_SECRETS = {
     "ctx_secret": "ctx-offline-fake-secret-0000",
     "armoriq_api_key": "armoriq-offline-fake-key-0000",
-    "anthropic_api_key": "anthropic-offline-fake-key-0000",
+    "gemini_api_key": "gemini-offline-fake-key-0000",
     "database_url_backend": "postgresql://fake:fake@127.0.0.1:9/fake",
 }
 DEFAULT_MIN_SCORE = 0.5

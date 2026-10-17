@@ -10,6 +10,7 @@ result. Regression tests for the PR #69 review findings live in
 import asyncio
 import json
 import re
+from typing import Any
 
 import pytest
 
@@ -17,11 +18,11 @@ from apps.api import planner as planner_module
 from apps.api.planner import (
     PLANNER_TOOLS,
     TRUSTED_PATH_ONLY_TOOLS,
-    AnthropicPlanClient,
     Clarification,
     Escalation,
     EscalationConfirmation,
     Failed,
+    GeminiPlanClient,
     PlanModelError,
     Planned,
     Rejected,
@@ -35,6 +36,7 @@ from services.contracts import (
     RequestContext,
     ToolName,
 )
+from tests.fakes.gemini import FakeGeminiClient, gemini_response, json_response
 from tests.fakes.planner import (
     FakeModelClient,
     FakeTopicDb,
@@ -603,91 +605,67 @@ def test__offline_fake_llm_audit_metadata_rule_path() -> None:
     asyncio.run(_scenario())
 
 
-# --- Anthropic client wiring (offline stub transport) -----------------------
+# --- Gemini client wiring (offline fake client; tests/fakes/gemini.py) --------
+# Wire-level, failure-mapping and settings tests: tests/api/test_llm_gemini.py.
 
 
-class _StubContent:
-    def __init__(self, text: str | None) -> None:
-        self.type = "text" if text is not None else "other"
-        self.text = text
+def test__offline_fake_llm_gemini_client_extracts_text() -> None:
+    from apps.api.planner import PLAN_OUTPUT_SCHEMA
 
-
-class _StubResponse:
-    def __init__(self, text: str | None, stop_reason: str = "end_turn") -> None:
-        self.stop_reason = stop_reason
-        self.content = [_StubContent(text)]
-
-
-class _StubMessages:
-    def __init__(self, response: _StubResponse | Exception) -> None:
-        self._response = response
-        self.calls: list[dict[str, object]] = []
-
-    async def create(self, **kwargs: object) -> _StubResponse:
-        self.calls.append(kwargs)
-        if isinstance(self._response, Exception):
-            raise self._response
-        return self._response
-
-
-class _StubBeta:
-    def __init__(self, response: _StubResponse | Exception) -> None:
-        self.messages = _StubMessages(response)
-
-
-class _StubAnthropic:
-    def __init__(self, response: _StubResponse | Exception) -> None:
-        self.beta = _StubBeta(response)
-
-
-def test__offline_fake_llm_anthropic_client_extracts_text() -> None:
     async def _scenario() -> None:
-        inner = _StubAnthropic(_StubResponse('{"steps": []}'))
-        client = AnthropicPlanClient("fake-key", "fake-model", client=inner)
+        inner = FakeGeminiClient(json_response({"steps": []}))
+        client = GeminiPlanClient("fake-key", "fake-model", client=inner)
         text = await client.propose_plan(system="sys", user="hello")
         assert json.loads(text) == {"steps": []}
-        call = inner.beta.messages.calls[0]
+        call = inner.calls[0]
         assert call["model"] == "fake-model"
-        assert call["system"] == "sys"
+        assert call["config"].system_instruction == "sys"
+        assert call["config"].response_json_schema is PLAN_OUTPUT_SCHEMA
+        assert [part.text for part in call["contents"][0].parts] == ["hello"]
 
     asyncio.run(_scenario())
 
 
-@pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
-def test__offline_fake_llm_anthropic_unusable_stop_raises(stop_reason: str) -> None:
+@pytest.mark.parametrize("finish_reason", ["SAFETY", "MAX_TOKENS", "RECITATION", "OTHER", None])
+def test__offline_fake_llm_gemini_unusable_finish_raises(finish_reason: str | None) -> None:
     async def _scenario() -> None:
-        inner = _StubAnthropic(_StubResponse('{"steps": [', stop_reason=stop_reason))
-        client = AnthropicPlanClient("fake-key", "fake-model", client=inner)
+        inner = FakeGeminiClient(gemini_response('{"steps": [', finish_reason=finish_reason))
+        client = GeminiPlanClient("fake-key", "fake-model", client=inner)
         with pytest.raises(PlanModelError):
             await client.propose_plan(system="sys", user="hello")
 
     asyncio.run(_scenario())
 
 
-def test__offline_fake_llm_anthropic_no_text_block_raises() -> None:
+def test__offline_fake_llm_gemini_no_text_raises() -> None:
     async def _scenario() -> None:
-        inner = _StubAnthropic(_StubResponse(None))
-        client = AnthropicPlanClient("fake-key", "fake-model", client=inner)
+        inner = FakeGeminiClient(gemini_response(None))
+        client = GeminiPlanClient("fake-key", "fake-model", client=inner)
         with pytest.raises(PlanModelError):
             await client.propose_plan(system="sys", user="hello")
 
     asyncio.run(_scenario())
 
 
-def test_anthropic_client_construction_uses_timeout_and_one_retry(
+def test_gemini_client_construction_uses_timeout_and_one_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import anthropic
+    from google import genai
 
-    created: list[dict[str, object]] = []
+    created: list[dict[str, Any]] = []
 
     class _Recorder:
-        def __init__(self, **kwargs: object) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             created.append(kwargs)
 
-    monkeypatch.setattr(anthropic, "AsyncAnthropic", _Recorder)
-    AnthropicPlanClient("fake-key", "fake-model")
-    assert created == [{"api_key": "fake-key", "timeout": 60.0, "max_retries": 1}]
+    monkeypatch.setattr(genai, "Client", _Recorder)
+    GeminiPlanClient("fake-key", "fake-model")
+    assert len(created) == 1
+    kwargs = created[0]
+    assert kwargs["vertexai"] is False
+    assert kwargs["api_key"] == "fake-key"
+    assert kwargs["http_options"].timeout == 60_000  # milliseconds
+    assert kwargs["http_options"].retry_options.attempts == 2  # one retry
 
 
 def test_topic_match_dataclass_importable() -> None:

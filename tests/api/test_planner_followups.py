@@ -17,10 +17,10 @@ import pytest
 
 from apps.api import planner as planner_module
 from apps.api.planner import (
-    AnthropicPlanClient,
     Escalation,
     EscalationConfirmation,
     Failed,
+    GeminiPlanClient,
     Planned,
     Rejected,
     plan,
@@ -416,63 +416,40 @@ def test_i4_maintenance_tools_are_not_offered_to_the_model() -> None:
 # --- I5: a live call the model can satisfy -------------------------------------------
 
 
-class _StubContent:
-    type = "text"
+def test_i5_generate_content_kwargs_are_exact() -> None:
+    from google.genai import types
 
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _StubResponse:
-    stop_reason = "end_turn"
-
-    def __init__(self, text: str) -> None:
-        self.content = [_StubContent(text)]
-
-
-class _StubMessages:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    async def create(self, **kwargs: object) -> _StubResponse:
-        self.calls.append(kwargs)
-        return _StubResponse('{"steps": []}')
-
-
-class _StubAnthropic:
-    def __init__(self) -> None:
-        self.beta = type("Beta", (), {})()
-        self.beta.messages = _StubMessages()
-
-
-def test_i5_create_kwargs_are_exact() -> None:
     from apps.api.planner import PLAN_OUTPUT_SCHEMA
+    from tests.fakes.gemini import FakeGeminiClient, json_response
 
     async def _scenario() -> None:
-        inner = _StubAnthropic()
-        client = AnthropicPlanClient("fake-key", "claude-opus-5-5", client=inner)
+        inner = FakeGeminiClient(json_response({"steps": []}))
+        client = GeminiPlanClient("fake-key", "gemini-2.5-flash", client=inner)
         await client.propose_plan(system="SYS", user="USER")
-        assert inner.beta.messages.calls == [
+        assert inner.calls == [
             {
-                "model": "claude-opus-5-5",
-                "max_tokens": 16000,
-                "betas": ["server-side-fallback-2026-07-01"],
-                "fallbacks": "default",
-                "system": "SYS",
-                "output_config": {
-                    "format": {"type": "json_schema", "schema": PLAN_OUTPUT_SCHEMA},
-                    "effort": "medium",
-                },
-                "messages": [{"role": "user", "content": "USER"}],
+                "model": "gemini-2.5-flash",
+                "contents": [types.Content(role="user", parts=[types.Part(text="USER")])],
+                "config": types.GenerateContentConfig(
+                    system_instruction="SYS",
+                    response_mime_type="application/json",
+                    response_json_schema=PLAN_OUTPUT_SCHEMA,
+                    max_output_tokens=16000,
+                    thinking_config=types.ThinkingConfig(thinking_budget=2048),
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
             }
         ]
-        assert "tool_choice" not in inner.beta.messages.calls[0]
+        config = inner.calls[0]["config"]
+        assert config.tools is None and config.tool_config is None
+        assert config.response_schema is None  # JSON Schema, not the OpenAPI subset
 
     asyncio.run(_scenario())
 
 
-# Conservative subset of the documented structured-outputs keywords (no
-# length/number/array bounds, no $ref, no const, no annotations).
+# Conservative subset of the keywords Gemini documents for
+# `response_json_schema` (no length/number/array bounds, no $ref, no const,
+# no annotations).
 _ALLOWED_KEYWORDS = {
     "type",
     "enum",

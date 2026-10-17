@@ -68,6 +68,7 @@ from pydantic import JsonValue
 from pydantic import ValidationError as PydanticValidationError
 
 from apps.api.core.db import AuditDatabase
+from apps.api.llm import LLMOutputError, gemini_client, generate_json
 from apps.api.responder import package_question
 from apps.api.topic_map import TopicMatch, covers, match
 from services.contracts import (
@@ -230,7 +231,7 @@ class ModelClient:
         raise NotImplementedError
 
 
-# --- structured output schema (Anthropic JSON outputs subset) -------------------
+# --- structured output schema (Gemini response_json_schema subset) --------------
 
 
 def _resolve(node: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
@@ -296,7 +297,9 @@ PLAN_OUTPUT_SCHEMA: dict[str, Any] = {
 }
 """Closed output schema: one ``anyOf`` arm per planner tool, each a closed
 object with ``tool`` pinned to one name and that tool's P2-02 argument
-object. Only keywords the Anthropic structured-outputs subset supports."""
+object. Only ``type``, string ``enum``, ``properties``, ``required``,
+``additionalProperties``, ``items`` and ``anyOf``: all in the documented
+Gemini ``response_json_schema`` subset (google-genai 2.31.0)."""
 
 
 def _describe_field(node: dict[str, Any], defs: dict[str, Any]) -> str:
@@ -330,61 +333,43 @@ def _argument_hint(tool: ToolName) -> str:
     return "; ".join(parts)
 
 
-# --- Anthropic client ----------------------------------------------------------
-
-_LLM_TIMEOUT_S = 60.0
-_LLM_MAX_TOKENS = 16000  # thinking is always on for claude-opus-5-5
-_LLM_EFFORT = "medium"
-_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# --- Gemini client -------------------------------------------------------------
 
 
-class AnthropicPlanClient(ModelClient):
-    """Plan proposal via the Anthropic Messages API (mirrors P3-03 conventions).
+class GeminiPlanClient(ModelClient):
+    """Plan proposal via the Gemini API (``apps.api.llm``, ADR-032).
 
-    Structured outputs (``output_config.format``) with the closed
-    :data:`PLAN_OUTPUT_SCHEMA`; never forced ``tool_choice`` (rejected by
-    current models). Refusal, truncation, or a missing text block raises
-    :class:`PlanModelError`, which the planner turns into :class:`Failed`.
+    One JSON-mode call with the closed :data:`PLAN_OUTPUT_SCHEMA` as
+    ``response_json_schema``; no tools or function calling. A blocked prompt,
+    a finish reason other than ``STOP`` (safety, ``MAX_TOKENS`` truncation,
+    ...) or no answer text raises :class:`PlanModelError`; SDK, HTTP and
+    timeout errors propagate. :func:`plan` turns either into :class:`Failed`,
+    and :func:`_parse_wire` stays the strict parser.
     """
 
     def __init__(self, api_key: str, model: str, *, client: Any | None = None) -> None:
-        if client is None:
-            from anthropic import AsyncAnthropic
-
-            client = AsyncAnthropic(api_key=api_key, timeout=_LLM_TIMEOUT_S, max_retries=1)
-        self._client = client
+        self._client = client if client is not None else gemini_client(api_key)
         self._model = model
 
     async def propose_plan(self, *, system: str, user: str) -> str:
-        response = await self._client.beta.messages.create(
-            model=self._model,
-            max_tokens=_LLM_MAX_TOKENS,
-            betas=[_FALLBACK_BETA],
-            fallbacks="default",
-            system=system,
-            output_config={
-                "format": {"type": "json_schema", "schema": PLAN_OUTPUT_SCHEMA},
-                "effort": _LLM_EFFORT,
-            },
-            messages=[{"role": "user", "content": user}],
-        )
-        if response.stop_reason in ("refusal", "max_tokens"):
-            raise PlanModelError(f"no usable plan (stop_reason={response.stop_reason})")
-        text = next(
-            (block.text for block in response.content if getattr(block, "type", None) == "text"),
-            None,
-        )
-        if text is None:
-            raise PlanModelError("model returned no text block")
-        return text
+        try:
+            return await generate_json(
+                self._client,
+                model=self._model,
+                system=system,
+                user=user,
+                schema=PLAN_OUTPUT_SCHEMA,
+            )
+        except LLMOutputError as exc:
+            raise PlanModelError(str(exc)) from None
 
 
-def plan_client_from_settings(settings: Any) -> AnthropicPlanClient | None:
-    """Anthropic-backed client from settings, else None (caller fails closed)."""
-    key = settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else ""
-    if not key:
+def plan_client_from_settings(settings: Any) -> GeminiPlanClient | None:
+    """Gemini-backed client (``GEMINI_API_KEY``, ``LLM_MODEL``), else None (fail closed)."""
+    key = settings.gemini_api_key.get_secret_value() if settings.gemini_api_key else ""
+    if not key.strip():
         return None
-    return AnthropicPlanClient(key, settings.llm_model)
+    return GeminiPlanClient(key, settings.llm_model)
 
 
 # --- prompt --------------------------------------------------------------------
@@ -873,12 +858,12 @@ __all__ = [
     "PLANNER_TOOLS",
     "PLAN_OUTPUT_SCHEMA",
     "TRUSTED_PATH_ONLY_TOOLS",
-    "AnthropicPlanClient",
     "Clarification",
     "ConfirmationVerifier",
     "Escalation",
     "EscalationConfirmation",
     "Failed",
+    "GeminiPlanClient",
     "ModelClient",
     "PlanModelError",
     "PlanResult",

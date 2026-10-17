@@ -41,13 +41,13 @@ clarification/escalation prompt. It never sees retrieved content.
 
 - `apps/api/planner.py` (new; documented)
 - `apps/api/topic_map.py` (new, PROPOSED)
-- `tests/api/test_planner.py` (new; Anthropic client faked)
+- `tests/api/test_planner.py` (new; LLM client faked, Gemini since ADR-032)
 - `tests/api/test_topic_map.py` (new)
 
 ## 7. Existing files it may need to modify
 
 - `services/contracts/models.py` (steward: same owner): `PlanProposal` additions decided by D-13/D-14 (ICR recorded in the issue).
-- `apps/api/core/config.py` (steward: same owner): none expected (`ANTHROPIC_API_KEY`, `LLM_MODEL` exist).
+- `apps/api/core/config.py` (steward: same owner): none expected (`LLM_MODEL` and the LLM key exist; the key is `GEMINI_API_KEY` since ADR-032).
 
 ## 8. Shared interfaces and contracts
 
@@ -57,7 +57,7 @@ clarification/escalation prompt. It never sees retrieved content.
 ## 9. Step-by-step implementation requirements
 
 1. **Inputs.** Only the user's message, trusted identity context (persona label, app role, entry point), the tool catalog descriptions, and the D-15 decision on conversation text. Retrieved content, tool results, and source text never enter the planner prompt (R-30).
-2. **LLM call.** Anthropic SDK with `LLM_MODEL` and structured output (tool-use or JSON schema) mapping to `PlanProposal`. The prompt states that the model cannot choose identity, tier, or recipients.
+2. **LLM call.** Google Gemini (`google-genai`, ADR-032; originally Anthropic) with `LLM_MODEL` and JSON-schema structured output mapping to `PlanProposal`. The prompt states that the model cannot choose identity, tier, or recipients.
 3. **Trusted validation, in order:**
    1. `PlanProposal` model validation (endpoint/tool match; forbidden and `_` keys; at most one elevated step);
    2. `validate_arguments` per step (P2-02);

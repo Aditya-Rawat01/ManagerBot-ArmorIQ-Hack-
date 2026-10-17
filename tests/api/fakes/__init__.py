@@ -1,7 +1,7 @@
 """Shared offline doubles for the request orchestrator (P3-04; P3-09 extends).
 
 Test-only: never imported by ``apps/`` or ``services/`` (guardrail test).
-Nothing here touches ArmorIQ, Slack, Anthropic, Neon or any network, and no
+Nothing here touches ArmorIQ, Slack, Gemini, Neon or any network, and no
 result produced with these doubles is gate evidence.
 
 - :mod:`.gateway`: :class:`ScriptedGateway`, a call-counting ArmorIQ gateway
