@@ -956,24 +956,36 @@ async def group_tamper(
 
 
 def argument_binding_verdict(rows: list[dict[str, Any]]) -> str:
-    """Server-side argument binding, from the changed-query case only."""
+    """Server-side argument binding, from the changed-query case only, read
+    from the evidence-checked layer (run after `check_wire` and the DB
+    evidence), never from the gateway label alone."""
     item = next((entry for entry in rows if entry.get("case") == "tamper-query"), None)
     if item is None or (item.get("status") is None and item.get("layer") == "unknown"):
         return "arguments: NOT DETERMINED (the changed-query case did not complete)"
+    layer = str(item.get("layer"))
     if item.get("status") == "executed":
+        hashed = {True: "yes", False: "NO"}.get(item.get("hash_match"), "not checked")
         return (
             "arguments: DISPROVEN: the proxy forwarded a changed query under a valid plan "
-            f"and the tool server executed it (ledger entry {item.get('ledger_entry_id')})"
+            f"and the tool server executed it (ledger entry {item.get('ledger_entry_id')}; "
+            f"business-argument hash = tampered arguments: {hashed})"
+        )
+    if layer.startswith("armoriq_proxy_decision"):
+        return (
+            "arguments: PROVEN at the proxy: the changed query was refused (HTTP 409) "
+            "before the tool server (gateway label contradicted: ICR)"
+        )
+    if layer == "armoriq_policy_decision":
+        return (
+            "arguments: NOT DETERMINED: an ArmorIQ policy decision blocked the changed "
+            "query (a policy outcome, not evidence of plan binding)"
         )
     if item.get("status") == "rejected_by_tool_server":
         return (
             "arguments: NOT DETERMINED: the changed query reached the tool server and was "
             f"rejected there ({item.get('error_code')}), not by ArmorIQ"
         )
-    return (
-        "arguments: NOT DETERMINED from the gateway label alone "
-        f"({item.get('observed')}); see the wire evidence"
-    )
+    return f"arguments: NOT DETERMINED ({item.get('observed')}; layer {layer})"
 
 
 def group_proxy_shape() -> list[dict[str, Any]]:
@@ -1504,6 +1516,16 @@ def apply_db_evidence(rows: list[dict[str, Any]], db: Mapping[str, Any]) -> dict
                     and entry.get("validation_outcome") == code
                     and entry.get("execution_status") == "rejected_by_tool_server"
                 )
+        elif status == "unknown":
+            # Allowed result without a ledger reference: reach is claimed, but
+            # nothing ties it to a row; never corroborated (E1: never EXECUTED).
+            found = take_attempt(tool, "accepted", str(item.get("jti")))
+            ok = False
+            lines.append(
+                (_attempt_text(found) if found else "no accepted attempt row")
+                + "; the reply carried no ledger reference, so execution is unproven"
+            )
+            lines.extend(_ledger_text(entry) for entry in own_ledger)
         elif item.get("gateway_label") is not None:
             # Not reached (pre-network or ArmorIQ block): no row may carry its jti.
             own_attempts = [entry for entry in attempts if entry.get("jti") in jtis]

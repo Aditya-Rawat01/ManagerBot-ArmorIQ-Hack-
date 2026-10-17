@@ -883,6 +883,8 @@ def test_proxy_409_contradicting_the_sdk_label_is_flagged__offline_fake_sdk() ->
     assert "FLAG: the label armoriq_sdk_plan_check claims a pre-network rejection" in block
     assert "armoriq_proxy_decision (HTTP 409" in _rows_by_case(record)["tamper-query"]
     assert "Gateway ICR" in record
+    # The binding verdict reads the evidence-checked layer, not the label.
+    assert "arguments: PROVEN at the proxy" in record
     assert code == 3
 
 
@@ -1278,6 +1280,24 @@ def test_record_header_carries_the_run_metadata__offline_fake_sdk() -> None:
     ):
         assert field in record, field
     _assert_no_fake_values(record)
+
+
+def test_reply_without_a_ledger_reference_is_never_evidenced__offline_fake_sdk_and_ledger() -> None:
+    """An allowed reply without `_meta.ledger_entry_id` (gateway status
+    `unknown`) is not corroborated even though a row exists: exit 3."""
+
+    class NoMetaForDelegation(_FakeToolServer__offline_fake):
+        def call(self, tool: str, arguments: dict[str, object]) -> dict[str, object]:
+            result = super().call(tool, arguments)
+            if "_delegation_id" in arguments:
+                result.pop("_meta", None)
+            return result
+
+    code, record, _, _ = _offline_run(server=NoMetaForDelegation())
+    block = _details(record, "inject-_delegation_id")
+    assert "the reply carried no ledger reference, so execution is unproven" in block
+    assert "NOT evidenced" in _rows_by_case(record)["inject-_delegation_id"]
+    assert code == 3
 
 
 def test_plan_failure_rows_use_step_outcome_with_a_masked_reason__offline_fake_sdk() -> None:
