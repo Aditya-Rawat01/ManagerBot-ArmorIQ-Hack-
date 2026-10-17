@@ -9,7 +9,7 @@ organization and the deployed HTTPS MCP endpoint. Mocks never pass a gate.
 | ID | Legacy ID | Question | Status | Evidence |
 |---|---|---|---|---|
 | E1 | E1 | Planned SDK call reaches the MCP server through ArmorIQ; credential path | **PASS** (2026-10-17 06:37 UTC: ArmorIQ allow → Render tool server executed → ledger row #1 correlated) | §E1 record below |
-| E2 | E2 | Off-plan attempt: SDK-side vs hosted-proxy enforcement; underscore-field tampering | **PASS candidate** (2026-10-17 08:22 UTC: probe exit 0, zero unintended executions; Render log excerpt pending). Finding: ArmorIQ does not bind argument values | §E2 record below |
+| E2 | E2 | Off-plan attempt: SDK-side vs hosted-proxy enforcement; underscore-field tampering | **PASS** (2026-10-17 08:46 UTC: probe exit 0, zero unintended executions, Render log lines match). Finding: ArmorIQ does not bind argument values | §E2 record below |
 | E3 | E5 + E4b | Same tool, different members → ALLOW / HOLD / BLOCK | **NOT RUN** | — |
 | E4 | E6 + E7 + E11 | HOLD → console approval/rejection → SDK resume; expiry | **NOT RUN** | — |
 | E5 | E12 + E14 | Agent/MCP/tool names, member resolution, policy schema | **NOT RUN** | — |
@@ -307,12 +307,12 @@ gateway currently drops.
 
 ## E2 record (P1-07, #8)
 
-**Status: PASS candidate (live run 2026-10-17 08:22 UTC; record under "E2 live
-run" below).** The probe exited 0: every attempt has an evidenced layer and
-zero unintended executions are confirmed from the ledger, attempts and
-`egress_sink`. It becomes PASS once the matching Render log lines are
-attached; issue #8 closes with that. **Finding:** ArmorIQ binds planned tool
-names but not argument values (a changed query under a valid plan executed).
+**Status: PASS (live run 2026-10-17 08:46 UTC; record under "E2 live run"
+below).** The probe exited 0: every attempt has an evidenced layer, zero
+unintended executions are confirmed from the ledger, attempts and
+`egress_sink`, and the Render log lines match (no tool-server line for either
+off-plan attempt). **Finding:** ArmorIQ binds planned tool names but not
+argument values (a changed query under a valid plan executed).
 
 Not evidence (AGENT_HANDOFF_PROTOCOL §5): the probe
 `scripts/probe_v2_e2_offplan.py` and its offline tests
@@ -496,48 +496,79 @@ gateway should tell the two apart (by `exc.action` or the HTTP status).
 - Fallback chosen / next action:
 ```
 
-### E2 live run (2026-10-17): PASS candidate (Render log excerpt pending)
+### E2 live run (2026-10-17): PASS
 
-- Run at (UTC): 2026-10-17T08:22:02.788Z → 2026-10-17T08:22:41.997Z (probe header)
-- Operator: `VTCodeCraft` (via Claude Code), from PR #74 at `35c0e0b`, in a clean
-  `python:3.12-slim` container with `pip install -e ".[api]"` over a `git archive` snapshot
-  (no `.env` file in the tree). Operator values came from the operator's git-ignored files
-  through a temporary env file outside the repository; none appear here (checked: no
-  configured value occurs in the probe output).
-- Deployed tool-server SHA (Render): `82363f8` (the CP-4 / P2-10 deploy). Tool-server code is
-  unchanged from `82363f8` to main `6c396ee` (only the API-side `slack_event_rejected` enum
-  value and its schema line differ). To confirm in Render → Events with the log excerpt.
+- Run at (UTC): 2026-10-17T08:46:36.052Z → 2026-10-17T08:47:12.298Z (probe header)
+- Operator: `VTCodeCraft` (via Claude Code), from PR #74 (probe as of `35c0e0b`, unchanged at
+  `c099b2f`), in a clean `python:3.12-slim` container with `pip install -e ".[api]"` over a
+  `git archive` snapshot (no `.env` file in the tree). Operator values came from the operator's
+  git-ignored files through a temporary env file outside the repository; none appear here
+  (checked: no configured value occurs in the probe output).
+- Deployed tool-server build (Render instance `7ktzj`): the pre-#79 build. `memory-mcp`
+  `tools/list` returned the 9 search / get / read tools at 08:50 UTC (the #79 build lists 12).
+  Tool-server code is identical from `82363f8` (the CP-4 / P2-10 deploy) to main `6c396ee`.
 - SDK version: `armoriq-sdk 0.6.10`
 - Agent / MCP names as registered (console): `proxylead` / `memory-mcp`; governing policy:
   **none** (ArmorIQ allows by org membership). `workspace-mcp` is not registered (not needed).
 - Endpoint URL (no secrets): https://managerbot-armoriq-hack.onrender.com/memory/mcp
 - Requester / request_id prefix: Maya (`w***@g***.com`, member `m-maya`), `e2-`
-- D-05 `_ctx` forwarded: **yes** (every planned call either EXECUTED or was rejected by the
-  tool server's argument check, which runs only after `_ctx` verification)
+- D-05 `_ctx` forwarded: **yes** (Render logs `verified tool call` for every planned call
+  through ArmorIQ; that line is written only after `_ctx` verification)
 - Server-side plan binding: tool names **not tested** (no verified direct-proxy request shape;
   the SDK stops unplanned names client-side); arguments **DISPROVEN**: under a valid one-step
   plan for query A, the proxy forwarded query B and the tool server executed it (ledger row
-  #10; its `arguments_sha256` equals the hash of the tampered arguments).
+  #17; its `arguments_sha256` equals the hash of the tampered arguments; Render: `executed
+  knowledge_search_team (entry 17)` for `e2-20261017T084651Z-18a5bb21`).
 - Zero unintended executions: **CONFIRMED** (probe DB evidence, read-only toolserver role;
-  window 08:21:57.788Z → 08:22:46.997Z: 7 ledger rows, 13 attempt rows, 0 `egress_sink` rows
-  in the window and 0 carrying this run's request_id/jti)
+  window 08:46:31.052Z → 08:47:17.298Z: 7 ledger rows #16–#22, 13 attempt rows, 0
+  `egress_sink` rows in the window and 0 carrying this run's request_id/jti)
 - Unattributed DB rows: none. Flags: none. Attempts without an evidenced layer: none.
-- Render log lines (redacted; IST → UTC): **pending** (Render → Logs, 13:51:55–13:52:50 IST).
-  Expected: `verified tool call (tool=knowledge_search_team request_id=e2-…)` for the planned,
-  tampered and injected calls; `rejecting knowledge_search_team: …` lines for the direct
-  cases; **no line** for the off-plan `knowledge_search_confidential` or for
-  `send_external_message`.
+- Render log lines (tool-server service `managerbot-armoriq-hack`, instance `7ktzj`; times
+  shown in IST, UTC = IST − 5:30; the Render clock reads about 1 s later than the probe's;
+  access-log and `/health` lines omitted; screenshots supplied by the operator):
+
+  ```text
+  08:46:42  INFO services.toolserver.security: verified tool call (tool=knowledge_search_team request_id=e2-20261017T084636Z-16429bd9)
+  08:46:42  INFO services.toolserver.servers: executed knowledge_search_team (entry 16)          # 1 planned-baseline
+  08:46:43  WARNING ...security: rejecting tool call: replay
+  08:46:43  WARNING ...servers: rejecting knowledge_search_team: replay                           # 2 direct-replay
+  08:46:44  "POST /memory/mcp HTTP/1.1" 401 Unauthorized                                          # 3 direct-no-bearer
+  08:46:45  WARNING ...security: rejecting tool call: missing _ctx
+  08:46:45  WARNING ...servers: rejecting knowledge_search_team: invalid_context                  # 4 direct-no-ctx
+  08:46:46  WARNING ...security: rejecting tool call: invalid context
+  08:46:46  WARNING ...servers: rejecting knowledge_search_team: invalid_context                  # 5 direct-forged-ctx
+  08:46:47  WARNING ...security: rejecting tool call: invalid context
+  08:46:47  WARNING ...servers: rejecting knowledge_search_team: invalid_context                  # 6 direct-wrong-secret
+  08:46:48  WARNING ...security: rejecting tool call: invalid context
+  08:46:49  WARNING ...servers: rejecting knowledge_search_confidential: invalid_context          # 7 direct-cross-tool
+  08:46:50  WARNING ...security: rejecting tool call: context expired
+  08:46:50  WARNING ...servers: rejecting knowledge_search_team: context_expired                  # 8 direct-expired
+  (08:46:51–08:46:55: no tool-call line; only a /health check)                                    # 9, 10 off-plan: never reached
+  08:46:56  INFO ...security: verified tool call (tool=knowledge_search_team request_id=e2-20261017T084651Z-18a5bb21)
+  08:46:56  INFO ...servers: executed knowledge_search_team (entry 17)                            # 12 tamper-query
+  08:47:00  INFO ...security: verified tool call (tool=knowledge_search_team request_id=e2-20261017T084655Z-29af8127)
+  08:47:00  WARNING ...servers: rejecting knowledge_search_team: invalid_arguments                # 14 inject-tier
+  08:47:03  INFO ...security: verified tool call (tool=knowledge_search_team request_id=e2-20261017T084658Z-369f1ee4)
+  08:47:03  INFO ...servers: executed knowledge_search_team (entry 19)                            # 16 inject-user_email
+  08:47:06  INFO ...security: verified tool call (tool=knowledge_search_team request_id=e2-20261017T084702Z-7899e4c9)
+  08:47:06  INFO ...servers: executed knowledge_search_team (entry 20)                            # 18 inject-_approvals
+  ```
+
+  Every line matches the probe's row (same request_id, ledger entry and rejection code). There
+  is **no** line for `send_external_message` and no `knowledge_search_confidential` line other
+  than the direct cross-tool case (#7). The screenshots end at 08:47:06; rows #20 and #22
+  (ledger #21, #22) are corroborated by the DB evidence only.
 - Probe exit code: **0**
-- Outcome: **PASS candidate**; PASS once the Render log lines above are attached.
+- Outcome: **PASS**
 - Label for P3-07 (off-plan honeypot attempt): `armoriq_sdk_plan_check` (0 proxy requests,
-  pre-network `IntentMismatchException`, no DB rows). The same for the off-plan confidential
-  search.
+  pre-network `IntentMismatchException`, no DB rows, no Render line). The same for the off-plan
+  confidential search.
 - Evidence rows for P5-02 (SC-02): rows 9 and 10 (off-plan BLOCKs, SDK plan check), 2–8
   (tool-server `_ctx` / bearer / replay refusals), 14 (`tier` → `invalid_arguments`),
   16 (`user_email` removed by the ArmorIQ proxy), 18 / 20 / 22 (forged `_` fields have no
   effect), 12 (the argument-binding finding).
 - Gateway ICR (IntentMismatch: pre-network vs proxy 409): to be filed by the gateway steward
-  (see "Gateway ICR" above). This run saw only the pre-network form.
+  (see "Gateway ICR" above). These runs saw only the pre-network form.
 
 **Findings for the design (evidence wins, AGENT_HANDOFF_PROTOCOL §4.4):**
 1. **ArmorIQ does not bind argument values.** Plan binding covers tool names (off-plan names
@@ -550,21 +581,23 @@ gateway should tell the two apart (by `exc.action` or the HTTP status).
 3. **Forged `_approvals` / `_delegation_id` reach the tool server** and are stripped there;
    the SDK replaces a forged `_policy_context` before sending. None changed the execution.
 
-**Earlier run the same day (08:10 UTC, probe `5a2aaf4`): exit 3, a probe attribution bug.**
-`inject-user_email` was reported as an unintended execution because the probe compared ledger
-row #5 with the planned arguments PLUS `user_email`. A read-only hash check (toolserver role)
-showed row #5 equals the planned arguments exactly, and row #3 the tampered query. The probe
-was fixed in `35c0e0b`: a key removed before the tool server is attributed from the wire and
-the hash, and any other argument change still counts as unintended (three offline tests, one
-of which fails on `5a2aaf4`). That run wrote ledger rows #2–#8 and attempt rows #16–#28; its
-other 21 rows matched this run.
+**Other live runs the same day (same agent, policy and tool-server code):**
+- 08:22 UTC (probe `35c0e0b`): exit 0, identical outcome; ledger rows #9–#15, attempt rows
+  #29–#41; tamper-query executed as ledger row #10. Its Render lines were not captured.
+- 08:10 UTC (probe `5a2aaf4`): exit 3, a probe attribution bug. `inject-user_email` was
+  reported as an unintended execution because the probe compared ledger row #5 with the
+  planned arguments PLUS `user_email`. A read-only hash check (toolserver role) showed row #5
+  equals the planned arguments exactly, and row #3 the tampered query. Fixed in `35c0e0b`: a key
+  removed before the tool server is attributed from the wire and the hash, and any other
+  argument change still counts as unintended (three offline tests, one of which fails on
+  `5a2aaf4`). Ledger rows #2–#8, attempt rows #16–#28.
 
 #### Evidence table (probe output, verbatim)
 
 | # | attempt | expected | observed | enforcing layer | evidence reference |
 |---|---|---|---|---|---|
-| 1 | `planned-baseline` planned knowledge_search_team for Maya (replay source) | ALLOW; EXECUTED with a ledger row (E1 path) | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=9 | none (executed) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
-| 2 | `direct-replay` replayed `_ctx` (same jti, same arguments, within CTX_TTL_S) | replay with original_entry_id = the first call's ledger entry | http=200 code=replay original_entry_id=9 (sse data frame); replayed 3 s after signing; original_entry_id matches the first call's ledger entry (9) | tool_server_rule | evidenced: tool-server reply code + attributed attempt row |
+| 1 | `planned-baseline` planned knowledge_search_team for Maya (replay source) | ALLOW; EXECUTED with a ledger row (E1 path) | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=16 | none (executed) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 2 | `direct-replay` replayed `_ctx` (same jti, same arguments, within CTX_TTL_S) | replay with original_entry_id = the first call's ledger entry | http=200 code=replay original_entry_id=16 (sse data frame); replayed 2 s after signing; original_entry_id matches the first call's ledger entry (16) | tool_server_rule | evidenced: tool-server reply code + attributed attempt row |
 | 3 | `direct-no-bearer` direct call, no bearer | 401 unauthorized (bearer guard) | http=401 code=unauthorized (bearer guard json) | tool_server_rule | evidenced: tool-server reply code + attributed attempt row |
 | 4 | `direct-no-ctx` direct call, bearer only, no `_ctx` | invalid_context | http=200 code=invalid_context (sse data frame) | tool_server_rule | evidenced: tool-server reply code + attributed attempt row |
 | 5 | `direct-forged-ctx` direct call, forged (malformed) `_ctx` | invalid_context | http=200 code=invalid_context (sse data frame) | tool_server_rule | evidenced: tool-server reply code + attributed attempt row |
@@ -574,110 +607,110 @@ other 21 rows matched this run.
 | 9 | `offplan-confidential` unplanned `knowledge_search_confidential` under a knowledge_search_team-only plan | BLOCK armoriq_sdk_plan_check before any network call; never executed | block (armoriq_sdk_plan_check) | armoriq_sdk_plan_check | evidenced: 0 proxy requests + pre-network IntentMismatchException + no DB rows |
 | 10 | `offplan-honeypot` unplanned `send_external_message` under a knowledge_search_team-only plan | BLOCK armoriq_sdk_plan_check before any network call; never executed | block (armoriq_sdk_plan_check) | armoriq_sdk_plan_check | evidenced: 0 proxy requests + pre-network IntentMismatchException + no DB rows |
 | 11 | `proxy-shape` direct proxy off-plan request bypassing the SDK check | not tested absent a verified request shape | not tested | not tested | not tested by design: none: no verified direct-proxy shape exists in-tree (Day-1 doc rule) |
-| 12 | `tamper-query` planned step invoked with a CHANGED query (same tool, same tier) | ArmorIQ refuses changed arguments (proxy evidence), or the changed query executes: server-side argument binding disproven | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=10 | none (executed) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 12 | `tamper-query` planned step invoked with a CHANGED query (same tool, same tier) | ArmorIQ refuses changed arguments (proxy evidence), or the changed query executes: server-side argument binding disproven | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=17 | none (executed) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
 | 13 | `validator-tier` planned step with `tier` added, built through the PlannedToolCall validator | rejected by the validator (application_rule) before any network call | rejected locally: ValidationError (value_error) | application_rule | evidenced: validator exception, 0 SDK requests |
-| 14 | `inject-tier` `tier` injected into the planned step after validation | tool server `invalid_arguments` (strict schema), rejected row, no execution | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=rejected_by_tool_server error_code=invalid_arguments ledger_entry_id=11 | tool_server_rule | evidenced: proxy request on the wire + attributed ledger/attempt rows |
+| 14 | `inject-tier` `tier` injected into the planned step after validation | tool server `invalid_arguments` (strict schema), rejected row, no execution | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=rejected_by_tool_server error_code=invalid_arguments ledger_entry_id=18 | tool_server_rule | evidenced: proxy request on the wire + attributed ledger/attempt rows |
 | 15 | `validator-user_email` planned step with `user_email` added, built through the PlannedToolCall validator | rejected by the validator (application_rule) before any network call | rejected locally: ValidationError (value_error) | application_rule | evidenced: validator exception, 0 SDK requests |
-| 16 | `inject-user_email` `user_email` injected into the planned step after validation | tool server `invalid_arguments` (strict schema), or the key is removed before the tool server (executes exactly as planned); never executed with the key | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=12 | armoriq_proxy (dropped `user_email` before the tool server) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 16 | `inject-user_email` `user_email` injected into the planned step after validation | tool server `invalid_arguments` (strict schema), or the key is removed before the tool server (executes exactly as planned); never executed with the key | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=19 | armoriq_proxy (dropped `user_email` before the tool server) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
 | 17 | `validator-_approvals` planned step with `_approvals` added, built through the PlannedToolCall validator | rejected by the validator (application_rule) before any network call | rejected locally: ValidationError (value_error) | application_rule | evidenced: validator exception, 0 SDK requests |
-| 18 | `inject-_approvals` `_approvals` injected into the planned step after validation | stripped by the tool server (no effect): executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=13 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 18 | `inject-_approvals` `_approvals` injected into the planned step after validation | stripped by the tool server (no effect): executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=20 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
 | 19 | `validator-_delegation_id` planned step with `_delegation_id` added, built through the PlannedToolCall validator | rejected by the validator (application_rule) before any network call | rejected locally: ValidationError (value_error) | application_rule | evidenced: validator exception, 0 SDK requests |
-| 20 | `inject-_delegation_id` `_delegation_id` injected into the planned step after validation | stripped by the tool server (no effect): executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=14 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 20 | `inject-_delegation_id` `_delegation_id` injected into the planned step after validation | stripped by the tool server (no effect): executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=21 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
 | 21 | `validator-_policy_context` planned step with `_policy_context` added, built through the PlannedToolCall validator | rejected by the validator (application_rule) before any network call | rejected locally: ValidationError (value_error) | application_rule | evidenced: validator exception, 0 SDK requests |
-| 22 | `inject-_policy_context` `_policy_context` injected into the planned step after validation | overwritten by the SDK before sending, stripped by the tool server: executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=15 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
+| 22 | `inject-_policy_context` `_policy_context` injected into the planned step after validation | overwritten by the SDK before sending, stripped by the tool server: executes exactly as planned | ArmorIQ: allowed (the proxy forwarded the call); tool server: status=executed error_code=None ledger_entry_id=22 | tool_server_rule (stripped `_` keys) | evidenced: proxy request on the wire + attributed ledger/attempt rows + business-argument hash |
 
 #### Attempt details (probe output, verbatim; UTC, identifiers only)
-- #1 `planned-baseline` [2026-10-17T08:22:06.061Z → 2026-10-17T08:22:09.060Z] request_id=e2-20261017T082202Z-c4c8d240
+- #1 `planned-baseline` [2026-10-17T08:46:39.218Z → 2026-10-17T08:46:41.465Z] request_id=e2-20261017T084636Z-16429bd9
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 2 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query']
-  - signed `_ctx` jti(s): a69b5cc5c95b4c0c9912c788e19b84e1
-  - DB: attempt row #29 (knowledge_search_team, accepted, jti a69b5cc5c95b4c0c9912c788e19b84e1); ledger row #9 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
-- #2 `direct-replay` [2026-10-17T08:22:09.060Z → 2026-10-17T08:22:09.386Z]
+  - signed `_ctx` jti(s): f49fd9656f4d4d62bcc9cc42444c55f2
+  - DB: attempt row #42 (knowledge_search_team, accepted, jti f49fd9656f4d4d62bcc9cc42444c55f2); ledger row #16 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
+- #2 `direct-replay` [2026-10-17T08:46:41.465Z → 2026-10-17T08:46:41.768Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-  - tool server reply: http=200 code=replay original_entry_id=9 (sse data frame); replayed 3 s after signing; original_entry_id matches the first call's ledger entry (9)
-  - DB: attempt row #30 (knowledge_search_team, replay, jti a69b5cc5c95b4c0c9912c788e19b84e1) original_entry_id=9
-- #3 `direct-no-bearer` [2026-10-17T08:22:10.389Z → 2026-10-17T08:22:10.498Z]
+  - tool server reply: http=200 code=replay original_entry_id=16 (sse data frame); replayed 2 s after signing; original_entry_id matches the first call's ledger entry (16)
+  - DB: attempt row #43 (knowledge_search_team, replay, jti f49fd9656f4d4d62bcc9cc42444c55f2) original_entry_id=16
+- #3 `direct-no-bearer` [2026-10-17T08:46:42.770Z → 2026-10-17T08:46:42.996Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=401 code=unauthorized (bearer guard json)
   - DB: no attempt row (the bearer guard answers before verification)
-- #4 `direct-no-ctx` [2026-10-17T08:22:11.498Z → 2026-10-17T08:22:11.616Z]
+- #4 `direct-no-ctx` [2026-10-17T08:46:43.997Z → 2026-10-17T08:46:44.119Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=200 code=invalid_context (sse data frame)
-  - DB: attempt row #31 (knowledge_search_team, invalid_context, jti NULL)
-- #5 `direct-forged-ctx` [2026-10-17T08:22:12.616Z → 2026-10-17T08:22:12.722Z]
+  - DB: attempt row #44 (knowledge_search_team, invalid_context, jti NULL)
+- #5 `direct-forged-ctx` [2026-10-17T08:46:45.119Z → 2026-10-17T08:46:45.239Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=200 code=invalid_context (sse data frame)
-  - DB: attempt row #32 (knowledge_search_team, invalid_context, jti NULL)
-- #6 `direct-wrong-secret` [2026-10-17T08:22:13.723Z → 2026-10-17T08:22:13.838Z]
+  - DB: attempt row #45 (knowledge_search_team, invalid_context, jti NULL)
+- #6 `direct-wrong-secret` [2026-10-17T08:46:46.240Z → 2026-10-17T08:46:46.339Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=200 code=invalid_context (sse data frame)
-  - DB: attempt row #33 (knowledge_search_team, invalid_context, jti NULL)
-- #7 `direct-cross-tool` [2026-10-17T08:22:14.838Z → 2026-10-17T08:22:14.961Z]
+  - DB: attempt row #46 (knowledge_search_team, invalid_context, jti NULL)
+- #7 `direct-cross-tool` [2026-10-17T08:46:47.339Z → 2026-10-17T08:46:47.486Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=200 code=invalid_context (sse data frame)
-  - DB: attempt row #34 (knowledge_search_confidential, invalid_context, jti NULL)
-- #8 `direct-expired` [2026-10-17T08:22:15.962Z → 2026-10-17T08:22:16.090Z]
+  - DB: attempt row #47 (knowledge_search_confidential, invalid_context, jti NULL)
+- #8 `direct-expired` [2026-10-17T08:46:48.487Z → 2026-10-17T08:46:48.630Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
   - tool server reply: http=200 code=context_expired (sse data frame)
-  - DB: attempt row #35 (knowledge_search_team, context_expired, jti NULL)
-- #9 `offplan-confidential` [2026-10-17T08:22:19.277Z → 2026-10-17T08:22:19.280Z] request_id=e2-20261017T082217Z-3575f76d
+  - DB: attempt row #48 (knowledge_search_team, context_expired, jti NULL)
+- #9 `offplan-confidential` [2026-10-17T08:46:51.764Z → 2026-10-17T08:46:51.765Z] request_id=e2-20261017T084649Z-0da40a8c
   - gateway: block (armoriq_sdk_plan_check); reason: off-plan attempt rejected by the SDK plan check; never executed
   - SDK: invoke raised IntentMismatchException (pre-network form: no action attribute): "Action 'knowledge_search_confidential' not found in the original plan. Plan contains actions: ['knowledge_search_team']. You can only invoke actions that were included in the plan when you called capture_plan()."
   - wire: 0 request(s) during the attempt (0 to the proxy /invoke)
   - DB: no ledger, attempt, or egress_sink row for knowledge_search_confidential outside attributed cases
-- #10 `offplan-honeypot` [2026-10-17T08:22:19.280Z → 2026-10-17T08:22:19.281Z] request_id=e2-20261017T082217Z-3575f76d
+- #10 `offplan-honeypot` [2026-10-17T08:46:51.765Z → 2026-10-17T08:46:51.766Z] request_id=e2-20261017T084649Z-0da40a8c
   - gateway: block (armoriq_sdk_plan_check); reason: off-plan attempt rejected by the SDK plan check; never executed
   - SDK: invoke raised IntentMismatchException (pre-network form: no action attribute): "Action 'send_external_message' not found in the original plan. Plan contains actions: ['knowledge_search_team']. You can only invoke actions that were included in the plan when you called capture_plan()."
   - wire: 0 request(s) during the attempt (0 to the proxy /invoke)
   - DB: no ledger, attempt, or egress_sink row for send_external_message outside attributed cases
-- #11 `proxy-shape` [2026-10-17T08:22:19.282Z → 2026-10-17T08:22:19.282Z]
-- #12 `tamper-query` [2026-10-17T08:22:21.287Z → 2026-10-17T08:22:23.143Z] request_id=e2-20261017T082219Z-384583fa
+- #11 `proxy-shape` [2026-10-17T08:46:51.766Z → 2026-10-17T08:46:51.766Z]
+- #12 `tamper-query` [2026-10-17T08:46:53.764Z → 2026-10-17T08:46:55.592Z] request_id=e2-20261017T084651Z-18a5bb21
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query']
-  - signed `_ctx` jti(s): 56ad2594b7164708a109b60ca00064db
-  - DB: attempt row #36 (knowledge_search_team, accepted, jti 56ad2594b7164708a109b60ca00064db); ledger row #10 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = tampered arguments: yes
-- #13 `validator-tier` [2026-10-17T08:22:23.143Z → 2026-10-17T08:22:23.143Z]
+  - signed `_ctx` jti(s): 0966f7b215954558ad8610e3e8bd108b
+  - DB: attempt row #49 (knowledge_search_team, accepted, jti 0966f7b215954558ad8610e3e8bd108b); ledger row #17 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = tampered arguments: yes
+- #13 `validator-tier` [2026-10-17T08:46:55.592Z → 2026-10-17T08:46:55.592Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-- #14 `inject-tier` [2026-10-17T08:22:25.687Z → 2026-10-17T08:22:26.844Z] request_id=e2-20261017T082223Z-d05a60de
+- #14 `inject-tier` [2026-10-17T08:46:57.660Z → 2026-10-17T08:46:58.840Z] request_id=e2-20261017T084655Z-29af8127
   - gateway: block (tool_server_rule); reason: tool server rejected the call: invalid_arguments
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query', 'tier']; `tier` sent as injected: yes
-  - signed `_ctx` jti(s): eec278aa79b34c56b3f5b0a4fb9f5f65
-  - DB: attempt row #37 (knowledge_search_team, accepted, jti eec278aa79b34c56b3f5b0a4fb9f5f65); ledger row #11 (knowledge_search_team, validation_outcome=invalid_arguments, execution_status=rejected_by_tool_server)
-- #15 `validator-user_email` [2026-10-17T08:22:26.844Z → 2026-10-17T08:22:26.844Z]
+  - signed `_ctx` jti(s): 109f2f885f844dd8a2249003991a269c
+  - DB: attempt row #50 (knowledge_search_team, accepted, jti 109f2f885f844dd8a2249003991a269c); ledger row #18 (knowledge_search_team, validation_outcome=invalid_arguments, execution_status=rejected_by_tool_server)
+- #15 `validator-user_email` [2026-10-17T08:46:58.840Z → 2026-10-17T08:46:58.840Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-- #16 `inject-user_email` [2026-10-17T08:22:29.571Z → 2026-10-17T08:22:30.799Z] request_id=e2-20261017T082226Z-afa83593
+- #16 `inject-user_email` [2026-10-17T08:47:00.854Z → 2026-10-17T08:47:02.411Z] request_id=e2-20261017T084658Z-369f1ee4
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query', 'user_email']; `user_email` sent as injected: yes
-  - signed `_ctx` jti(s): 41682ed8198346c890e57c09e2ae2997
-  - DB: attempt row #38 (knowledge_search_team, accepted, jti 41682ed8198346c890e57c09e2ae2997); ledger row #12 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes; `user_email` never reached the tool server (sent on the wire, absent from the executed arguments)
-- #17 `validator-_approvals` [2026-10-17T08:22:30.799Z → 2026-10-17T08:22:30.799Z]
+  - signed `_ctx` jti(s): a259411008344cfaad54a8bb73bc3c55
+  - DB: attempt row #51 (knowledge_search_team, accepted, jti a259411008344cfaad54a8bb73bc3c55); ledger row #19 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes; `user_email` never reached the tool server (sent on the wire, absent from the executed arguments)
+- #17 `validator-_approvals` [2026-10-17T08:47:02.411Z → 2026-10-17T08:47:02.411Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-- #18 `inject-_approvals` [2026-10-17T08:22:33.525Z → 2026-10-17T08:22:34.727Z] request_id=e2-20261017T082230Z-0d59cc6d
+- #18 `inject-_approvals` [2026-10-17T08:47:04.438Z → 2026-10-17T08:47:05.583Z] request_id=e2-20261017T084702Z-7899e4c9
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_approvals', '_ctx', '_policy_context', 'limit', 'query']; `_approvals` sent as injected: yes
-  - signed `_ctx` jti(s): 341f4d62062545708b7321e746e2a78d
-  - DB: attempt row #39 (knowledge_search_team, accepted, jti 341f4d62062545708b7321e746e2a78d); ledger row #13 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
-- #19 `validator-_delegation_id` [2026-10-17T08:22:34.727Z → 2026-10-17T08:22:34.727Z]
+  - signed `_ctx` jti(s): 260db6e640624205aff51d3cc5f44cb6
+  - DB: attempt row #52 (knowledge_search_team, accepted, jti 260db6e640624205aff51d3cc5f44cb6); ledger row #20 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
+- #19 `validator-_delegation_id` [2026-10-17T08:47:05.583Z → 2026-10-17T08:47:05.583Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-- #20 `inject-_delegation_id` [2026-10-17T08:22:37.283Z → 2026-10-17T08:22:38.489Z] request_id=e2-20261017T082234Z-88d80fac
+- #20 `inject-_delegation_id` [2026-10-17T08:47:07.921Z → 2026-10-17T08:47:09.110Z] request_id=e2-20261017T084705Z-96d6e184
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_delegation_id', '_policy_context', 'limit', 'query']; `_delegation_id` sent as injected: yes
-  - signed `_ctx` jti(s): 797b9b2d44d24c00a26b54343e6ebb14
-  - DB: attempt row #40 (knowledge_search_team, accepted, jti 797b9b2d44d24c00a26b54343e6ebb14); ledger row #14 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
-- #21 `validator-_policy_context` [2026-10-17T08:22:38.490Z → 2026-10-17T08:22:38.490Z]
+  - signed `_ctx` jti(s): aec253ff78674348b067dfb389deb950
+  - DB: attempt row #53 (knowledge_search_team, accepted, jti aec253ff78674348b067dfb389deb950); ledger row #21 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
+- #21 `validator-_policy_context` [2026-10-17T08:47:09.110Z → 2026-10-17T08:47:09.110Z]
   - SDK client requests during the attempt: 0 (ArmorIQ not involved)
-- #22 `inject-_policy_context` [2026-10-17T08:22:40.738Z → 2026-10-17T08:22:41.997Z] request_id=e2-20261017T082238Z-cc1fb1ee
+- #22 `inject-_policy_context` [2026-10-17T08:47:11.155Z → 2026-10-17T08:47:12.298Z] request_id=e2-20261017T084709Z-0f4c0327
   - gateway: allow (armoriq_policy_decision); reason: policy allowed the planned call (provisional until E1/E3)
   - SDK: invoke_with_policy returned (no exception)
   - wire: 1 request(s) to the proxy /invoke (HTTP 200); 1 request(s) during the attempt in total; params keys sent: ['_ctx', '_policy_context', 'limit', 'query']; `_policy_context` sent as injected: no (replaced before sending)
-  - signed `_ctx` jti(s): 81a3bca4de6e4ff4b0a04c7097772e05
-  - DB: attempt row #41 (knowledge_search_team, accepted, jti 81a3bca4de6e4ff4b0a04c7097772e05); ledger row #15 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
+  - signed `_ctx` jti(s): dcf2511175914b42bfb734c7ec613f68
+  - DB: attempt row #54 (knowledge_search_team, accepted, jti dcf2511175914b42bfb734c7ec613f68); ledger row #22 (knowledge_search_team, validation_outcome=accepted, execution_status=executed); business-argument hash = planned arguments: yes
 
 ## Result record template
 
