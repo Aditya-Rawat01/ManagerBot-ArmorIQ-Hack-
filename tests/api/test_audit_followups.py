@@ -1467,8 +1467,14 @@ def test_live_dead_pooled_connection_is_replaced() -> None:
         with db.tx() as cursor:
             cursor.execute("SELECT pg_backend_pid()")
             pid = cursor.fetchone()[0]
+        # Kill every other session of this login: the pool may hold more than
+        # one connection, and all of them must be dead for the checkout to matter.
         with psycopg.connect(LIVE_DSN, autocommit=True) as killer:
-            killer.execute("SELECT pg_terminate_backend(%s)", (pid,))
+            killed = killer.execute(
+                "SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity "
+                "WHERE usename = current_user AND pid <> pg_backend_pid()"
+            ).fetchone()[0]
+        assert killed >= 1
         with db.tx() as cursor:
             cursor.execute("SELECT pg_backend_pid()")
             assert cursor.fetchone()[0] != pid
