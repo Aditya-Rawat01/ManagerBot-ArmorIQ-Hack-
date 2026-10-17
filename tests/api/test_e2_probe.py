@@ -229,7 +229,7 @@ def test_rejects_arguments() -> None:
 def test_proxy_shape_is_always_not_tested() -> None:
     (only,) = probe.group_proxy_shape()
     assert only["observed"] == "not tested"
-    assert only["layer"] == "unknown"
+    assert only["layer"] == "not tested"
     assert "no verified" in only["evidence"]
 
 
@@ -362,7 +362,7 @@ class _OfflineToolServer__offline_fake:
 
         from pydantic import ValidationError
 
-        from services.contracts import ToolName, tool_args, tool_spec
+        from services.contracts import tool_args, tool_spec
         from services.toolserver.ledger import ReplayRejection, verify_and_record
         from services.toolserver.security import CtxRejection
 
@@ -647,147 +647,99 @@ def test_row_has_all_evidence_fields() -> None:
     assert "| a | e | o | l | ev |" in table
 
 
-class _FakeScope:
-    def __init__(self, client: "_FakeClient") -> None:
-        self.client = client
+# --- B1: tampering targets the PLANNED step; off-plan stays a separate case --------
 
-    def start_session(self, opts: object = None) -> object:
-        return _FakeSession()
-
-    def resolve(self) -> dict:
-        return {}
+# Injected values: key NAMES may be printed, values never.
+INJECTED_VALUES = ("restricted", "attacker@example.invalid", "dlg-forged-e2", "forged-policy")
 
 
-class _FakeSession:
-    def start_plan(self, tool_calls: object, goal: object = None) -> object:
-        from datetime import UTC, datetime, timedelta
-
-        return SimpleNamespace(
-            plan_id="ap-1",
-            expires_at=datetime.now(UTC) + timedelta(seconds=600),
-            is_expired=False,
-        )
-
-    def close(self) -> None:
-        pass
+def _rows_by_case(record: str) -> dict[str, str]:
+    """`case-id -> table line` from the record (the case id is in each row)."""
+    lines: dict[str, str] = {}
+    for line in record.splitlines():
+        if line.startswith("| ") and "`" in line:
+            case = line.split("`")[1]
+            lines.setdefault(case, line)
+    return lines
 
 
-class _FakeClient:
-    def __init__(self, calls: list) -> None:
-        self.calls = calls
-
-    def for_user(self, email: str) -> _FakeScope:
-        return _FakeScope(self)
-
-    def invoke_with_policy(self, *args: object, **kwargs: object) -> object:
-        self.calls.append(("policy", args, kwargs))
-        return SimpleNamespace(result={"ok": True})
-
-    def invoke(self, *args: object, **kwargs: object) -> object:
-        from armoriq_sdk import exceptions as sdk_exceptions
-
-        self.calls.append(("invoke", args, kwargs))
-        raise sdk_exceptions.IntentMismatchException("not in plan")
+@pytest.mark.parametrize(
+    "key", ["tier", "user_email", "_approvals", "_delegation_id", "_policy_context"]
+)
+def test_validator_rejects_each_injected_key_first(key: str) -> None:
+    """B1: the PlannedToolCall validator refuses the key before any network call."""
+    value = dict(probe.TAMPER_INJECTIONS)[key]
+    item = probe.validator_row(key, value)
+    assert item["case"] == f"validator-{key}"
+    assert item["layer"] == "application_rule"
+    assert "ValidationError" in item["observed"]
+    rendered = probe.render_table([item]) + repr(item)
+    for leaked in INJECTED_VALUES:
+        assert leaked not in rendered
 
 
-def _gateway() -> tuple[object, list]:
-    from apps.api.core.config import Settings
-    from services.authorization.armoriq_gateway import ArmorIQGateway
+def test_tamper_cases_tamper_the_planned_step__offline_fake_sdk() -> None:
+    """B1: every injection reaches `invoke_with_policy` for the PLANNED tool
+    (never the off-plan path), so the SDK's name check cannot be what stops it."""
+    _, record, _, sdk = _offline_run()
+    planned_calls = [keys for _, action, keys in sdk.invoked if action == "knowledge_search_team"]
+    for key in ("tier", "user_email", "_approvals", "_delegation_id"):
+        assert any(key in keys for keys in planned_calls), key
+    # `_policy_context` is always present: the SDK writes its own.
+    assert all("_policy_context" in keys for keys in planned_calls)
+    rows = _rows_by_case(record)
+    for key in ("tier", "user_email", "_approvals", "_delegation_id", "_policy_context"):
+        assert "armoriq_sdk_plan_check" not in rows[f"inject-{key}"]
+    for leaked in INJECTED_VALUES:
+        assert leaked not in record
 
-    settings = Settings(
-        _env_file=None,
-        app_env="test",
-        armoriq_api_key="ak_test",
-        persona_maya_email="maya@example.com",
-        ctx_secret="test-ctx-secret",
+
+def test_forbidden_business_keys_are_rejected_by_the_tool_server__offline_fake_sdk() -> None:
+    """`tier`/`user_email` injected after validation: the tool server's strict
+    schema answers `invalid_arguments` with its own rejected ledger row."""
+    _, record, server, _ = _offline_run()
+    rows = _rows_by_case(record)
+    for key in ("tier", "user_email"):
+        line = rows[f"inject-{key}"]
+        assert "error_code=invalid_arguments" in line
+        assert "tool_server_rule" in line
+    rejected = [
+        row for row in server.ledger_rows if row["validation_outcome"] == "invalid_arguments"
+    ]
+    assert len(rejected) == 2
+    assert all(row["execution_status"] == "rejected_by_tool_server" for row in rejected)
+
+
+def test_forged_underscore_fields_are_stripped__offline_fake_sdk() -> None:
+    """`_approvals`/`_delegation_id`/`_policy_context` grant nothing: the
+    tool server strips them and executes exactly the planned arguments."""
+    _, record, server, _ = _offline_run()
+    planned = {"query": probe.E2_QUERY, "limit": probe.E2_LIMIT}
+    team_runs = [args for tool, args in server.executions if tool == "knowledge_search_team"]
+    assert team_runs.count(planned) >= 4  # baseline + three forged-field injections
+    assert not any(key.startswith("_") for args in team_runs for key in args)
+    rows = _rows_by_case(record)
+    for key in ("_approvals", "_delegation_id", "_policy_context"):
+        assert "status=executed" in rows[f"inject-{key}"]
+
+
+def test_changed_query_answers_server_side_argument_binding__offline_fake_sdk() -> None:
+    """A changed query under a valid plan that reaches the tool server and
+    executes disproves server-side argument binding (recorded as such)."""
+    _, record, server, _ = _offline_run()
+    assert ("knowledge_search_team", {"query": probe.TAMPERED_QUERY, "limit": probe.E2_LIMIT}) in (
+        server.executions
     )
-    calls: list = []
-    gateway = ArmorIQGateway(
-        settings,
-        client_factory=lambda member_id: _FakeClient(calls),
-        ctx_signer=lambda fields, secret: f"signed-{fields['jti']}",
-    )
-    return gateway, calls
+    assert "status=executed" in _rows_by_case(record)["tamper-query"]
+    assert "arguments: DISPROVEN" in record
 
 
-def _maya_ctx_plan() -> tuple[object, object]:
-    from apps.api.identity import mask_email
-    from services.contracts import (
-        AppRole,
-        AuthenticatedUser,
-        EntryPoint,
-        PersonaKey,
-    )
-
-    user = AuthenticatedUser(
-        member_id="m-maya",
-        persona=PersonaKey.MAYA,
-        display_name="Maya",
-        app_role=AppRole.MANAGER,
-        masked_email=mask_email("maya@example.com"),
-    )
-    from datetime import UTC, datetime
-
-    from services.contracts import (
-        DEFAULT_WORKSPACE_ID,
-        McpEndpoint,
-        PlannedToolCall,
-        PlanProposal,
-        RequestContext,
-    )
-
-    ctx = RequestContext(
-        request_id="r-e2",
-        trace_id="t-e2",
-        workspace_id=DEFAULT_WORKSPACE_ID,
-        requester=user,
-        entry_point=EntryPoint.WEB,
-        received_at=datetime.now(UTC),
-    )
-    plan = PlanProposal(
-        summary="E2 probe plan",
-        steps=[
-            PlannedToolCall(
-                step_index=0,
-                mcp=McpEndpoint.MEMORY,
-                tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
-                arguments={"query": "quokka", "limit": 3},
-                purpose="E2 probe step",
-            )
-        ],
-    )
-    return ctx, plan
-
-
-def test_off_plan_rows_use_gateway_verdicts() -> None:
-    async def run() -> list[dict[str, str]]:
-        gateway, calls = _gateway()
-        ctx, plan = _maya_ctx_plan()
-        handle = await gateway.start_plan(ctx, plan)
-        assert handle.decision is None
-        rows = await probe.group_off_plan(gateway, handle, ctx)
-        rows.extend(await probe.group_tamper(gateway, handle, ctx))
-        return rows, calls
-
-    rows, calls = asyncio.run(run())
-    assert len(rows) == 5  # 2 off-plan + 3 tamper
-    for item in rows:
-        assert item["layer"] == "armoriq_sdk_plan_check"
-        assert "block" in item["observed"]
-    # Only the SDK plan-check path ran; the policy/tool-server path never did.
-    assert [name for name, *_ in calls] == ["invoke"] * 5
-
-
-def test_tamper_values_never_printed() -> None:
-    async def run() -> list[dict[str, str]]:
-        gateway, _ = _gateway()
-        ctx, plan = _maya_ctx_plan()
-        handle = await gateway.start_plan(ctx, plan)
-        return await probe.group_tamper(gateway, handle, ctx)
-
-    rows = asyncio.run(run())
-    table = probe.render_table(rows)
-    # Smuggled keys and values stay out of the report; only honest labels remain.
-    for leaked in ("_approvals", "_delegation_id", "_policy_context", "restricted"):
-        assert leaked not in table
-    assert "forged underscore fields" in table
+def test_off_plan_cases_are_separate_and_never_reach_the_proxy__offline_fake_sdk() -> None:
+    _, record, server, sdk = _offline_run()
+    rows = _rows_by_case(record)
+    for case in ("offplan-confidential", "offplan-honeypot"):
+        assert "armoriq_sdk_plan_check" in rows[case]
+    proxied = {action for _, action, _ in sdk.invoked}
+    assert proxied == {"knowledge_search_team"}
+    assert not server.egress_rows
+    assert all(tool != "send_external_message" for tool, _ in server.executions)

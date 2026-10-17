@@ -310,72 +310,297 @@ def row(
     }
 
 
-async def group_off_plan(gateway: Any, handle: Any, ctx: Any) -> list[dict[str, str]]:
-    """Group 1 (§9.1): off-plan attempts through the SDK plan-check path."""
+E2_TOOL = "knowledge_search_team"
+E2_QUERY = e1.E1_QUERY  # the P2-03 seed phrase (team tier)
+E2_LIMIT = e1.E1_LIMIT
+# A different, equally harmless team-tier query: the argument-tamper case.
+TAMPERED_QUERY = "quokka release checklist"
+# Injected AFTER validation into the planned step (key, value). Key names may
+# be printed; values never are.
+TAMPER_INJECTIONS: tuple[tuple[str, Any], ...] = (
+    ("tier", "restricted"),
+    ("user_email", "attacker@example.invalid"),
+    # 999 is what the SDK itself sends on an approved retry (client.py:1765).
+    ("_approvals", 999),
+    ("_delegation_id", "dlg-forged-e2"),
+    ("_policy_context", {"forged-policy": True, "allow": True}),
+)
+_TAMPER_EXPECTED = {
+    "tier": "tool server `invalid_arguments` (strict schema), rejected row, no execution",
+    "user_email": "tool server `invalid_arguments` (strict schema), rejected row, no execution",
+    "_approvals": "stripped by the tool server (no effect): executes exactly as planned",
+    "_delegation_id": "stripped by the tool server (no effect): executes exactly as planned",
+    "_policy_context": (
+        "overwritten by the SDK before sending, stripped by the tool server: "
+        "executes exactly as planned"
+    ),
+}
+
+
+def planned_arguments(query: str = E2_QUERY) -> dict[str, Any]:
+    return {"query": query, "limit": E2_LIMIT}
+
+
+def tampered_plan(plan: Any, arguments: Mapping[str, Any]) -> Any:
+    """The same one-step plan with step 0's arguments replaced, built with
+    `model_construct` so the PlannedToolCall validator does NOT run: what a
+    compromised caller could hand the gateway after validation."""
+    from services.contracts import PlannedToolCall, PlanProposal
+
+    step = plan.steps[0]
+    forged = PlannedToolCall.model_construct(
+        step_index=step.step_index,
+        mcp=step.mcp,
+        tool=step.tool,
+        arguments=dict(arguments),
+        purpose=step.purpose,
+    )
+    return PlanProposal.model_construct(
+        summary=plan.summary,
+        steps=[forged],
+        escalation_user_confirmed=False,
+        matched_topic_rule_id=None,
+    )
+
+
+async def start_case_plan(
+    gateway: Any, settings: Any, case: str, attempt: str, expected: str
+) -> tuple[Any, Any, Any, dict[str, Any] | None]:
+    """A FRESH one-step team plan for one case (no step is ever invoked twice
+    under one plan, so step reuse cannot confound a result). Returns (ctx,
+    plan, handle, failure_row)."""
+    ctx, plan = e1.build_maya_request(settings)
+    handle = await gateway.start_plan(ctx, plan)
+    if handle.decision is None:
+        return ctx, plan, handle, None
+    decision = handle.decision
+    return (
+        ctx,
+        plan,
+        handle,
+        row(
+            group="setup",
+            attempt=attempt,
+            expected=expected,
+            observed=f"not run: plan/mint {decision.outcome.value} ({decision.source.value})",
+            layer="unknown",
+            evidence="gateway log",
+            case=case,
+            request_id=ctx.request_id,
+        ),
+    )
+
+
+async def group_off_plan(gateway: Any, settings: Any) -> list[dict[str, Any]]:
+    """Group 1 (§9.1): unplanned tool NAMES under a team-only plan.
+
+    `attempt_off_plan` calls the SDK's plain `invoke`, which compares the
+    action name with the plan's steps before any network call
+    (client.py:804-819); the Merkle proof covers only `/steps/[i]/action`,
+    so this group tests names, never arguments (that is group 3).
+    """
     from services.contracts import ToolName
 
+    attempts = (
+        ("offplan-confidential", ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL, planned_arguments()),
+        (
+            "offplan-honeypot",
+            ToolName.SEND_EXTERNAL_MESSAGE,
+            {"message": "E2 probe: must never be delivered"},
+        ),
+    )
+    expected = "BLOCK armoriq_sdk_plan_check before any network call; never executed"
+    ctx, _, handle, failed = await start_case_plan(
+        gateway, settings, attempts[0][0], "off-plan attempts", expected
+    )
     rows = []
-    for tool, args in (
-        (ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL, {"query": "runway", "limit": 3}),
-        (ToolName.SEND_EXTERNAL_MESSAGE, {"message": "hello"}),
-    ):
+    for case, tool, args in attempts:
+        attempt = f"unplanned `{tool.value}` under a knowledge_search_team-only plan"
+        if failed is not None:
+            rows.append({**failed, "case": case, "attempt": attempt})
+            continue
         decision = await gateway.attempt_off_plan(handle, tool, dict(args), ctx)
         rows.append(
             row(
-                group="off-plan-sdk",
-                attempt=f"{tool.value} under a team-only plan",
-                expected="BLOCK armoriq_sdk_plan_check before any network call",
-                observed=f"{decision.outcome.value} {decision.source.value}",
+                group="off-plan",
+                attempt=attempt,
+                expected=expected,
+                observed=f"{decision.outcome.value} ({decision.source.value})",
                 layer=decision.source.value,
-                evidence=(
-                    "gateway log (mismatch exception type); operator confirms "
-                    "Render log + ledger/attempt absence by request_id/jti"
-                ),
+                evidence="gateway decision (SDK mismatch exception)",
+                case=case,
+                request_id=ctx.request_id,
+                tool=tool.value,
             )
         )
     return rows
 
 
-async def group_tamper(gateway: Any, handle: Any, ctx: Any) -> list[dict[str, str]]:
-    """Group 3 (§9.3): forbidden keys and forged underscore fields via off-plan."""
-    from services.contracts import ToolName
+def validator_row(key: str, value: Any) -> dict[str, Any]:
+    """§9.3 first half: the PlannedToolCall validator on the injected key.
 
-    rows = []
-    cases = (
-        ("forbidden tier key", {"query": "runway", "limit": 3, "tier": "restricted"}),
-        ("forbidden identity key", {"query": "runway", "limit": 3, "user_email": "x"}),
-        (
-            "forged underscore fields",
-            {
-                "query": "runway",
-                "limit": 3,
-                "_approvals": "forged",
-                "_delegation_id": "forged",
-                "_policy_context": "forged",
-            },
-        ),
+    Local only (no network). Prints the pydantic error types, never the
+    offending value.
+    """
+    from pydantic import ValidationError
+
+    from services.contracts import McpEndpoint, PlannedToolCall, ToolName
+
+    attempt = f"planned step with `{key}` added, built through the PlannedToolCall validator"
+    expected = "rejected by the validator (application_rule) before any network call"
+    try:
+        PlannedToolCall(
+            step_index=0,
+            mcp=McpEndpoint.MEMORY,
+            tool=ToolName.KNOWLEDGE_SEARCH_TEAM,
+            arguments={**planned_arguments(), key: value},
+            purpose="E2 tamper probe",
+        )
+    except ValidationError as exc:
+        kinds = ", ".join(sorted({str(error.get("type")) for error in exc.errors()}))
+        return row(
+            group="tamper",
+            attempt=attempt,
+            expected=expected,
+            observed=f"rejected locally: ValidationError ({kinds})",
+            layer="application_rule",
+            evidence="PlannedToolCall validator (services/contracts/models.py)",
+            case=f"validator-{key}",
+            key=key,
+        )
+    return row(
+        group="tamper",
+        attempt=attempt,
+        expected=expected,
+        observed="ACCEPTED by the validator (unexpected)",
+        layer="unknown",
+        evidence="none",
+        case=f"validator-{key}",
+        key=key,
     )
-    for label, args in cases:
-        decision = await gateway.attempt_off_plan(
-            handle, ToolName.KNOWLEDGE_SEARCH_CONFIDENTIAL, dict(args), ctx
+
+
+def invoke_layer(described: Mapping[str, Any], *, strips: bool = False) -> str:
+    """Layer for a tampered planned invoke, from what the call returned.
+
+    A tool-server code names the tool server; an executed call with forged
+    `_` keys means the tool server stripped them (`strips`); an executed call
+    otherwise means no layer stopped it.
+    """
+    status = described.get("invocation_status")
+    if status == "rejected_by_tool_server":
+        return "tool_server_rule"
+    if status == "executed":
+        return "tool_server_rule (stripped `_` keys)" if strips else "none (executed)"
+    if status in (None, "not_reached"):
+        return str(described.get("decision_source"))
+    return "unknown"
+
+
+def _invoke_observed(described: Mapping[str, Any]) -> str:
+    return (
+        f"ArmorIQ: {described['decision_outcome']} ({described['decision_source']}); "
+        f"tool server: status={described['invocation_status']} "
+        f"error_code={described['error_code']} "
+        f"ledger_entry_id={described['ledger_entry_id']}"
+    )
+
+
+async def run_tampered_invoke(
+    gateway: Any,
+    settings: Any,
+    *,
+    case: str,
+    attempt: str,
+    expected: str,
+    arguments: Mapping[str, Any],
+    strips: bool,
+) -> dict[str, Any]:
+    """Invoke step 0 of a fresh valid plan with ``arguments`` swapped in
+    (`gateway.invoke_step(handle, 0, ctx, tampered_plan)`): the SDK finds the
+    step by its (unchanged) action name, so the request goes to the proxy."""
+    ctx, plan, handle, failed = await start_case_plan(gateway, settings, case, attempt, expected)
+    if failed is not None:
+        return failed
+    outcome = await gateway.invoke_step(handle, 0, ctx, tampered_plan(plan, arguments))
+    described = e1.describe_outcome(outcome)
+    return row(
+        group="tamper",
+        attempt=attempt,
+        expected=expected,
+        observed=_invoke_observed(described),
+        layer=invoke_layer(described, strips=strips),
+        evidence="gateway result + tool-server code / `_meta.ledger_entry_id`",
+        case=case,
+        request_id=ctx.request_id,
+        jti=described["jti"],
+        status=described["invocation_status"],
+        error_code=described["error_code"],
+        ledger_entry_id=described["ledger_entry_id"],
+        business_arguments={k: v for k, v in arguments.items() if not k.startswith("_")},
+    )
+
+
+async def group_tamper(gateway: Any, settings: Any) -> list[dict[str, Any]]:
+    """Group 3 (§9.3): tampering with the PLANNED step under a valid plan.
+
+    The changed query asks the server-side argument-binding question. Each
+    injected key is first put through the validator (application_rule),
+    then injected after validation and invoked, recording both the ArmorIQ
+    decision and the tool-server result.
+    """
+    rows = [
+        await run_tampered_invoke(
+            gateway,
+            settings,
+            case="tamper-query",
+            attempt="planned step invoked with a CHANGED query (same tool, same tier)",
+            expected=(
+                "ArmorIQ refuses changed arguments (proxy evidence), or the changed query "
+                "executes: server-side argument binding disproven"
+            ),
+            arguments=planned_arguments(TAMPERED_QUERY),
+            strips=False,
         )
+    ]
+    for key, value in TAMPER_INJECTIONS:
+        rows.append(validator_row(key, value))
         rows.append(
-            row(
-                group="tamper",
-                attempt=f"off-plan confidential search with {label}",
-                expected="BLOCK before execution; forged `_` fields grant nothing",
-                observed=f"{decision.outcome.value} {decision.source.value}",
-                layer=decision.source.value,
-                evidence=(
-                    "gateway log; tool-server stripping proven offline by "
-                    "P1-04 tests, live by server log trace_metadata"
-                ),
+            await run_tampered_invoke(
+                gateway,
+                settings,
+                case=f"inject-{key}",
+                attempt=f"`{key}` injected into the planned step after validation",
+                expected=_TAMPER_EXPECTED[key],
+                arguments={**planned_arguments(), key: value},
+                strips=key.startswith("_"),
             )
         )
     return rows
 
 
-def group_proxy_shape() -> list[dict[str, str]]:
+def argument_binding_verdict(rows: list[dict[str, Any]]) -> str:
+    """Server-side argument binding, from the changed-query case only."""
+    item = next((entry for entry in rows if entry.get("case") == "tamper-query"), None)
+    if item is None or (item.get("status") is None and item.get("layer") == "unknown"):
+        return "arguments: NOT DETERMINED (the changed-query case did not complete)"
+    if item.get("status") == "executed":
+        return (
+            "arguments: DISPROVEN: the proxy forwarded a changed query under a valid plan "
+            f"and the tool server executed it (ledger entry {item.get('ledger_entry_id')})"
+        )
+    if item.get("status") == "rejected_by_tool_server":
+        return (
+            "arguments: NOT DETERMINED: the changed query reached the tool server and was "
+            f"rejected there ({item.get('error_code')}), not by ArmorIQ"
+        )
+    return (
+        "arguments: NOT DETERMINED from the gateway label alone "
+        f"({item.get('observed')}); see the wire evidence"
+    )
+
+
+def group_proxy_shape() -> list[dict[str, Any]]:
     """Group 2 (§9.2): recorded not-tested — no verified shape exists."""
     return [
         row(
@@ -383,8 +608,9 @@ def group_proxy_shape() -> list[dict[str, str]]:
             attempt="direct proxy off-plan request bypassing the SDK check",
             expected="not tested absent a verified request shape",
             observed="not tested",
-            layer="unknown",
+            layer="not tested",
             evidence="none: no verified direct-proxy shape exists in-tree (Day-1 doc rule)",
+            case="proxy-shape",
         )
     ]
 
@@ -613,18 +839,26 @@ def group_direct(
     ]
 
 
-def render_table(rows: list[dict[str, str]]) -> str:
-    header = "| attempt | expected | observed | enforcing layer | evidence reference |"
+def _cell(value: Any) -> str:
+    return str(value).replace("|", "/").replace("\n", " ")
+
+
+def render_table(rows: list[dict[str, Any]]) -> str:
+    """One Markdown row per attempt; the case id leads the attempt cell."""
+    header = "| # | attempt | expected | observed | enforcing layer | evidence reference |"
     lines = [
         "### E2 evidence rows (one per attempt)",
         "",
         header,
-        "|---|---|---|---|---|",
+        "|---|---|---|---|---|---|",
     ]
-    for item in rows:
+    for number, item in enumerate(rows, start=1):
+        attempt = _cell(item["attempt"])
+        if item.get("case"):
+            attempt = f"`{item['case']}` {attempt}"
         lines.append(
-            f"| {item['attempt']} | {item['expected']} | {item['observed']} | "
-            f"{item['layer']} | {item['evidence']} |"
+            f"| {number} | {attempt} | {_cell(item['expected'])} | {_cell(item['observed'])} | "
+            f"{_cell(item['layer'])} | {_cell(item['evidence'])} |"
         )
     return "\n".join(lines)
 
@@ -732,34 +966,17 @@ async def run_probe(
     finally:
         if direct_client is None:
             client.close()
-    ctx, plan = e1.build_maya_request(settings)
-    handle = await gateway.start_plan(ctx, plan)
-    if handle.decision is not None:
-        blocked = e1.describe_outcome(
-            type(
-                "Outcome",
-                (),
-                {"decision": handle.decision, "invocation": None},
-            )()
-        )
-        return 0, "\n".join(
-            [
-                "### E2 — off-plan and tampered-call enforcement",
-                f"- Plan/mint: {blocked['decision_outcome']} "
-                f"({blocked['decision_source']}); no attempts ran.",
-                "- Outcome: operator-assigned in docs/EXPERIMENTS.md.",
-            ]
-        )
-    rows.extend(await group_off_plan(gateway, handle, ctx))
-    rows.extend(await group_tamper(gateway, handle, ctx))
+    rows.extend(await group_off_plan(gateway, settings))
     rows.extend(group_proxy_shape())
+    rows.extend(await group_tamper(gateway, settings))
     report = [
         "### E2 — off-plan and tampered-call enforcement",
-        f"- Request: {ctx.request_id} (Maya, team-only plan)",
+        "- Requester: Maya (team-only one-step plans; a fresh plan per invoked case)",
         "- Server-side zero-execution proof: operator correlates each "
         "request_id/jti via Render log + Ledger.get_by_jti + tool_call_attempts; "
         "this probe asserts no local execution only.",
-        "- Server-side plan binding: not tested (no verified shape).",
+        "- Server-side plan binding: tool names: not tested (no verified direct-proxy "
+        "shape; the SDK stops unplanned names client-side); " + argument_binding_verdict(rows),
         "",
         render_table(rows),
     ]
