@@ -141,7 +141,8 @@ begin, cannot be accepted), or `defer` (can be decided later).
 4. The backend **refuses** a `store this` (`knowledge_save_team_note`)
    `application_rule` in a thread where above-team-tier evidence was
    delivered — a tier-purity rule at the planner, not in the tool server.
-5. Migration **0012** (claimed on issue #24 before coding) encodes (1) as a
+5. Migration **0013** (claimed on issue #24 before coding as 0012; renumbered
+   when main's P2-10 follow-up took 0012 — re-claim on #24) encodes (1) as a
    schema invariant: `team_notes.tier TEXT NOT NULL DEFAULT 'team' CHECK
    (tier IN ('team'))`, plus `provenance` and `approved_by_member_id` /
    `approved_at` columns (PRD §8.1). `team_notes` is toolserver-exclusive, so
@@ -236,7 +237,7 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
 
 ### D-17 — Does `create_followup_task` ship?
 
-**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI.
+**RESOLVED 14 Oct 2026 → ADR-024:** ships only if implemented and tested by 15 Oct afternoon; otherwise removed from the policy and UI. **Outcome: ships** (P2-10, PR #73; recorded under ADR-024).
 
 - Optional (PRD §6.2). Arch §6.2: if not fully implemented and tested, remove it
   from the policy and UI.
@@ -319,6 +320,8 @@ elevated search stays PRD §5.2's "confirm a new request" (P3-02/P3-04).
 - Decider: `samarth-chawla`. Needed before **P1-08**. Blocking: **finish**.
 
 ### D-27 — Where the Socket Mode client runs
+
+**RESOLVED 17 Oct 2026 by `VTCodeCraft` ([issue #26](https://github.com/Aditya-Rawat01/ManagerBot-ArmorIQ-Hack-/issues/26); no ADR):** inside the API process. The FastAPI lifespan starts and stops the Slack Socket Mode client (same process and Render service as the API, sharing settings and the backend database pool), with a single uvicorn worker. It is disabled cleanly when the Slack tokens (or the P3-04 orchestrator handle) are missing, and API startup and `/health` never depend on it: any start failure is logged by exception class and the API keeps serving HTTP. Implemented in P3-05 (PR #78, `services/slack_socket/app.py`, `apps/api/main.py`). The live smoke test (mention + DM reply, duplicate processed once, confidential → DM only) is part of CP-5 (#44).
 
 - Arch §2: "One modular FastAPI backend". Socket Mode keeps a long-lived
   websocket, which affects hosting (D-07).

@@ -93,6 +93,14 @@ docker compose config | grep -n "DATABASE_URL"   # names only in output below
 `DATABASE_URL_MIGRATE` must appear only on `migrate`; no backend/toolserver
 DSN cross-over. Never paste expanded secret values into logs or PRs.
 
+`ARMORIQ_OBSERVABILITY` (in the `ARMORIQ_*` row) controls the armoriq-sdk
+telemetry upload to ArmorIQ. Compose defaults it to `false`, and the app
+setting also defaults to `false`. The gateway then disables the SDK shipper
+for each session, whatever the container environment says. Leave it `false`
+unless the security steward approves opting in. Note that the SDK reads only
+the process environment, never `.env`, which is why the switch lives in the
+app setting (`docs/SECURITY.md` "ArmorIQ SDK telemetry").
+
 Known deviation (flagged, not silent): the P1-11 task file §9 sketches
 `env_file: .env` for `api`/`toolserver`, but that cannot satisfy the task's
 own acceptance criteria (§10: MIGRATE only on `migrate`, no cross-over) or
@@ -197,6 +205,7 @@ All run as non-root (`appuser` / `node` / `devuser`; verify with
 | `MCP_ALLOWED_HOSTS` | `toolserver:8100,localhost:8100,...` | public hostname only |
 | Diagnostics | `true` locally, set explicitly by compose (exercise the MCP path) | `false` (image default; only product tools listed) |
 | Database | local `db` service | Neon (separate roles) |
+| ArmorIQ SDK telemetry | off (`ARMORIQ_OBSERVABILITY` defaults to `false`) | off (app default; do not set `true` without the steward) |
 | Secrets | root `.env` (untracked) | Render secret store |
 
 Docker proves the code runs and the checks pass. It never proves ArmorIQ

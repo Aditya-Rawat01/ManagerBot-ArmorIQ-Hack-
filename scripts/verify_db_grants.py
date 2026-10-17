@@ -16,7 +16,10 @@ INSERT attempts; the toolserver role must reach the knowledge tables and
 SELECT attempts; append-only audit events must not be deletable through
 their plan (0009: the event tables' plan FKs are ON DELETE RESTRICT, checked
 in the catalog and, when a seeded member exists, by a backend DELETE inside
-a rolled-back transaction). Each check runs in its own transaction with the
+a rolled-back transaction). The P2-10 workspace tables (0005/0012): the
+backend can neither SELECT nor INSERT ``tasks`` or ``egress_sink``; the
+toolserver can SELECT and INSERT both but never UPDATE or DELETE either.
+Each check runs in its own transaction with the
 toolserver db helper's ``SET LOCAL statement_timeout``. Prints table names
 and results only — DSNs are never printed or logged.
 
@@ -57,6 +60,18 @@ BACKEND_ALLOWED_TABLES = (
 )
 KNOWLEDGE_TABLES = PROTECTED_TABLES
 EVENT_TABLES = ("request_events", "decision_events", "delivery_events")
+# P2-10 workspace tables -> a minimal INSERT the backend must be refused
+# (privileges are checked before any foreign key, so no seeded rows needed).
+WORKSPACE_TABLE_INSERTS = {
+    "tasks": (
+        "INSERT INTO public.tasks (workspace_id, title, idempotency_key) "
+        "VALUES ('grant_check', 'grant_check', 'grant_check') RETURNING id"
+    ),
+    "egress_sink": (
+        "INSERT INTO public.egress_sink (workspace_id, message) "
+        "VALUES ('grant_check', 'grant_check') RETURNING id"
+    ),
+}
 # P2-08 approved views (D-11): synthetic company data, toolserver reads the
 # views only (views run with their owner's privileges; no base-table grant).
 COMPANY_PROJECTS_TABLE = "company_projects"
@@ -153,6 +168,60 @@ def _check_event_fks_restrict(report: Report, conn: object) -> None:
             report.ok(f"FK {table}.plan_id -> plans is ON DELETE RESTRICT")
         else:
             report.bad(f"FK {table}.plan_id -> plans delete actions {actions} (expected ['r'])")
+
+
+def _expect_privilege(report: Report, conn: object, label: str, table: str, privilege: str) -> None:
+    """Catalog check for a privilege whose statement needs seeded rows to run
+    (an INSERT that must satisfy foreign keys): ``has_table_privilege`` for
+    the session user, no data written."""
+    from services.toolserver import db
+
+    try:
+        db.apply_statement_timeout(conn)
+        row = db.fetch_one(conn, "SELECT has_table_privilege(%s, %s)", (table, privilege))
+    except Exception as exc:
+        report.bad(f"ALLOW {label} (unexpected {type(exc).__name__})")
+    else:
+        if row is not None and row[0] is True:
+            report.ok(f"ALLOW {label} (has_table_privilege)")
+        else:
+            report.bad(f"ALLOW {label} (privilege missing)")
+    finally:
+        conn.rollback()
+
+
+def _check_workspace_tables(report: Report, conn: object, ts_conn: object) -> None:
+    """P2-10 tables (0005 + 0012): backend nothing; toolserver SELECT + INSERT
+    only (the honeypot sink and follow-up tasks are never rewritten)."""
+    for table, insert_sql in WORKSPACE_TABLE_INSERTS.items():
+        _expect_denied(
+            report,
+            conn,
+            f"backend SELECT {table}",
+            f"SELECT 1 FROM public.{table} LIMIT 1",  # noqa: S608 -- table from module allowlist, never user input,
+        )
+        _expect_denied(report, conn, f"backend INSERT {table}", insert_sql)
+        _expect_allowed(
+            report,
+            ts_conn,
+            f"toolserver SELECT {table}",
+            f"SELECT 1 FROM public.{table} LIMIT 1",  # noqa: S608 -- table from module allowlist, never user input,
+        )
+        _expect_privilege(
+            report, ts_conn, f"toolserver INSERT {table}", f"public.{table}", "INSERT"
+        )
+        _expect_denied(
+            report,
+            ts_conn,
+            f"toolserver UPDATE {table}",
+            f"UPDATE public.{table} SET workspace_id = workspace_id WHERE id = -1",  # noqa: S608 -- table from module allowlist, never user input,
+        )
+        _expect_denied(
+            report,
+            ts_conn,
+            f"toolserver DELETE {table}",
+            f"DELETE FROM public.{table} WHERE id = -1",  # noqa: S608 -- table from module allowlist, never user input,
+        )
 
 
 def _check_plan_delete_keeps_events(report: Report, conn: object) -> None:
@@ -299,6 +368,7 @@ def verify(backend_dsn: str, toolserver_dsn: str) -> Report:
                 )
             _check_event_fks_restrict(report, conn)
             _check_plan_delete_keeps_events(report, conn)
+            _check_workspace_tables(report, conn, ts_conn)
             for table in KNOWLEDGE_TABLES:
                 _expect_allowed(
                     report,

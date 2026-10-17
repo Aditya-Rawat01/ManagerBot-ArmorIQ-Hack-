@@ -863,7 +863,7 @@ def test_recent_requests_one_query_and_tolerates_missing_origin() -> None:
         fetchall=[
             [
                 ("req-1", "trace-1", origin_payload(), NOW),
-                ("req-2", "trace-2", None, NOW),  # no request_received event
+                ("req-2", "trace-2", None, NOW),  # origin payload unreadable
                 ("req-3", "trace-3", "corrupt", NOW),
             ]
         ]

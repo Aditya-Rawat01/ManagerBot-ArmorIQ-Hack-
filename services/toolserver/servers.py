@@ -45,7 +45,7 @@ from services.contracts import (
     tool_spec,
 )
 from services.contracts.tool_args import TOOL_ARGUMENT_MODELS
-from services.toolserver import __version__
+from services.toolserver import __version__, tools_memory, tools_workspace
 from services.toolserver.ledger import (
     ACCEPTED,
     DuplicateJti,
@@ -70,7 +70,7 @@ from services.toolserver.schemas import (
     parse_tool_arguments,
 )
 from services.toolserver.security import REPLAY, CtxRejection, VerifiedCall, verify_tool_call
-from services.toolserver.tools_memory import PRODUCT_TOOLS, ProductTool
+from services.toolserver.tools_memory import ProductTool
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +116,15 @@ _TIER_RANK: dict[DataTier, int] = {
 def check_tier_ceiling(tool: ToolName, verified: VerifiedCall) -> None:
     """P2-08 per-role ceiling (SHARED_INTERFACES §6) from the verified `_ctx`
     role, independent of ArmorIQ (R-26): manager → restricted, senior →
-    confidential, junior → team. Tier-less tools (P2-09/P2-10) authorize in
-    their own handlers. Unknown roles fail closed.
+    confidential, junior → team. Unknown roles fail closed.
+
+    Tier-less tools return here unchecked. P2-09's Maya-only maintenance
+    tools check the manager role in their own handlers. The P2-10 workspace
+    tools (`send_external_message`, `create_followup_task`) intentionally
+    have NO tool-server role check, here or in their handlers: ArmorIQ policy
+    is the deciding layer for them (ADR-025: it must BLOCK the honeypot for
+    every persona, and that BLOCK is the demo's evidence), so no application
+    rule may pre-empt or mask the ArmorIQ decision.
 
     Follow-up (review M3, not implemented): the backend-signed `app_role` is
     trusted for the `_ctx` lifetime (≤ 900 s). Cross-checking it against
@@ -168,11 +175,14 @@ def _schema_tool(spec: ProductTool) -> Tool:
 
 
 def dispatch_table(endpoint: McpEndpoint) -> dict[ToolName, ProductTool]:
-    """Implemented product tools served by `endpoint` (all behind dispatch)."""
+    """Implemented product tools served by `endpoint` (all behind dispatch).
+
+    Merged live from both tool modules on every call, so tests may swap a
+    handler via monkeypatch and P2-10-style registration stays one line.
+    """
+    combined = {**tools_memory.PRODUCT_TOOLS, **tools_workspace.PRODUCT_TOOLS}
     return {
-        name: spec
-        for name, spec in PRODUCT_TOOLS.items()
-        if tool_spec(spec.name).endpoint is endpoint
+        name: spec for name, spec in combined.items() if tool_spec(spec.name).endpoint is endpoint
     }
 
 

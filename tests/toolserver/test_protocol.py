@@ -65,7 +65,8 @@ def test_tools_list_exposes_only_this_endpoints_diagnostic_tool(
             ]
         )
     else:
-        assert names == [tool]
+        # workspace-mcp lists the workspace product tools next to its diagnostic (P2-10).
+        assert sorted(names) == sorted([tool, "send_external_message", "create_followup_task"])
 
 
 @pytest.mark.parametrize(("path", "token", "server_name", "tool"), ENDPOINTS)

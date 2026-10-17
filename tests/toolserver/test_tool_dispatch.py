@@ -30,7 +30,7 @@ from services.contracts import (
     ToolName,
     tool_spec,
 )
-from services.toolserver import main, servers
+from services.toolserver import main, tools_memory
 from services.toolserver.ledger import (
     DuplicateJti,
     LedgerEntry,
@@ -306,6 +306,15 @@ def test_every_tool_name_is_dispatched_never_forwarded(tool: ToolName) -> None:
                 "superseded_by_record_id": "2",
                 "reason": "newer note",
             }
+        elif tool.value == "send_external_message":
+            arguments = {"destination": "synthetic_sink", "message": "x"}
+        elif tool.value == "create_followup_task":
+            arguments = {
+                "title": "T",
+                "owner": "sam",
+                "priority": "low",
+                "idempotency_key": "k",
+            }
         else:
             arguments = {"query": "q", "limit": 1}
         with dev_client() as client:
@@ -339,12 +348,15 @@ def test_unregistered_tool_names_are_refused_not_forwarded(
         return server
 
     monkeypatch.setattr(main, "build_server", build_with_rogue_tool)
-    # servers.py imports PRODUCT_TOOLS by name; dropping the entry there
+    # dispatch_table() merges tools_memory.PRODUCT_TOOLS live on every call
+    # (never a copy in servers.py), so dropping the entry at the module
     # reproduces "listed on the server but unregistered in dispatch".
     remaining = {
-        k: v for k, v in servers.PRODUCT_TOOLS.items() if k is not ToolName.KNOWLEDGE_SAVE_TEAM_NOTE
+        k: v
+        for k, v in tools_memory.PRODUCT_TOOLS.items()
+        if k is not ToolName.KNOWLEDGE_SAVE_TEAM_NOTE
     }
-    monkeypatch.setattr(servers, "PRODUCT_TOOLS", remaining)
+    monkeypatch.setattr(tools_memory, "PRODUCT_TOOLS", remaining)
     ledger = FakeLedger()
     with fake_ledger_client(monkeypatch, ledger) as client:
         message = call(
@@ -681,12 +693,6 @@ def test_errors_do_not_leak_details() -> None:
             body = call(client, arguments)
             assert result_text(body)["code"] == code
             assert secret_value not in json.dumps(body)
-
-
-def test_workspace_endpoint_has_no_product_tools() -> None:
-    with dev_client() as client:
-        names = [t["name"] for t in list_tools(client, "/workspace/mcp", WORKSPACE_TOKEN)]
-    assert not set(names) & {name.value for name in ToolName}
 
 
 @pytest.mark.parametrize(

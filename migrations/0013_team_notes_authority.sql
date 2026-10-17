@@ -1,6 +1,10 @@
--- 0012_team_notes_authority.sql — P2-09: draft authority metadata on team_notes.
+-- 0013_team_notes_authority.sql — P2-09: draft authority metadata on team_notes.
 --
--- Claimed as migration 0012 on issue #24 BEFORE coding. `team_notes` is a
+-- Claimed as migration 0012 on issue #24 BEFORE coding; renumbered to 0013
+-- when the merge of main (P2-10 follow-up, claimed 0012 on issue #23, pushed
+-- first) left two 0012 files. `migrate.py` refuses duplicate numbers, and
+-- only this file (the later claim) moved — the re-claim is recorded on #24.
+-- `team_notes` is a
 -- toolserver-exclusive table (SHARED_INTERFACES DB ledger: backend has no
 -- SELECT), so this is no shared-interface change and needs no ICR; the
 -- ADR-023 `draft_review_queue` columns are untouched.

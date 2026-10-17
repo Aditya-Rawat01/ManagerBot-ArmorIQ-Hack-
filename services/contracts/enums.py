@@ -189,3 +189,7 @@ class AuditEventType(StrEnum):
     DELIVERY_ATTEMPTED = "delivery_attempted"
     DELIVERY_SUCCEEDED = "delivery_succeeded"
     DELIVERY_FAILED = "delivery_failed"
+    # A Slack event dropped before it became a request (P3-05 ICR): metadata
+    # only (event/team/channel IDs + reason code), written by
+    # services.audit.store.record_slack_event_rejected, never a request row.
+    SLACK_EVENT_REJECTED = "slack_event_rejected"

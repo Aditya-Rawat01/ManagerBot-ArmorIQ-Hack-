@@ -30,6 +30,7 @@ from typing import Any
 import armoriq_sdk
 from armoriq_sdk import ArmorIQClient, InvokeOptions
 from armoriq_sdk import exceptions as sdk_exceptions
+from armoriq_sdk.observability import ObservabilityConfig
 from armoriq_sdk.session import SessionOptions
 
 from services.authorization.ctx_envelope import CtxEnvelope, sign_ctx
@@ -186,6 +187,7 @@ class ArmorIQGateway:
         self._token_validity_s = int(getattr(settings, "token_validity_s", 1200))
         self._approval_timeout_ms = int(getattr(settings, "approval_timeout_ms", 900_000))
         self._agent_id = str(getattr(settings, "armoriq_agent_id", "proxylead"))
+        self._observability = getattr(settings, "armoriq_observability", False) is True
         self._member_clients = _MemberClients(client_factory or self._build_client)
 
     # -- identity ---------------------------------------------------------
@@ -324,15 +326,34 @@ class ArmorIQGateway:
             _email=email,
         )
 
+    def _session_options(self) -> SessionOptions:
+        """Options for the per-mint session.
+
+        The SDK's observability shipper is on by default and uploads spans
+        (plan goal text included) to ArmorIQ from a background thread, with a
+        blocking flush on ``close()``. An explicit ``enabled=False`` turns it
+        off whatever ``ARMORIQ_OBSERVABILITY`` says in the process
+        environment. ``None`` (opt-in) leaves the decision to the SDK.
+        """
+        return SessionOptions(
+            mode="proxy",
+            validity_seconds=self._token_validity_s,
+            llm="proxylead",
+            observability=None if self._observability else ObservabilityConfig(enabled=False),
+        )
+
     def _mint_token(self, client: Any, email: str, plan: PlanProposal, request_id: str) -> Any:
         """Blocking SDK section: one session, one plan, one mint (worker thread)."""
         scoped = client.for_user(email)
-        session = scoped.start_session(
-            SessionOptions(mode="proxy", validity_seconds=self._token_validity_s, llm="proxylead")
-        )
+        session = scoped.start_session(self._session_options())
         try:
+            # The SDK plan builder needs `<mcp>__<action>` names (a plan can
+            # span both endpoints, so no single default MCP fits). It splits
+            # them back into each step's (mcp, action); `invoke` then finds
+            # the step by that action.
             tool_calls = [
-                {"name": step.tool.value, "args": dict(step.arguments)} for step in plan.steps
+                {"name": f"{step.mcp.value}__{step.tool.value}", "args": dict(step.arguments)}
+                for step in plan.steps
             ]
             return session.start_plan(tool_calls, goal=plan.summary[:500])
         finally:

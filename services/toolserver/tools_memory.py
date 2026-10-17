@@ -446,7 +446,7 @@ def _insert_note(
     provenance: dict[str, Any],
 ) -> tuple[int, int]:
     """One draft row: `review_status='draft'`, `version=1`, `tier='team'`
-    (D-10, CHECK-enforced by migration 0012). No chunk/embedding — drafts
+    (D-10, CHECK-enforced by migration 0013). No chunk/embedding — drafts
     are never searchable (D-09 rule 2)."""
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     with db.transaction(pool) as conn, conn.cursor() as cur:

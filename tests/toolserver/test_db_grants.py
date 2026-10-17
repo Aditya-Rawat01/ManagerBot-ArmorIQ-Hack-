@@ -173,3 +173,36 @@ def test_approved_views_toolserver_only(backend_conn, toolserver_conn, view: str
 def test_toolserver_can_select_knowledge_tables(toolserver_conn, table: str) -> None:
     query = f"SELECT 1 FROM public.{table} LIMIT 1"  # noqa: S608 -- table from module allowlist
     db.fetch_all(toolserver_conn, query)
+
+
+WORKSPACE_TABLES = ("tasks", "egress_sink")
+
+
+@NEEDS_DB
+@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+def test_backend_cannot_read_or_write_workspace_tables(backend_conn, table: str) -> None:
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.fetch_all(backend_conn, f"SELECT 1 FROM public.{table} LIMIT 1")  # noqa: S608
+    backend_conn.rollback()
+    assert db.fetch_one(
+        backend_conn, "SELECT has_table_privilege(%s, 'INSERT')", (f"public.{table}",)
+    ) == (False,)
+
+
+@NEEDS_DB
+@pytest.mark.parametrize("table", WORKSPACE_TABLES)
+def test_toolserver_workspace_tables_are_insert_only(toolserver_conn, table: str) -> None:
+    """0012: SELECT + INSERT (the P2-10 handlers' only statements), never
+    UPDATE or DELETE."""
+    db.fetch_all(toolserver_conn, f"SELECT 1 FROM public.{table} LIMIT 1")  # noqa: S608
+    assert db.fetch_one(
+        toolserver_conn, "SELECT has_table_privilege(%s, 'INSERT')", (f"public.{table}",)
+    ) == (True,)
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(
+            toolserver_conn,
+            f"UPDATE public.{table} SET workspace_id = workspace_id WHERE id = -1",  # noqa: S608
+        )
+    toolserver_conn.rollback()
+    with pytest.raises(errors.InsufficientPrivilege):
+        db.execute(toolserver_conn, f"DELETE FROM public.{table} WHERE id = -1")  # noqa: S608
