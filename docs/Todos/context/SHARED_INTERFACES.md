@@ -145,7 +145,8 @@ the MCP `CallToolResult` (the JSON-RPC `result`, as `MCPInvocationResult.result`
 {"content": [{"type": "text", "text": "{\"code\": \"<§4 code>\", \"message\": \"<fixed text>\"}"}],
  "isError": true,
  "_meta": {"ledger_entry_id": "<id>"}}      // only when THIS call has its own row:
-                                             // invalid_arguments / out_of_scope
+                                             // invalid_arguments / out_of_scope /
+                                             // precondition_failed
                                              // (rejected_by_tool_server) or a handler
                                              // failure (code internal, execution_status=error)
 // replay: "_meta": {"original_entry_id": "<id>"} when the original call's row exists
@@ -193,7 +194,17 @@ why nothing was found.
   recorded rejection, dispatch step 1.2): a NUL character in any string
   argument (PostgreSQL text cannot hold it; never a driver `internal`), and
   each tool's own argument policy (`read_source_*`: a foreign `view`,
-  `include_superseded=true`; §7).
+  `include_superseded=true`; §7; P2-09: a `record_id` /
+  `superseded_by_record_id` that is not `^[1-9][0-9]{0,18}$`, or a record
+  superseding itself).
+- `precondition_failed` (P2-09 confirm / supersede) is a recorded rejection
+  with its own row (`rejected_by_tool_server`, `_meta.ledger_entry_id`), like
+  `invalid_arguments` / `out_of_scope`. It carries ONE fixed message for every
+  unmet state (missing record, another workspace, stale version, already
+  confirmed or superseded, replacement not the current authoritative record,
+  note changed while being confirmed). A per-condition message is not
+  required and must not be added: the response never reveals which condition
+  failed (to non-managers or anyone); the reason stays in server code only.
 - `tools/list` advertises the enforced argument model (`model_json_schema()`:
   limits, `additionalProperties: false`) plus `patternProperties: {"^_": {}}`,
   so `_ctx` and the SDK's `_policy_context` are admitted but never declared (D-05).

@@ -49,6 +49,7 @@ from .test_tool_dispatch import (
     live_client,
     live_write_dsn,
     make_ctx,
+    result_meta,
     result_text,
 )
 
@@ -1244,6 +1245,50 @@ def test_role_check_runs_before_any_sql(
     assert [e.execution_status.value for e in ledger.entries.values()] == [
         "rejected_by_tool_server"
     ]
+
+
+def test_precondition_failures_share_one_body_with_their_own_row_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SHARED_INTERFACES §4 (review M4): every unmet state — missing record,
+    stale version, already authoritative, superseded, draft replacement — is
+    the SAME `precondition_failed` text (which condition failed is never
+    revealed), and each call has its own `rejected_by_tool_server` row in
+    `_meta.ledger_entry_id`."""
+    pool = RecordingPool(
+        [
+            note(5, version=2),
+            note(6, review_status="authoritative"),
+            note(7, superseded_by_id=6),
+            note(8),
+        ]
+    )
+    install_embedder(monkeypatch, pool)
+    ledger = FakeLedger()
+    with recording_client(monkeypatch, pool, ledger) as client:
+        messages = [
+            confirm(client, "99", 1),  # missing
+            confirm(client, "5", 1),  # stale version
+            confirm(client, "6", 1),  # already authoritative
+            confirm(client, "7", 1),  # superseded draft
+            supersede(client, "6", 1, "8"),  # replacement is a draft
+        ]
+    bodies = {message["result"]["content"][0]["text"] for message in messages}
+    assert bodies == {
+        json.dumps(
+            {
+                "code": "precondition_failed",
+                "message": "The call was rejected: a version precondition failed.",
+            }
+        )
+    }
+    entry_ids = [result_meta(message)["ledger_entry_id"] for message in messages]
+    assert len(set(entry_ids)) == len(messages)
+    rows = [ledger.entries[int(entry_id)] for entry_id in entry_ids]
+    assert {(row.validation_outcome, row.execution_status.value) for row in rows} == {
+        ("precondition_failed", "rejected_by_tool_server")
+    }
+    assert pool.writes() == []
 
 
 @pytest.mark.parametrize(("stored", "asked"), [(2, 1), (1, 2)])
