@@ -1,0 +1,112 @@
+# ProxyLead ArmorIQ policy (P1-08, Arch §5.5, PRD §5.1/§5.3).
+#
+# PLACEHOLDERS ONLY (D-26 / ADR-022): this repository is public.
+#   <MAYA_EMAIL>, <SAM_EMAIL>, <PRIYA_EMAIL>  exact LOWERCASE ArmorIQ member e-mails
+#                                             (the PERSONA_*_EMAIL values)
+#   <registered proxylead agent id>           the console ID of agent `proxylead`
+# Substitute real values only OUTSIDE the repository (a copy in your home
+# directory, or directly in the console). Never commit the substituted file.
+# Steps: policy/CONSOLE_STEPS.md. Schema caveats: policy/README.md.
+#
+# Template status: this is the Arch §5.5 template, NOT proof that the live
+# console accepts it. E5 (scripts/check_setup.py, scripts/probe_v2_e5_setup.py)
+# and E3 (scripts/probe_v2_e3_per_user.py) decide that; record any console
+# rejection verbatim in docs/EXPERIMENTS.md §E5 and adjust only to the verified
+# schema.
+#
+# Tool names: bare MCP action names, exactly as `tools/list` returns them and as
+# the console's tool dropdowns show them after the scan (memory-mcp: 12 tools,
+# workspace-mcp: 2). The SDK plan uses `<mcp>__<action>` (for example
+# `memory-mcp__knowledge_search_team`) internally but invokes the proxy with
+# (mcp, action); see policy/README.md "Tool-name representation" if the
+# console requires the qualified form.
+#
+# Outcome matrix (PRD §5.1 + honeypot, ADR-024/025):
+#   tool family              Maya    Sam                     Priya
+#   *_team (search/get/read) ALLOW   ALLOW                   ALLOW
+#   *_confidential           ALLOW   HOLD (approver: Maya)   BLOCK
+#   *_restricted             ALLOW   BLOCK                   BLOCK
+#   knowledge_save_team_note ALLOW   ALLOW                   ALLOW   (drafts only, non-authoritative)
+#   knowledge_confirm_maya_decision, knowledge_mark_superseded
+#                            ALLOW   BLOCK                   BLOCK   (Maya-only)
+#   create_followup_task     ALLOW   ALLOW                   ALLOW   (ships: D-17 / ADR-024)
+#   send_external_message    BLOCK   BLOCK                   BLOCK   (honeypot, every persona)
+#
+# HOLD approver: ArmorIQ routes a HOLD to a member with a higher-ranked role
+# than the requester and forbids self-approval (docs: Plans Governance). Maya's
+# account must be Org Admin and Sam's an Analyst; the schema has no approver
+# field, so "approver: Maya" is a console-role fact, not a policy key.
+
+apiVersion: armor.io/v1
+kind: Policy
+metadata:
+  name: proxylead-team-authority
+  targetType: agent
+  targetId: "<registered proxylead agent id>"
+spec:
+  priority: 100
+  status: active
+  defaultEnforcementAction: block
+  memberRules:
+    "<MAYA_EMAIL>":
+      allowedTools:
+        - knowledge_search_team
+        - knowledge_search_confidential
+        - knowledge_search_restricted
+        - knowledge_get_source_team
+        - knowledge_get_source_confidential
+        - knowledge_get_source_restricted
+        - read_source_team
+        - read_source_confidential
+        - read_source_restricted
+        - knowledge_save_team_note
+        - knowledge_confirm_maya_decision
+        - knowledge_mark_superseded
+        - create_followup_task
+      enforcementAction: allow_log
+      toolEnforcement:
+        send_external_message: block
+    "<SAM_EMAIL>":
+      # Held tools are listed in allowedTools AND toolEnforcement (template
+      # form). Whether the console requires both is an E5 question (README).
+      allowedTools:
+        - knowledge_search_team
+        - knowledge_search_confidential
+        - knowledge_get_source_team
+        - knowledge_get_source_confidential
+        - read_source_team
+        - read_source_confidential
+        - knowledge_save_team_note
+        - create_followup_task
+      enforcementAction: allow_log
+      toolEnforcement:
+        send_external_message: block
+        knowledge_search_confidential: hold
+        knowledge_get_source_confidential: hold
+        read_source_confidential: hold
+        knowledge_search_restricted: block
+        knowledge_get_source_restricted: block
+        read_source_restricted: block
+        knowledge_confirm_maya_decision: block
+        knowledge_mark_superseded: block
+    "<PRIYA_EMAIL>":
+      allowedTools:
+        - knowledge_search_team
+        - knowledge_get_source_team
+        - read_source_team
+        - knowledge_save_team_note
+        - create_followup_task
+      enforcementAction: allow_log
+      toolEnforcement:
+        send_external_message: block
+        knowledge_search_confidential: block
+        knowledge_get_source_confidential: block
+        read_source_confidential: block
+        knowledge_search_restricted: block
+        knowledge_get_source_restricted: block
+        read_source_restricted: block
+        knowledge_confirm_maya_decision: block
+        knowledge_mark_superseded: block
+    "*":
+      allowedTools: []
+      enforcementAction: block
