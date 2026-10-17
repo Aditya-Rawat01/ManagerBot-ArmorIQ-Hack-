@@ -69,8 +69,16 @@ class FakeArmorIQGateway:
         )
 
     async def invoke_step(
-        self, handle: PlanHandle, step_index: int, ctx: RequestContext, plan: PlanProposal
+        self,
+        handle: PlanHandle,
+        step_index: int,
+        ctx: RequestContext,
+        plan: PlanProposal,
+        *,
+        on_hold: Any = None,
     ) -> StepOutcome:
+        # `on_hold` (P3-04) is accepted for signature parity and ignored: this
+        # double returns a HOLD as a pending outcome instead of waiting.
         step = plan.steps[step_index]
         self.calls.append(("invoke_step", step.tool.value))
         outcome = self.script.get(step.tool.value, self.default)

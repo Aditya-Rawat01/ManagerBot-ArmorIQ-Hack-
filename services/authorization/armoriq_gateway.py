@@ -128,6 +128,11 @@ class StepOutcome:
 # behind this narrow protocol. This module never redefines the envelope.
 CtxSigner = Callable[[Mapping[str, Any], str], str]
 
+# P3-04: told about each SDK hold (a ``pending`` ApprovalStatus) while the SDK
+# is still waiting, so the orchestrator can record the HOLD and DM Maya
+# before the console decision. Called on the SDK worker thread.
+HoldObserver = Callable[[ApprovalStatus], None]
+
 
 def sign_ctx_fields(fields: Mapping[str, Any], secret: str) -> str:
     """Default signer: P1-04 ``sign_ctx`` (``iat``/``exp`` as epoch seconds)."""
@@ -367,9 +372,27 @@ class ArmorIQGateway:
     # -- steps ------------------------------------------------------------
 
     async def invoke_step(
-        self, handle: PlanHandle, step_index: int, ctx: RequestContext, plan: PlanProposal
+        self,
+        handle: PlanHandle,
+        step_index: int,
+        ctx: RequestContext,
+        plan: PlanProposal,
+        *,
+        on_hold: HoldObserver | None = None,
     ) -> StepOutcome:
-        """Invoke one planned step under the handle's plan and token."""
+        """Invoke one planned step under the handle's plan and token.
+
+        The step's arguments are read from ``plan`` (the validated, stored
+        plan): ArmorIQ binds tool names, not argument values (E2), so callers
+        must pass the exact plan object they validated and minted.
+
+        ``on_hold`` (P3-04) is called once per SDK hold, with a ``pending``
+        :class:`ApprovalStatus`, while the SDK is still waiting for the
+        console decision. It runs on the SDK worker thread: it must be quick,
+        thread-safe and never raise (an exception is logged by class and
+        ignored; it can never turn a HOLD into an approval). The returned
+        :class:`StepOutcome` still carries the resolved decision.
+        """
         if handle.decision is not None:
             return StepOutcome(decision=handle.decision)
         if step_index < 0 or step_index >= handle.step_count:
@@ -422,10 +445,18 @@ class ArmorIQGateway:
                     "unverified", DecisionSource.UNKNOWN, "client unavailable", handle
                 )
             )
+        observer = self._hold_observer(handle, ctx, step, on_hold) if on_hold else None
         async with lock:
             try:
                 result, holds = await asyncio.to_thread(
-                    self._invoke_policy, client, step, token, arguments, handle._email or "", jti
+                    self._invoke_policy,
+                    client,
+                    step,
+                    token,
+                    arguments,
+                    handle._email or "",
+                    jti,
+                    observer,
                 )
             except sdk_exceptions.PolicyBlockedException as exc:
                 return self._blocked(handle, ctx, step, jti, exc)
@@ -494,19 +525,60 @@ class ArmorIQGateway:
                 )
         return self._map_success(handle, ctx, step, jti, result, holds)
 
+    def _hold_observer(
+        self, handle: PlanHandle, ctx: RequestContext, step: Any, on_hold: HoldObserver
+    ) -> Callable[[Any, datetime], None]:
+        """Adapt the SDK's ``HoldInfo`` to a pending ``ApprovalStatus`` for ``on_hold``.
+
+        Never raises: a shape that does not validate, or an observer error, is
+        logged by exception class and dropped (the hold itself is unaffected).
+        """
+
+        def _observe(hold: Any, observed_at: datetime) -> None:
+            try:
+                approval = ApprovalStatus(
+                    request_id=ctx.request_id,
+                    plan_id=handle.plan_id,
+                    step_index=step.step_index,
+                    tool=step.tool,
+                    state=ApprovalState.PENDING,
+                    delegation_id=getattr(hold, "delegation_id", None) or None,
+                    requested_at=observed_at,
+                )
+                on_hold(approval)
+            except Exception as exc:
+                logger.warning(
+                    "gateway hold observer failed request_id=%s step=%d err=%s",
+                    ctx.request_id,
+                    step.step_index,
+                    type(exc).__name__,
+                )
+
+        return _observe
+
     def _invoke_policy(
-        self, client: Any, step: Any, token: Any, arguments: dict[str, Any], email: str, jti: str
+        self,
+        client: Any,
+        step: Any,
+        token: Any,
+        arguments: dict[str, Any],
+        email: str,
+        jti: str,
+        observer: Callable[[Any, datetime], None] | None = None,
     ) -> tuple[Any, list[tuple[Any, datetime]]]:
         """Blocking SDK section (worker thread, never the event loop).
 
         Returns ``(result, holds)`` where ``holds`` records every ``on_hold``
         callback firing as ``(HoldInfo, observed_at)``. The list is local to
         this call, so concurrent requests never share hold state.
+        ``observer`` (from :meth:`_hold_observer`) learns of each hold while
+        the SDK is still waiting.
         """
         seen: list[tuple[Any, datetime]] = []
 
         def _on_hold(hold: Any) -> None:
-            seen.append((hold, _now()))
+            observed_at = _now()
+            seen.append((hold, observed_at))
             logger.info(
                 "gateway hold mcp=%s tool=%s jti=%s delegation_id=%s",
                 step.mcp.value,
@@ -514,6 +586,8 @@ class ArmorIQGateway:
                 jti,
                 getattr(hold, "delegation_id", None),
             )
+            if observer is not None:
+                observer(hold, observed_at)
 
         result = client.invoke_with_policy(
             step.mcp.value,
